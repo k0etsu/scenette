@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+*.log
+
+# CDK
+infra/cdk.out/
+infra/.cdk.staging/
+*.cdk.staging/
+cdk.out/
+
+# env / secrets — never commit real values
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

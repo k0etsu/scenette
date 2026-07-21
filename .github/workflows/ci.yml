@@ -1,0 +1,32 @@
+name: CI
+
+# Runs on every push and PR, including from forks. Deliberately requests no
+# permissions and touches no secrets/OIDC — safe to run untrusted PR code
+# against, since it only builds/lints/synths and never deploys.
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: CDK synth (no deploy)
+        working-directory: infra
+        run: npx cdk synth --all

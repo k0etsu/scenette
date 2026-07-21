@@ -1,0 +1,40 @@
+name: Deploy (prod)
+
+# Deploys Scenette-prod only on merge to main. The prod IAM role's OIDC trust
+# policy is scoped to `repo:<owner>/scenette:ref:refs/heads/main` specifically
+# (narrower than the dev role), so even a compromised dev-deploy credential
+# can't reach prod, and no branch other than main can ever assume this role.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN_PROD }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: cdk deploy Scenette-prod
+        working-directory: infra
+        run: npx cdk deploy Scenette-prod --require-approval never

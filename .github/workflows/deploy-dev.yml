@@ -1,0 +1,41 @@
+name: Deploy (dev)
+
+# Deploys the Scenette-dev stack on every push to a non-main branch (and on
+# PRs from within this repo). The IAM role's OIDC trust policy is scoped to
+# `repo:<owner>/scenette:*`, so a forked PR's OIDC token (which carries the
+# fork's own repo claim) cannot assume this role — no secrets needed to keep
+# forks out, the trust policy itself does it.
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN_DEV }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: cdk deploy Scenette-dev
+        working-directory: infra
+        run: npx cdk deploy Scenette-dev --require-approval never
