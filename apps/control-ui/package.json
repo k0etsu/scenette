@@ -1,6 +1,7 @@
 {
   "name": "@scenette/control-ui",
   "private": true,
+  "license": "AGPL-3.0-only",
   "version": "0.1.0",
   "scripts": {
     "build": "echo 'TODO: control-ui not yet scaffolded' && exit 0"

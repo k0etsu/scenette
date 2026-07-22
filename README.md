@@ -1,12 +1,14 @@
 # scenette
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
+
 A self-hosted, streamer-collaborative canvas overlay tool. Drag images/gifs/videos/audio/text onto a shared canvas; whatever intersects the fixed viewport rectangle goes live in an OBS browser source, in real time, for every trusted collaborator (streamer + invited mods).
 
 Built as an open-source, AWS-hosted alternative to overlay tools that are moving behind a paywall.
 
 ## Status
 
-Early scaffold — infrastructure and CI/CD are being stood up before feature code. See `docs/plan.md`-equivalent design notes below for the full architecture.
+Early scaffold — infrastructure and CI/CD are being stood up before feature code. See `docs/` for architecture and setup notes.
 
 ## Repo layout
 
@@ -36,3 +38,7 @@ Required one-time AWS setup (not automated, done directly in the console/CLI onc
 3. Provision OAuth app secrets (Twitch/YouTube/Discord client secrets) directly in AWS Secrets Manager per environment — never in GitHub, never in CDK code. CDK only references the secret name/ARN.
 
 See `.env.example` for the runtime configuration each Lambda expects.
+
+## License
+
+AGPLv3 (see [LICENSE](LICENSE)). Chosen deliberately over plain GPLv3: since scenette is a hosted service rather than locally-run software, AGPLv3's network-use clause requires anyone who runs a modified version as their own service to make that modified source available too — not just people who redistribute copies of the code itself.
