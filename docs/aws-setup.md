@@ -42,11 +42,9 @@ from any branch:
 aws iam create-role \
   --role-name scenette-dev-deploy \
   --assume-role-policy-document file://trust-dev.json
-
-aws iam attach-role-policy \
-  --role-name scenette-dev-deploy \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess  # TODO: replace with a scoped CDK deploy policy once the stack stabilizes
 ```
+
+Then grant it permission to assume the CDK bootstrap roles (see step 3.5 below) — **not** a broad managed policy like `AdministratorAccess`.
 
 ## 3. Create the prod deploy role — scoped to `main` only
 
@@ -78,18 +76,59 @@ credentials can do:
 aws iam create-role \
   --role-name scenette-prod-deploy \
   --assume-role-policy-document file://trust-prod.json
-
-aws iam attach-role-policy \
-  --role-name scenette-prod-deploy \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess  # TODO: same as above — scope down before real users depend on prod
 ```
 
-**Note:** `AdministratorAccess` is a placeholder to unblock the first `cdk
-deploy`. Before this handles real traffic, replace it with a policy scoped to
-exactly what CDK needs to manage this stack's resource types (CloudFormation,
-Lambda, DynamoDB, S3, CloudFront, API Gateway, EventBridge, IAM
-PassRole/CreateRole limited to this stack's Lambda execution roles, and
-Secrets Manager read-only on `scenette/<env>/oauth/*`).
+## 3.5. Bootstrap CDK, then grant the deploy roles permission to assume the bootstrap roles
+
+Run once per account/region, from an admin-privileged session (root, or an
+admin IAM user/role — **not** the day-to-day `scenette-dev-deploy`/CI identity):
+
+```bash
+cd infra
+npx cdk bootstrap aws://<ACCOUNT_ID>/<REGION>
+```
+
+This creates the `CDKToolkit` CloudFormation stack: a small, purpose-built set
+of IAM roles (`cdk-hnb659fds-deploy-role-*`, `-file-publishing-role-*`,
+`-image-publishing-role-*`, `-lookup-role-*`, `-cfn-exec-role-*`), an S3
+staging bucket, and an ECR repo for container assets. This is CDK's own
+standard bootstrap pattern — deliberately used **instead of** attaching
+`AdministratorAccess` directly to the GitHub-facing roles.
+
+Then grant `scenette-dev-deploy` and `scenette-prod-deploy` permission to
+assume the two bootstrap roles the CDK CLI actually needs at deploy/synth time
+(the CLI internally chains from `deploy-role` to `file-publishing-role` /
+`image-publishing-role` / `cfn-exec-role` as needed — those don't need to be
+listed here, only the two the calling identity assumes directly):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:aws:iam::<ACCOUNT_ID>:role/cdk-hnb659fds-deploy-role-<ACCOUNT_ID>-<REGION>",
+        "arn:aws:iam::<ACCOUNT_ID>:role/cdk-hnb659fds-lookup-role-<ACCOUNT_ID>-<REGION>"
+      ]
+    }
+  ]
+}
+```
+
+```bash
+aws iam put-role-policy --role-name scenette-dev-deploy \
+  --policy-name assume-cdk-bootstrap-roles --policy-document file://assume-cdk-dev.json
+aws iam put-role-policy --role-name scenette-prod-deploy \
+  --policy-name assume-cdk-bootstrap-roles --policy-document file://assume-cdk-prod.json
+```
+
+Result: neither GitHub-facing role has any direct permissions over your
+account. They can only assume the CDK deploy/lookup roles, whose own
+permissions (broad, by necessity — CloudFormation needs to manage arbitrary
+resource types to deploy a stack) are themselves confined to what `cdk
+bootstrap` wires up, not anything CI can expand on its own.
 
 ## 4. Store the role ARNs as GitHub Actions repo **variables** (not secrets)
 
