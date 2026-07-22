@@ -41,4 +41,4 @@ See `.env.example` for the runtime configuration each Lambda expects.
 
 ## License
 
-AGPLv3 (see [LICENSE](LICENSE)). Chosen deliberately over plain GPLv3: since scenette is a hosted service rather than locally-run software, AGPLv3's network-use clause requires anyone who runs a modified version as their own service to make that modified source available too — not just people who redistribute copies of the code itself.
+AGPLv3 (see [LICENSE](LICENSE)).
