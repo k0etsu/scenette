@@ -1,9 +1,10 @@
 name: Deploy (prod)
 
 # Deploys Scenette-prod only on merge to main. The prod IAM role's OIDC trust
-# policy is scoped to `repo:<owner>/scenette:ref:refs/heads/main` specifically
-# (narrower than the dev role), so even a compromised dev-deploy credential
-# can't reach prod, and no branch other than main can ever assume this role.
+# policy is scoped to this repo's `environment:prod` subject claim, and the
+# "prod" GitHub Environment has a deployment branch policy restricting it to
+# `main` only — so even a compromised dev-deploy credential can't reach prod,
+# and no branch other than main can ever obtain a token for this role.
 on:
   push:
     branches: [main]

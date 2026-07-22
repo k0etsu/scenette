@@ -2,9 +2,9 @@ name: Deploy (dev)
 
 # Deploys the Scenette-dev stack on every push to a non-main branch (and on
 # PRs from within this repo). The IAM role's OIDC trust policy is scoped to
-# `repo:<owner>/scenette:*`, so a forked PR's OIDC token (which carries the
-# fork's own repo claim) cannot assume this role — no secrets needed to keep
-# forks out, the trust policy itself does it.
+# this repo's (immutable-ID) subject claim, so a forked PR's OIDC token
+# (which carries the fork's own repo claim) cannot assume this role — no
+# secrets needed to keep forks out, the trust policy itself does it.
 on:
   push:
     branches-ignore: [main]
@@ -29,11 +29,6 @@ jobs:
 
       - name: Build
         run: npm run build
-
-      - name: Debug OIDC token claims
-        run: |
-          TOKEN=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
-          echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq . || echo "$TOKEN" | cut -d. -f2 | base64 -d
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
