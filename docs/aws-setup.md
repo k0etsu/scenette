@@ -17,6 +17,16 @@ aws iam create-open-id-connect-provider \
 
 ## 2. Create the dev deploy role
 
+**Important — GitHub's `sub` claim format varies per account/repo.** Some
+repos (this one included) get immutable owner/repo IDs baked into the
+subject claim — `repo:<owner>@<owner_id>/<repo>@<repo_id>:...` — instead of
+the plain `repo:<owner>/<repo>:...` form shown in GitHub's own docs. Don't
+assume the plain form works; add a temporary debug step to the workflow that
+decodes and prints the token before writing the trust policy (see "Verifying
+the actual sub claim" below), then match what it actually prints. The
+immutable-ID form is arguably better anyway — it keeps working across future
+repo renames instead of needing the trust policy updated each time.
+
 Trust policy (`trust-dev.json`) — allows any branch/PR/workflow *within this
 repo* to assume the role, since dev is meant to be low-friction to deploy to
 from any branch:
@@ -31,7 +41,7 @@ from any branch:
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
         "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-        "StringLike": { "token.actions.githubusercontent.com:sub": "repo:<owner>/scenette:*" }
+        "StringLike": { "token.actions.githubusercontent.com:sub": "repo:<owner>[@<owner_id>]/<repo>[@<repo_id>]:*" }
       }
     }
   ]
@@ -46,12 +56,22 @@ aws iam create-role \
 
 Then grant it permission to assume the CDK bootstrap roles (see step 3.5 below) — **not** a broad managed policy like `AdministratorAccess`.
 
-## 3. Create the prod deploy role — scoped to `main` only
+## 3. Create the prod deploy role — scoped to the `prod` environment + a branch policy
 
-Trust policy (`trust-prod.json`) differs from dev in one line: the `sub`
-condition is pinned to `refs/heads/main` specifically, so no other branch, PR,
-or fork can ever assume this role, regardless of what the dev role's
-credentials can do:
+If the deploy job specifies `environment: prod` (recommended — it's what lets
+you add required reviewers/wait timers on prod later), the `sub` claim
+becomes `...:environment:prod` **instead of** a ref-based claim — the
+environment name replaces the branch/ref info in the subject entirely. That
+means scoping the trust policy to `ref:refs/heads/main` silently never
+matches once a job declares an environment. Instead:
+
+1. Scope the trust policy's `sub` condition to `...:environment:prod`.
+2. Separately restrict *which branches can even reach that environment* using
+   GitHub's own **deployment branch policy** on the `prod` environment
+   (Settings → Environments → prod → Deployment branches → restrict to
+   `main`). GitHub enforces this before the job's steps run at all, so it's
+   not just a cosmetic restriction — a workflow run on any other branch never
+   gets far enough to request an OIDC token for this environment.
 
 ```json
 {
@@ -64,7 +84,7 @@ credentials can do:
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:<owner>/scenette:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub": "repo:<owner>[@<owner_id>]/<repo>[@<repo_id>]:environment:prod"
         }
       }
     }
@@ -76,6 +96,26 @@ credentials can do:
 aws iam create-role \
   --role-name scenette-prod-deploy \
   --assume-role-policy-document file://trust-prod.json
+
+# Restrict the prod environment to the main branch only:
+gh api -X PUT repos/<owner>/scenette/environments/prod \
+  -F "deployment_branch_policy[protected_branches]=false" \
+  -F "deployment_branch_policy[custom_branch_policies]=true"
+gh api -X POST repos/<owner>/scenette/environments/prod/deployment-branch-policies \
+  -f "name=main"
+```
+
+### Verifying the actual `sub` claim
+
+Add this as a temporary step in the workflow (before the AWS credentials
+step), push, read the logs, then delete it — it's how the immutable-ID format
+above was discovered in the first place:
+
+```yaml
+- name: Debug OIDC token claims
+  run: |
+    TOKEN=$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+    echo "$TOKEN" | cut -d. -f2 | base64 -d | jq .
 ```
 
 ## 3.5. Bootstrap CDK, then grant the deploy roles permission to assume the bootstrap roles
@@ -96,10 +136,16 @@ standard bootstrap pattern — deliberately used **instead of** attaching
 `AdministratorAccess` directly to the GitHub-facing roles.
 
 Then grant `scenette-dev-deploy` and `scenette-prod-deploy` permission to
-assume the two bootstrap roles the CDK CLI actually needs at deploy/synth time
-(the CLI internally chains from `deploy-role` to `file-publishing-role` /
-`image-publishing-role` / `cfn-exec-role` as needed — those don't need to be
-listed here, only the two the calling identity assumes directly):
+assume the bootstrap roles the CDK CLI assumes **directly** at deploy/synth
+time. This is *not* a single chain through `deploy-role` — the CLI assumes
+`deploy-role` (for the actual CloudFormation deploy, which itself invokes
+`cfn-exec-role`), `lookup-role` (for context lookups like AZs), and
+`file-publishing-role`/`image-publishing-role` (for uploading Lambda
+code/template assets and container images) all independently. Missing any of
+these produces a confusing failure — e.g. omitting `file-publishing-role`
+fails asset publishing with `Bucket named '...' exists, but we dont have
+access to it`, which reads like a bucket ownership problem but is actually
+a missing AssumeRole permission:
 
 ```json
 {
@@ -110,7 +156,9 @@ listed here, only the two the calling identity assumes directly):
       "Action": "sts:AssumeRole",
       "Resource": [
         "arn:aws:iam::<ACCOUNT_ID>:role/cdk-hnb659fds-deploy-role-<ACCOUNT_ID>-<REGION>",
-        "arn:aws:iam::<ACCOUNT_ID>:role/cdk-hnb659fds-lookup-role-<ACCOUNT_ID>-<REGION>"
+        "arn:aws:iam::<ACCOUNT_ID>:role/cdk-hnb659fds-lookup-role-<ACCOUNT_ID>-<REGION>",
+        "arn:aws:iam::<ACCOUNT_ID>:role/cdk-hnb659fds-file-publishing-role-<ACCOUNT_ID>-<REGION>",
+        "arn:aws:iam::<ACCOUNT_ID>:role/cdk-hnb659fds-image-publishing-role-<ACCOUNT_ID>-<REGION>"
       ]
     }
   ]
