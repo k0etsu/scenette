@@ -42,10 +42,9 @@ export class ScenetteStack extends cdk.Stack {
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
     });
 
-    const roomStateTable = new dynamodb.Table(this, "RoomStateTable", {
-      tableName: `scenette-${envName}-room-state`,
+    const roomsTable = new dynamodb.Table(this, "RoomsTable", {
+      tableName: `scenette-${envName}-rooms`,
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
-      sortKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy,
     });
@@ -65,15 +64,15 @@ export class ScenetteStack extends cdk.Stack {
       removalPolicy,
     });
 
+    // One item per placed asset: roomId+assetId as the key covers both the
+    // "all assets in a room" access pattern (used by message.ts to build a
+    // snapshot) and the "get one asset" pattern (move/delete) — no GSI needed.
     const assetsTable = new dynamodb.Table(this, "AssetsTable", {
       tableName: `scenette-${envName}-assets`,
-      partitionKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy,
-    });
-    assetsTable.addGlobalSecondaryIndex({
-      indexName: "byRoom",
-      partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
     });
 
     // ---- Media storage (S3 + CloudFront) ----
@@ -118,9 +117,15 @@ export class ScenetteStack extends cdk.Stack {
     const messageFn = new lambdaNode.NodejsFunction(this, "MessageFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/message.ts"),
       runtime: lambda.Runtime.NODEJS_20_X,
-      environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
+      environment: {
+        CONNECTIONS_TABLE: connectionsTable.tableName,
+        ASSETS_TABLE: assetsTable.tableName,
+        ROOMS_TABLE: roomsTable.tableName,
+      },
     });
     connectionsTable.grantReadWriteData(messageFn);
+    assetsTable.grantReadWriteData(messageFn);
+    roomsTable.grantReadWriteData(messageFn);
 
     const webSocketApi = new apigwv2.WebSocketApi(this, "WebSocketApi", {
       apiName: `scenette-${envName}`,

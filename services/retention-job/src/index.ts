@@ -35,11 +35,17 @@ export const handler = async (): Promise<void> => {
       const staleUnused = neverUsed && now - uploadedAt > NEVER_USED_WINDOW_MS;
 
       if (staleUnused || staleUsed) {
-        await s3.send(
-          new DeleteObjectCommand({ Bucket: ASSETS_BUCKET, Key: asset.s3Key })
-        );
+        // Text assets carry inline content, not an S3 object — nothing to delete there.
+        if (asset.s3Key) {
+          await s3.send(
+            new DeleteObjectCommand({ Bucket: ASSETS_BUCKET, Key: asset.s3Key })
+          );
+        }
         await ddb.send(
-          new DeleteCommand({ TableName: ASSETS_TABLE, Key: { assetId: asset.assetId } })
+          new DeleteCommand({
+            TableName: ASSETS_TABLE,
+            Key: { roomId: asset.roomId, assetId: asset.assetId },
+          })
         );
       }
     }
