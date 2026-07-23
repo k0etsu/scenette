@@ -365,6 +365,15 @@ export class ScenetteStack extends cdk.Stack {
     // manual query params, since those values are only known once this
     // stack's own WebSocket/HTTP APIs exist (i.e. right here, at deploy
     // time), not at the app's build time.
+    //
+    // cacheControl: without this, S3 sends no caching header at all, which
+    // browsers still cache heuristically — a tab left open (or even just
+    // reopened) across a deploy can keep running the previous main.js
+    // indefinitely with no visible sign anything's stale. "no-cache" forces
+    // a revalidation request on every load rather than disabling caching
+    // outright, so a deploy takes effect on next visit without needing a
+    // manual hard refresh.
+    const noCache = [s3deploy.CacheControl.noCache(), s3deploy.CacheControl.mustRevalidate()];
     new s3deploy.BucketDeployment(this, "ControlUiDeployment", {
       sources: [
         s3deploy.Source.asset(path.join(__dirname, "../../apps/control-ui/dist")),
@@ -376,6 +385,7 @@ export class ScenetteStack extends cdk.Stack {
       destinationBucket: controlUiBucket,
       distribution: controlUiDistribution,
       distributionPaths: ["/*"],
+      cacheControl: noCache,
     });
 
     const browserSourceBucket = new s3.Bucket(this, "BrowserSourceBucket", {
@@ -400,6 +410,7 @@ export class ScenetteStack extends cdk.Stack {
       destinationBucket: browserSourceBucket,
       distribution: browserSourceDistribution,
       distributionPaths: ["/*"],
+      cacheControl: noCache,
     });
 
     for (const [id, domain, distribution] of [

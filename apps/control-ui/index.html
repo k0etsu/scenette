@@ -82,6 +82,10 @@
         font-size: 13px;
         min-height: 16px;
       }
+      #login-hint {
+        color: #888;
+        font-size: 12px;
+      }
       #app-view {
         display: none;
         height: 100%;
@@ -91,8 +95,9 @@
   <body>
     <div id="login-view">
       <form id="login-form">
-        <input id="login-username" type="text" placeholder="Username" autocomplete="username" />
-        <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" />
+        <input id="login-username" type="text" placeholder="Username" autocomplete="username" minlength="3" />
+        <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" minlength="8" />
+        <div id="login-hint">Registering requires a username of 3+ characters and a password of 8+ characters.</div>
         <div id="login-error"></div>
         <div class="buttons">
           <button id="login-button" type="submit">Log in</button>
