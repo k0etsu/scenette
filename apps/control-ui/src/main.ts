@@ -28,7 +28,7 @@ if (
 }
 
 async function main(): Promise<void> {
-  const { wsUrl, httpApiUrl } = await loadConfig();
+  const { wsUrl, httpApiUrl, assetsDomain } = await loadConfig();
 
   let session = await checkSession(httpApiUrl);
   if (!session) {
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
 
   loginView!.style.display = "none";
   appView!.style.display = "block";
-  startApp(wsUrl, httpApiUrl, session);
+  startApp(wsUrl, httpApiUrl, assetsDomain, session);
 }
 
 function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
@@ -65,7 +65,7 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
   });
 }
 
-function startApp(wsUrl: string, httpApiUrl: string, session: SessionInfo): void {
+function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, session: SessionInfo): void {
   const params = new URLSearchParams(window.location.search);
   const roomId = params.get("roomId") ?? session.personalRoomId;
 
@@ -79,14 +79,18 @@ function startApp(wsUrl: string, httpApiUrl: string, session: SessionInfo): void
 
   statusEl!.textContent = `room: ${roomId} (${session.username})`;
 
-  const canvas = new CanvasView(canvasContainer!, {
-    onAssetMove: (assetId, x, y) => {
-      connection.send({ action: "asset:move", roomId, assetId, x, y });
+  const canvas = new CanvasView(
+    canvasContainer!,
+    {
+      onAssetMove: (assetId, x, y) => {
+        connection.send({ action: "asset:move", roomId, assetId, x, y });
+      },
+      onAssetDelete: (assetId) => {
+        connection.send({ action: "asset:delete", roomId, assetId });
+      },
     },
-    onAssetDelete: (assetId) => {
-      connection.send({ action: "asset:delete", roomId, assetId });
-    },
-  });
+    assetsDomain
+  );
 
   const connection = new ResilientConnection({
     wsUrl,

@@ -31,7 +31,11 @@ export class CanvasView {
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true };
 
-  constructor(private readonly container: HTMLElement, private readonly callbacks: CanvasCallbacks) {
+  constructor(
+    private readonly container: HTMLElement,
+    private readonly callbacks: CanvasCallbacks,
+    private readonly assetsDomain: string
+  ) {
     this.world = document.createElement("div");
     this.world.style.position = "absolute";
     this.world.style.transformOrigin = "0 0";
@@ -116,13 +120,13 @@ export class CanvasView {
       case "image":
       case "gif": {
         const img = document.createElement("img");
-        if (asset.s3Key) img.src = mediaUrl(asset.s3Key);
+        if (asset.s3Key) img.src = this.mediaUrl(asset.s3Key);
         el = img;
         break;
       }
       case "video": {
         const video = document.createElement("video");
-        if (asset.s3Key) video.src = mediaUrl(asset.s3Key);
+        if (asset.s3Key) video.src = this.mediaUrl(asset.s3Key);
         video.controls = false;
         el = video;
         break;
@@ -220,10 +224,12 @@ export class CanvasView {
   private applyWorldTransform(): void {
     this.world.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.zoom})`;
   }
-}
 
-// TODO(v1): same as browser-source — needs the real CloudFront distribution
-// domain wired through once there's a deployed origin to point at.
-function mediaUrl(s3Key: string): string {
-  return `/${s3Key}`;
+  // Media lives in the assets bucket/distribution, a completely separate
+  // CloudFront distribution from the one serving this app itself — an
+  // earlier version of this pointed at "/" + s3Key (relative to control-ui's
+  // own origin), which 403'd since that bucket never had the object at all.
+  private mediaUrl(s3Key: string): string {
+    return `https://${this.assetsDomain}/${s3Key}`;
+  }
 }

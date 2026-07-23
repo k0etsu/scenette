@@ -13,16 +13,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  // wsUrl comes from the deployed infra's /config.json (baked in at deploy
-  // time, since it doesn't exist until this stack's own WebSocket API does)
-  // unless explicitly overridden via query param for local testing.
-  const wsUrl = params.get("wsUrl") ?? (await fetchConfiguredWsUrl());
-  if (!wsUrl) {
-    root!.textContent = "scenette browser source: missing wsUrl (no query param and /config.json unavailable)";
+  // wsUrl/assetsDomain come from the deployed infra's /config.json (baked in
+  // at deploy time, since neither exists until this stack's own WebSocket
+  // API / assets CloudFront distribution do) unless explicitly overridden
+  // via query params for local testing.
+  const config = await fetchConfig();
+  const wsUrl = params.get("wsUrl") ?? config?.wsUrl;
+  const assetsDomain = params.get("assetsDomain") ?? config?.assetsDomain;
+  if (!wsUrl || !assetsDomain) {
+    root!.textContent = "scenette browser source: missing wsUrl/assetsDomain (no query param and /config.json unavailable)";
     return;
   }
 
-  const renderer = new Renderer(root!);
+  const renderer = new Renderer(root!, assetsDomain);
 
   const connection = new ResilientConnection({
     wsUrl,
@@ -71,12 +74,11 @@ async function main(): Promise<void> {
   connection.start();
 }
 
-async function fetchConfiguredWsUrl(): Promise<string | undefined> {
+async function fetchConfig(): Promise<{ wsUrl?: string; assetsDomain?: string } | undefined> {
   try {
     const res = await fetch("/config.json");
     if (!res.ok) return undefined;
-    const config = (await res.json()) as { wsUrl?: string };
-    return config.wsUrl;
+    return await res.json();
   } catch {
     return undefined;
   }

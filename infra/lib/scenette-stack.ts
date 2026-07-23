@@ -380,6 +380,7 @@ export class ScenetteStack extends cdk.Stack {
         s3deploy.Source.jsonData("config.json", {
           wsUrl: webSocketStage.url,
           httpApiUrl: httpApi.apiEndpoint,
+          assetsDomain: assetsDistribution.distributionDomainName,
         }),
       ],
       destinationBucket: controlUiBucket,
@@ -405,7 +406,10 @@ export class ScenetteStack extends cdk.Stack {
     new s3deploy.BucketDeployment(this, "BrowserSourceDeployment", {
       sources: [
         s3deploy.Source.asset(path.join(__dirname, "../../apps/browser-source/dist")),
-        s3deploy.Source.jsonData("config.json", { wsUrl: webSocketStage.url }),
+        s3deploy.Source.jsonData("config.json", {
+          wsUrl: webSocketStage.url,
+          assetsDomain: assetsDistribution.distributionDomainName,
+        }),
       ],
       destinationBucket: browserSourceBucket,
       distribution: browserSourceDistribution,
