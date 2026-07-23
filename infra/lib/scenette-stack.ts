@@ -10,7 +10,17 @@ import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2Integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as route53Targets from "aws-cdk-lib/aws-route53-targets";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
+import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as path from "path";
+
+// hanzomon.co's Route 53 hosted zone — pinned by ID rather than looked up via
+// HostedZone.fromLookup so `cdk synth`/`diff` don't need a live AWS lookup
+// (and the extra IAM permissions/context caching that implies) on every run.
+const HANZOMON_ZONE_ID = "Z06216423KUWM1AVEX4OA";
+const HANZOMON_ZONE_NAME = "hanzomon.co";
 
 export interface ScenetteStackProps extends cdk.StackProps {
   envName: "dev" | "prod";
@@ -242,6 +252,82 @@ export class ScenetteStack extends cdk.Stack {
       targets: [new targets.LambdaFunction(retentionFn)],
     });
 
+    // ---- Frontend hosting (control-ui + browser-source, custom domains) ----
+    //
+    // control-ui owns the apex/entry point; browser-source gets its own
+    // subdomain. Per-room uniqueness is handled entirely by query params on
+    // that one browser-source URL (?roomId=...&wsUrl=...) — there's no
+    // per-room subdomain/path infra here by design.
+    const controlUiDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
+    const browserSourceDomain =
+      envName === "prod" ? `obs.${HANZOMON_ZONE_NAME}` : `dev-obs.${HANZOMON_ZONE_NAME}`;
+
+    const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, "HostedZone", {
+      hostedZoneId: HANZOMON_ZONE_ID,
+      zoneName: HANZOMON_ZONE_NAME,
+    });
+
+    // One SAN certificate per env covering both domains — CloudFront requires
+    // the certificate to live in us-east-1, which is where this stack already
+    // deploys, so no cross-region certificate construct is needed.
+    const certificate = new acm.Certificate(this, "FrontendCertificate", {
+      domainName: controlUiDomain,
+      subjectAlternativeNames: [browserSourceDomain],
+      validation: acm.CertificateValidation.fromDns(hostedZone),
+    });
+
+    const controlUiBucket = new s3.Bucket(this, "ControlUiBucket", {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy,
+      autoDeleteObjects: envName !== "prod",
+    });
+    const controlUiDistribution = new cloudfront.Distribution(this, "ControlUiDistribution", {
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(controlUiBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      defaultRootObject: "index.html",
+      domainNames: [controlUiDomain],
+      certificate,
+    });
+    new s3deploy.BucketDeployment(this, "ControlUiDeployment", {
+      sources: [s3deploy.Source.asset(path.join(__dirname, "../../apps/control-ui/dist"))],
+      destinationBucket: controlUiBucket,
+      distribution: controlUiDistribution,
+      distributionPaths: ["/*"],
+    });
+
+    const browserSourceBucket = new s3.Bucket(this, "BrowserSourceBucket", {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy,
+      autoDeleteObjects: envName !== "prod",
+    });
+    const browserSourceDistribution = new cloudfront.Distribution(this, "BrowserSourceDistribution", {
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(browserSourceBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      defaultRootObject: "index.html",
+      domainNames: [browserSourceDomain],
+      certificate,
+    });
+    new s3deploy.BucketDeployment(this, "BrowserSourceDeployment", {
+      sources: [s3deploy.Source.asset(path.join(__dirname, "../../apps/browser-source/dist"))],
+      destinationBucket: browserSourceBucket,
+      distribution: browserSourceDistribution,
+      distributionPaths: ["/*"],
+    });
+
+    for (const [id, domain, distribution] of [
+      ["ControlUi", controlUiDomain, controlUiDistribution],
+      ["BrowserSource", browserSourceDomain, browserSourceDistribution],
+    ] as const) {
+      const target = route53.RecordTarget.fromAlias(new route53Targets.CloudFrontTarget(distribution));
+      const recordName = domain === HANZOMON_ZONE_NAME ? undefined : domain.slice(0, -(HANZOMON_ZONE_NAME.length + 1));
+      new route53.ARecord(this, `${id}AliasRecordA`, { zone: hostedZone, recordName, target });
+      new route53.AaaaRecord(this, `${id}AliasRecordAAAA`, { zone: hostedZone, recordName, target });
+    }
+
     // ---- Outputs ----
 
     new cdk.CfnOutput(this, "WebSocketUrl", {
@@ -255,6 +341,12 @@ export class ScenetteStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, "AssetsDistributionDomain", {
       value: assetsDistribution.distributionDomainName,
+    });
+    new cdk.CfnOutput(this, "ControlUiUrl", {
+      value: `https://${controlUiDomain}`,
+    });
+    new cdk.CfnOutput(this, "BrowserSourceUrl", {
+      value: `https://${browserSourceDomain}`,
     });
   }
 }
