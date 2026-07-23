@@ -110,21 +110,21 @@ export class ScenetteStack extends cdk.Stack {
 
     const connectFn = new lambdaNode.NodejsFunction(this, "ConnectFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/connect.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
     });
     connectionsTable.grantWriteData(connectFn);
 
     const disconnectFn = new lambdaNode.NodejsFunction(this, "DisconnectFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/disconnect.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
     });
     connectionsTable.grantWriteData(disconnectFn);
 
     const messageFn = new lambdaNode.NodejsFunction(this, "MessageFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/message.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       environment: {
         CONNECTIONS_TABLE: connectionsTable.tableName,
         ASSETS_TABLE: assetsTable.tableName,
@@ -169,7 +169,7 @@ export class ScenetteStack extends cdk.Stack {
 
     const authBrokerFn = new lambdaNode.NodejsFunction(this, "AuthBrokerFn", {
       entry: path.join(__dirname, "../../services/auth-broker/src/index.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       environment: { SCENETTE_ENV: envName },
     });
     // Least-privilege: only allow reading this env's own OAuth secrets, never
@@ -200,7 +200,7 @@ export class ScenetteStack extends cdk.Stack {
 
     const retentionFn = new lambdaNode.NodejsFunction(this, "RetentionFn", {
       entry: path.join(__dirname, "../../services/retention-job/src/index.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.minutes(5),
       environment: {
         ASSETS_TABLE: assetsTable.tableName,
