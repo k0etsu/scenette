@@ -67,8 +67,16 @@ export class ScenetteStack extends cdk.Stack {
     // One item per placed asset: roomId+assetId as the key covers both the
     // "all assets in a room" access pattern (used by message.ts to build a
     // snapshot) and the "get one asset" pattern (move/delete) — no GSI needed.
+    //
+    // Deliberately no explicit `tableName` here (unlike the other tables):
+    // CloudFormation refuses to plan an in-place replace for any resource
+    // with a custom name — it's a static template-diff check, not a runtime
+    // one, so it blocks even after the physical table is manually deleted.
+    // This table's key schema is still likely to change during early
+    // development, so it's left auto-named to avoid hitting that wall again;
+    // every reference to it goes through the CDK token (assetsTable.tableName),
+    // never a hardcoded string, so the actual name is irrelevant.
     const assetsTable = new dynamodb.Table(this, "AssetsTable", {
-      tableName: `scenette-${envName}-assets`,
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
