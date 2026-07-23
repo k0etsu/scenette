@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>scenette browser source</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+      }
+      #viewport-root {
+        position: relative;
+        overflow: hidden;
+      }
+      #viewport-root > * {
+        position: absolute;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="viewport-root"></div>
+    <script src="./main.js"></script>
+  </body>
+</html>

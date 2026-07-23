@@ -42,10 +42,9 @@ export class ScenetteStack extends cdk.Stack {
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
     });
 
-    const roomStateTable = new dynamodb.Table(this, "RoomStateTable", {
-      tableName: `scenette-${envName}-room-state`,
+    const roomsTable = new dynamodb.Table(this, "RoomsTable", {
+      tableName: `scenette-${envName}-rooms`,
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
-      sortKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy,
     });
@@ -65,15 +64,23 @@ export class ScenetteStack extends cdk.Stack {
       removalPolicy,
     });
 
+    // One item per placed asset: roomId+assetId as the key covers both the
+    // "all assets in a room" access pattern (used by message.ts to build a
+    // snapshot) and the "get one asset" pattern (move/delete) — no GSI needed.
+    //
+    // Deliberately no explicit `tableName` here (unlike the other tables):
+    // CloudFormation refuses to plan an in-place replace for any resource
+    // with a custom name — it's a static template-diff check, not a runtime
+    // one, so it blocks even after the physical table is manually deleted.
+    // This table's key schema is still likely to change during early
+    // development, so it's left auto-named to avoid hitting that wall again;
+    // every reference to it goes through the CDK token (assetsTable.tableName),
+    // never a hardcoded string, so the actual name is irrelevant.
     const assetsTable = new dynamodb.Table(this, "AssetsTable", {
-      tableName: `scenette-${envName}-assets`,
-      partitionKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
+      partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy,
-    });
-    assetsTable.addGlobalSecondaryIndex({
-      indexName: "byRoom",
-      partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
     });
 
     // ---- Media storage (S3 + CloudFront) ----
@@ -103,24 +110,30 @@ export class ScenetteStack extends cdk.Stack {
 
     const connectFn = new lambdaNode.NodejsFunction(this, "ConnectFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/connect.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
     });
     connectionsTable.grantWriteData(connectFn);
 
     const disconnectFn = new lambdaNode.NodejsFunction(this, "DisconnectFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/disconnect.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
     });
     connectionsTable.grantWriteData(disconnectFn);
 
     const messageFn = new lambdaNode.NodejsFunction(this, "MessageFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/message.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
-      environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
+      runtime: lambda.Runtime.NODEJS_22_X,
+      environment: {
+        CONNECTIONS_TABLE: connectionsTable.tableName,
+        ASSETS_TABLE: assetsTable.tableName,
+        ROOMS_TABLE: roomsTable.tableName,
+      },
     });
     connectionsTable.grantReadWriteData(messageFn);
+    assetsTable.grantReadWriteData(messageFn);
+    roomsTable.grantReadWriteData(messageFn);
 
     const webSocketApi = new apigwv2.WebSocketApi(this, "WebSocketApi", {
       apiName: `scenette-${envName}`,
@@ -156,7 +169,7 @@ export class ScenetteStack extends cdk.Stack {
 
     const authBrokerFn = new lambdaNode.NodejsFunction(this, "AuthBrokerFn", {
       entry: path.join(__dirname, "../../services/auth-broker/src/index.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       environment: { SCENETTE_ENV: envName },
     });
     // Least-privilege: only allow reading this env's own OAuth secrets, never
@@ -187,7 +200,7 @@ export class ScenetteStack extends cdk.Stack {
 
     const retentionFn = new lambdaNode.NodejsFunction(this, "RetentionFn", {
       entry: path.join(__dirname, "../../services/retention-job/src/index.ts"),
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.minutes(5),
       environment: {
         ASSETS_TABLE: assetsTable.tableName,

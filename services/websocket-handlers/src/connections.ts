@@ -1,0 +1,61 @@
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, QueryCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  ApiGatewayManagementApiClient,
+  PostToConnectionCommand,
+} from "@aws-sdk/client-apigatewaymanagementapi";
+import { ServerMessage } from "@scenette/protocol";
+
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE!;
+
+export async function roomIdForConnection(connectionId: string): Promise<string | undefined> {
+  const { Item } = await ddb.send(
+    new GetCommand({ TableName: CONNECTIONS_TABLE, Key: { connectionId } })
+  );
+  return Item?.roomId;
+}
+
+export async function sendTo(
+  apiGw: ApiGatewayManagementApiClient,
+  connectionId: string,
+  message: ServerMessage
+): Promise<void> {
+  try {
+    await apiGw.send(
+      new PostToConnectionCommand({
+        ConnectionId: connectionId,
+        Data: Buffer.from(JSON.stringify(message)),
+      })
+    );
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === "GoneException") {
+      // Client disconnected without a clean $disconnect — clean up the stale row.
+      await ddb.send(new DeleteCommand({ TableName: CONNECTIONS_TABLE, Key: { connectionId } }));
+      return;
+    }
+    throw err;
+  }
+}
+
+export async function broadcastToRoom(
+  apiGw: ApiGatewayManagementApiClient,
+  roomId: string,
+  message: ServerMessage,
+  excludeConnectionId?: string
+): Promise<void> {
+  const { Items = [] } = await ddb.send(
+    new QueryCommand({
+      TableName: CONNECTIONS_TABLE,
+      IndexName: "byRoom",
+      KeyConditionExpression: "roomId = :roomId",
+      ExpressionAttributeValues: { ":roomId": roomId },
+    })
+  );
+
+  await Promise.all(
+    Items.filter((c) => c.connectionId !== excludeConnectionId).map((c) =>
+      sendTo(apiGw, c.connectionId, message)
+    )
+  );
+}
