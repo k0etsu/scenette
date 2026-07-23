@@ -2,7 +2,7 @@ import type { APIGatewayProxyWebsocketHandlerV2 } from "aws-lambda";
 import { ApiGatewayManagementApiClient } from "@aws-sdk/client-apigatewaymanagementapi";
 import { Asset, intersects, parseClientMessage } from "@scenette/protocol";
 import { roomIdForConnection, sendTo, broadcastToRoom } from "./connections";
-import { getOrCreateViewport, listAssets, putAsset, moveAsset, deleteAsset } from "./roomState";
+import { getOrCreateViewport, listAssets, putAsset, moveAsset, resizeAsset, deleteAsset } from "./roomState";
 
 export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   const connectionId = event.requestContext.connectionId;
@@ -78,6 +78,32 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           x: message.x,
           y: message.y,
           rotation: result.rotation,
+          visible: result.visible,
+        });
+        break;
+      }
+
+      case "asset:resize": {
+        const result = await resizeAsset(
+          message.roomId,
+          message.assetId,
+          message.x,
+          message.y,
+          message.width,
+          message.height,
+          viewport
+        );
+        if (!result) {
+          await sendTo(apiGw, connectionId, { type: "error", message: "Unknown assetId" });
+          break;
+        }
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "asset:resized",
+          assetId: message.assetId,
+          x: message.x,
+          y: message.y,
+          width: message.width,
+          height: message.height,
           visible: result.visible,
         });
         break;

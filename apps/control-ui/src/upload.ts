@@ -12,6 +12,20 @@ const DEFAULT_AUDIO_SIZE = { width: 200, height: 60 };
 const FALLBACK_MEDIA_SIZE = { width: 320, height: 240 };
 const METADATA_LOAD_TIMEOUT_MS = 4000;
 
+// A real photo/video is routinely several thousand pixels on a side (e.g. a
+// phone photo at 4032×3024). Placing an asset at its full native resolution
+// made every drag frame force the browser to reposition/repaint a
+// multi-megapixel element — expensive enough to visibly stutter, especially
+// for video. Assets are still resizable after the fact (see canvas.ts's
+// corner handles), so clamping the *default* placement size to something
+// reasonable is a pure win, not a feature loss.
+const MAX_DEFAULT_DIMENSION = 400;
+
+function clampToMaxDimension(width: number, height: number): { width: number; height: number } {
+  const scale = Math.min(1, MAX_DEFAULT_DIMENSION / Math.max(width, height));
+  return { width: Math.round(width * scale), height: Math.round(height * scale) };
+}
+
 export async function uploadFile(httpApiUrl: string, roomId: string, file: File): Promise<UploadResult> {
   const presignRes = await fetch(
     `${httpApiUrl}/assets/upload-url?roomId=${encodeURIComponent(roomId)}` +
@@ -48,13 +62,15 @@ async function detectDimensions(file: File, type: AssetType): Promise<{ width: n
 
   const objectUrl = URL.createObjectURL(file);
   try {
+    let natural: { width: number; height: number };
     if (type === "image" || type === "gif") {
-      return await withTimeout(loadImageDimensions(objectUrl), FALLBACK_MEDIA_SIZE);
+      natural = await withTimeout(loadImageDimensions(objectUrl), FALLBACK_MEDIA_SIZE);
+    } else if (type === "video") {
+      natural = await withTimeout(loadVideoDimensions(objectUrl), FALLBACK_MEDIA_SIZE);
+    } else {
+      natural = FALLBACK_MEDIA_SIZE;
     }
-    if (type === "video") {
-      return await withTimeout(loadVideoDimensions(objectUrl), FALLBACK_MEDIA_SIZE);
-    }
-    return FALLBACK_MEDIA_SIZE;
+    return clampToMaxDimension(natural.width, natural.height);
   } finally {
     URL.revokeObjectURL(objectUrl);
   }

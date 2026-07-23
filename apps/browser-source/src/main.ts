@@ -61,6 +61,20 @@ async function main(): Promise<void> {
           }
           break;
         }
+        case "asset:resized": {
+          const existing = renderer.get(message.assetId);
+          if (existing) {
+            renderer.upsert({
+              ...existing,
+              x: message.x,
+              y: message.y,
+              width: message.width,
+              height: message.height,
+              visible: message.visible,
+            });
+          }
+          break;
+        }
         case "asset:deleted":
           renderer.remove(message.assetId);
           break;

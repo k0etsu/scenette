@@ -101,6 +101,9 @@ function startApp(
       onAssetMove: (assetId, x, y) => {
         connection.send({ action: "asset:move", roomId, assetId, x, y });
       },
+      onAssetResize: (assetId, x, y, width, height) => {
+        connection.send({ action: "asset:resize", roomId, assetId, x, y, width, height });
+      },
       onAssetDelete: (assetId) => {
         connection.send({ action: "asset:delete", roomId, assetId });
       },
@@ -140,6 +143,9 @@ function startApp(
           break;
         case "asset:moved":
           canvas.applyRemoteMove(message.assetId, message.x, message.y, message.rotation, message.visible);
+          break;
+        case "asset:resized":
+          canvas.applyRemoteResize(message.assetId, message.x, message.y, message.width, message.height, message.visible);
           break;
         case "asset:deleted":
           canvas.remove(message.assetId);
