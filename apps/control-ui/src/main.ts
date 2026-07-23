@@ -17,6 +17,7 @@ const canvasContainer = document.getElementById("canvas-container");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
 const addTextButton = document.getElementById("add-text-button");
 const grantAccessButton = document.getElementById("grant-access-button");
+const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
 const logoutButton = document.getElementById("logout-button");
 const statusEl = document.getElementById("status");
 
@@ -26,14 +27,14 @@ const contextMenuMediaButton = document.getElementById("context-menu-media");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !passwordInput || !registerButton || !loginError ||
-  !canvasContainer || !uploadInput || !addTextButton || !grantAccessButton || !logoutButton || !statusEl ||
-  !contextMenu || !contextMenuTextButton || !contextMenuMediaButton
+  !canvasContainer || !uploadInput || !addTextButton || !grantAccessButton || !copyBrowserSourceButton ||
+  !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton || !contextMenuMediaButton
 ) {
   throw new Error("Missing required DOM elements");
 }
 
 async function main(): Promise<void> {
-  const { wsUrl, httpApiUrl, assetsDomain } = await loadConfig();
+  const { wsUrl, httpApiUrl, assetsDomain, browserSourceUrl } = await loadConfig();
 
   let session = await checkSession(httpApiUrl);
   if (!session) {
@@ -42,7 +43,7 @@ async function main(): Promise<void> {
 
   loginView!.style.display = "none";
   appView!.style.display = "block";
-  startApp(wsUrl, httpApiUrl, assetsDomain, session);
+  startApp(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session);
 }
 
 function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
@@ -70,7 +71,13 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
   });
 }
 
-function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, session: SessionInfo): void {
+function startApp(
+  wsUrl: string,
+  httpApiUrl: string,
+  assetsDomain: string,
+  browserSourceUrl: string,
+  session: SessionInfo
+): void {
   const params = new URLSearchParams(window.location.search);
   const roomId = params.get("roomId") ?? session.personalRoomId;
 
@@ -210,6 +217,18 @@ function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, sessi
       statusEl!.textContent = `granted access to ${grantee}`;
     } catch (err) {
       statusEl!.textContent = `grant failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  });
+
+  copyBrowserSourceButton!.addEventListener("click", async () => {
+    const url = `${browserSourceUrl}/?roomId=${encodeURIComponent(roomId)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      statusEl!.textContent = "browser source URL copied to clipboard";
+    } catch (err) {
+      // Clipboard API can be denied (e.g. insecure context, permissions) --
+      // fall back to showing the URL directly so it's still usable.
+      statusEl!.textContent = `copy failed, URL: ${url}`;
     }
   });
 

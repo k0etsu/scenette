@@ -2,6 +2,7 @@ export interface RuntimeConfig {
   wsUrl: string;
   httpApiUrl: string;
   assetsDomain: string;
+  browserSourceUrl: string;
 }
 
 // The deployed infra writes /config.json alongside the static build output
@@ -12,7 +13,7 @@ export interface RuntimeConfig {
 export async function loadConfig(): Promise<RuntimeConfig> {
   const params = new URLSearchParams(window.location.search);
 
-  // /config.json is still fetched even when all three are overridden via
+  // /config.json is still fetched even when all fields are overridden via
   // query params, purely so a fetch failure surfaces immediately rather than
   // silently working today and breaking the moment an override is dropped.
   const res = await fetch("/config.json");
@@ -22,8 +23,9 @@ export async function loadConfig(): Promise<RuntimeConfig> {
   const wsUrl = params.get("wsUrl") ?? config.wsUrl;
   const httpApiUrl = params.get("httpApiUrl") ?? config.httpApiUrl;
   const assetsDomain = params.get("assetsDomain") ?? config.assetsDomain;
-  if (!wsUrl || !httpApiUrl || !assetsDomain) {
-    throw new Error("Missing wsUrl/httpApiUrl/assetsDomain in /config.json and no query param override given");
+  const browserSourceUrl = params.get("browserSourceUrl") ?? config.browserSourceUrl;
+  if (!wsUrl || !httpApiUrl || !assetsDomain || !browserSourceUrl) {
+    throw new Error("Missing required fields in /config.json and no query param override given");
   }
-  return { wsUrl, httpApiUrl, assetsDomain };
+  return { wsUrl, httpApiUrl, assetsDomain, browserSourceUrl };
 }

@@ -47,6 +47,16 @@ export class CanvasView {
   private dragging?: { assetId: string } | { panning: true };
   private lastMoveSentAt = 0;
 
+  // A high-polling-rate mouse can fire mousemove far more often than the
+  // screen actually repaints (well past 60/sec) — writing to el.style on
+  // every single event forces the browser to do that many layout/paint
+  // passes, which is what made dragging feel laggy in practice even though
+  // the network side was already throttled. Coalescing the DOM write to
+  // once per animation frame (in-memory position still updates every
+  // event, so nothing is lost) fixes that independently of network timing.
+  private pendingRender?: () => void;
+  private rafScheduled = false;
+
   constructor(
     private readonly container: HTMLElement,
     private readonly callbacks: CanvasCallbacks,
@@ -257,7 +267,7 @@ export class CanvasView {
     if ("panning" in this.dragging) {
       this.pan.x += event.movementX;
       this.pan.y += event.movementY;
-      this.applyWorldTransform();
+      this.scheduleRender(() => this.applyWorldTransform());
       return;
     }
 
@@ -270,13 +280,24 @@ export class CanvasView {
     const dx = event.movementX / this.zoom;
     const dy = event.movementY / this.zoom;
     entry.asset = { ...entry.asset, x: entry.asset.x + dx, y: entry.asset.y + dy };
-    this.applyTransform(entry.el, entry.asset);
+    this.scheduleRender(() => this.applyTransform(entry.el, entry.asset));
 
     const now = performance.now();
     if (now - this.lastMoveSentAt >= MOVE_SEND_THROTTLE_MS) {
       this.lastMoveSentAt = now;
       this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
     }
+  }
+
+  private scheduleRender(render: () => void): void {
+    this.pendingRender = render;
+    if (this.rafScheduled) return;
+    this.rafScheduled = true;
+    requestAnimationFrame(() => {
+      this.rafScheduled = false;
+      this.pendingRender?.();
+      this.pendingRender = undefined;
+    });
   }
 
   private onMouseUp(): void {
