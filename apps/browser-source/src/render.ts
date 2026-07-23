@@ -13,7 +13,7 @@ export class Renderer {
   private readonly entries = new Map<string, Entry>();
   private viewport: Viewport = { roomId: "", x: 0, y: 0, width: 1920, height: 1080 };
 
-  constructor(private readonly root: HTMLElement) {}
+  constructor(private readonly root: HTMLElement, private readonly assetsDomain: string) {}
 
   setViewport(viewport: Viewport): void {
     this.viewport = viewport;
@@ -89,13 +89,13 @@ export class Renderer {
       case "image":
       case "gif": {
         const img = document.createElement("img");
-        img.src = asset.s3Key ? mediaUrl(asset.s3Key) : "";
+        img.src = asset.s3Key ? this.mediaUrl(asset.s3Key) : "";
         el = img;
         break;
       }
       case "video": {
         const video = document.createElement("video");
-        video.src = asset.s3Key ? mediaUrl(asset.s3Key) : "";
+        video.src = asset.s3Key ? this.mediaUrl(asset.s3Key) : "";
         video.autoplay = true;
         video.loop = true;
         video.muted = false;
@@ -104,7 +104,7 @@ export class Renderer {
       }
       case "audio": {
         const audio = document.createElement("audio");
-        audio.src = asset.s3Key ? mediaUrl(asset.s3Key) : "";
+        audio.src = asset.s3Key ? this.mediaUrl(asset.s3Key) : "";
         audio.autoplay = true;
         audio.loop = true;
         el = audio;
@@ -120,15 +120,14 @@ export class Renderer {
     el.style.objectFit = "contain";
     return el;
   }
+
+  // Media lives in the assets bucket/distribution, a completely separate
+  // CloudFront distribution from the one serving this app itself.
+  private mediaUrl(s3Key: string): string {
+    return `https://${this.assetsDomain}/${s3Key}`;
+  }
 }
 
 function elementTypeOf(el: HTMLElement): string | undefined {
   return el.dataset.assetType;
-}
-
-// TODO(v1): the CloudFront distribution domain isn't wired through yet —
-// this needs to become a build-time/runtime config value once control-ui's
-// upload flow exists and there's a real asset to point at.
-function mediaUrl(s3Key: string): string {
-  return `/${s3Key}`;
 }
