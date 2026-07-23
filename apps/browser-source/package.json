@@ -4,6 +4,13 @@
   "license": "AGPL-3.0-only",
   "version": "0.1.0",
   "scripts": {
-    "build": "echo 'TODO: browser-source not yet scaffolded' && exit 0"
+    "build": "tsc --noEmit && esbuild src/main.ts --bundle --outfile=dist/main.js && cp index.html dist/index.html"
+  },
+  "dependencies": {
+    "@scenette/protocol": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
   }
 }
