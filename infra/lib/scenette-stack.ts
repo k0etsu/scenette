@@ -186,6 +186,13 @@ export class ScenetteStack extends cdk.Stack {
 
     const httpApi = new apigwv2.HttpApi(this, "HttpApi", {
       apiName: `scenette-${envName}-http`,
+      corsPreflight: {
+        // TODO: same as the S3 bucket's CORS above — restrict to the deployed
+        // control-ui origin once it's hosted somewhere with a known domain.
+        allowOrigins: ["*"],
+        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST],
+        allowHeaders: ["*"],
+      },
     });
     httpApi.addRoutes({
       path: "/auth/{provider}/{step}",
@@ -193,6 +200,26 @@ export class ScenetteStack extends cdk.Stack {
       integration: new apigwv2Integrations.HttpLambdaIntegration(
         "AuthBrokerIntegration",
         authBrokerFn
+      ),
+    });
+
+    // ---- Upload URL (HTTP API) ----
+
+    const uploadUrlFn = new lambdaNode.NodejsFunction(this, "UploadUrlFn", {
+      entry: path.join(__dirname, "../../services/upload-url/src/index.ts"),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      environment: { ASSETS_BUCKET: assetsBucket.bucketName },
+    });
+    // Write-only — this Lambda only ever needs to mint presigned PUT URLs,
+    // never to read or list what's already in the bucket.
+    assetsBucket.grantPut(uploadUrlFn);
+
+    httpApi.addRoutes({
+      path: "/assets/upload-url",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: new apigwv2Integrations.HttpLambdaIntegration(
+        "UploadUrlIntegration",
+        uploadUrlFn
       ),
     });
 
