@@ -33,6 +33,19 @@ export interface AssetMoveMessage {
   rotation?: number;
 }
 
+// Carries x/y alongside width/height (not just a size delta) because
+// dragging the NW/NE/SW corners of a selection changes the asset's position
+// as well as its dimensions — only the SE corner leaves x/y untouched.
+export interface AssetResizeMessage {
+  action: "asset:resize";
+  roomId: string;
+  assetId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface AssetDeleteMessage {
   action: "asset:delete";
   roomId: string;
@@ -43,6 +56,7 @@ export type ClientMessage =
   | SnapshotRequestMessage
   | AssetAddMessage
   | AssetMoveMessage
+  | AssetResizeMessage
   | AssetDeleteMessage;
 
 // ---- Server -> client (broadcast or direct reply) ----
@@ -51,6 +65,15 @@ export type ServerMessage =
   | { type: "room:snapshot"; assets: Asset[]; viewport: { x: number; y: number; width: number; height: number } }
   | { type: "asset:added"; asset: Asset }
   | { type: "asset:moved"; assetId: string; x: number; y: number; rotation: number; visible: boolean }
+  | {
+      type: "asset:resized";
+      assetId: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      visible: boolean;
+    }
   | { type: "asset:deleted"; assetId: string }
   | { type: "error"; message: string };
 
@@ -113,6 +136,22 @@ export function parseClientMessage(raw: string): ClientMessage {
         x: msg.x,
         y: msg.y,
         rotation: typeof msg.rotation === "number" ? msg.rotation : undefined,
+      };
+    }
+
+    case "asset:resize": {
+      if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
+      for (const key of ["x", "y", "width", "height"] as const) {
+        if (typeof msg[key] !== "number") throw new Error(`Missing/invalid ${key}`);
+      }
+      return {
+        action: "asset:resize",
+        roomId: msg.roomId,
+        assetId: msg.assetId,
+        x: msg.x as number,
+        y: msg.y as number,
+        width: msg.width as number,
+        height: msg.height as number,
       };
     }
 

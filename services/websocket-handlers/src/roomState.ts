@@ -99,6 +99,41 @@ export async function moveAsset(
   return { visible, rotation: nextRotation };
 }
 
+export async function resizeAsset(
+  roomId: string,
+  assetId: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  viewport: Viewport
+): Promise<{ visible: boolean } | undefined> {
+  const existing = await getAsset(roomId, assetId);
+  if (!existing) return undefined;
+
+  const visible = intersects({ x, y, width, height }, viewport);
+
+  await ddb.send(
+    new UpdateCommand({
+      TableName: ASSETS_TABLE,
+      Key: { roomId, assetId },
+      UpdateExpression:
+        "SET #x = :x, #y = :y, width = :width, height = :height, visible = :visible, lastUsedAt = :now",
+      ExpressionAttributeNames: { "#x": "x", "#y": "y" },
+      ExpressionAttributeValues: {
+        ":x": x,
+        ":y": y,
+        ":width": width,
+        ":height": height,
+        ":visible": visible,
+        ":now": new Date().toISOString(),
+      },
+    })
+  );
+
+  return { visible };
+}
+
 export async function deleteAsset(roomId: string, assetId: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: ASSETS_TABLE, Key: { roomId, assetId } }));
 }

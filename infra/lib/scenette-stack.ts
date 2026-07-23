@@ -381,6 +381,7 @@ export class ScenetteStack extends cdk.Stack {
           wsUrl: webSocketStage.url,
           httpApiUrl: httpApi.apiEndpoint,
           assetsDomain: assetsDistribution.distributionDomainName,
+          browserSourceUrl: `https://${browserSourceDomain}`,
         }),
       ],
       destinationBucket: controlUiBucket,

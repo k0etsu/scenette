@@ -5,31 +5,68 @@ interface Entry {
   asset: Asset;
 }
 
+type Corner = "nw" | "ne" | "sw" | "se";
+const CORNERS: Corner[] = ["nw", "ne", "sw", "se"];
+const CORNER_CURSOR: Record<Corner, string> = {
+  nw: "nwse-resize",
+  se: "nwse-resize",
+  ne: "nesw-resize",
+  sw: "nesw-resize",
+};
+
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.001;
+const MIN_ASSET_SIZE = 20;
+
+// Caps how often a dragged/resized asset's transform is actually sent over
+// the network — local rendering stays instant every mousemove regardless
+// (see onMouseMove), but broadcasting every single pixel-delta event was
+// flooding the WebSocket and, worse, our own echoed update kept arriving
+// mid-drag and fighting with continued local movement.
+const MOVE_SEND_THROTTLE_MS = 40;
 
 export interface CanvasCallbacks {
   onAssetMove: (assetId: string, x: number, y: number) => void;
+  onAssetResize: (assetId: string, x: number, y: number, width: number, height: number) => void;
   onAssetDelete: (assetId: string) => void;
+  // worldX/worldY: where a created asset should be placed. screenX/screenY:
+  // viewport-relative coordinates for positioning the context menu itself.
+  onContextMenu: (worldX: number, worldY: number, screenX: number, screenY: number) => void;
 }
 
 // The editing surface: a world-space plane containing the (fixed, per the
-// plan — never user-movable) viewport rectangle and freely-draggable asset
-// elements above it. Zoom/pan is local-only view state (see plan Q8: not
-// synced between collaborators), so none of it is sent over the wire —
-// only asset positions are.
+// plan — never user-movable) viewport rectangle and freely-draggable,
+// resizable asset elements above it. Zoom/pan is local-only view state (see
+// plan Q8: not synced between collaborators), so none of it is sent over
+// the wire — only asset transforms are.
+//
+// Mouse bindings: left click selects/drags assets (or drags a corner handle
+// to resize the selected one), middle click pans, scroll wheel zooms
+// (anchored to the cursor), right click opens the create-asset context menu.
 export class CanvasView {
   private readonly entries = new Map<string, Entry>();
   private readonly world: HTMLElement;
   private readonly viewportRect: HTMLElement;
+  private readonly handles: Record<Corner, HTMLElement>;
   private viewport: Viewport = { roomId: "", x: 0, y: 0, width: 1920, height: 1080 };
 
   private pan = { x: 0, y: 0 };
   private zoom = 1;
 
   private selectedAssetId?: string;
-  private dragging?: { assetId: string } | { panning: true };
+  private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
+  private lastMoveSentAt = 0;
+
+  // A high-polling-rate mouse can fire mousemove far more often than the
+  // screen actually repaints (well past 60/sec) — writing to el.style on
+  // every single event forces the browser to do that many layout/paint
+  // passes, which is what made dragging feel laggy in practice even though
+  // the network side was already throttled. Coalescing the DOM write to
+  // once per animation frame (in-memory position still updates every
+  // event, so nothing is lost) fixes that independently of network timing.
+  private pendingRender?: () => void;
+  private rafScheduled = false;
 
   constructor(
     private readonly container: HTMLElement,
@@ -47,6 +84,26 @@ export class CanvasView {
     this.viewportRect.style.border = "2px dashed rgba(255,255,255,0.6)";
     this.viewportRect.style.pointerEvents = "none";
     this.world.appendChild(this.viewportRect);
+
+    this.handles = {} as Record<Corner, HTMLElement>;
+    for (const corner of CORNERS) {
+      const handle = document.createElement("div");
+      handle.dataset.role = "resize-handle";
+      handle.dataset.corner = corner;
+      handle.style.position = "absolute";
+      handle.style.width = "10px";
+      handle.style.height = "10px";
+      handle.style.background = "white";
+      handle.style.border = "2px solid #4da3ff";
+      handle.style.borderRadius = "2px";
+      handle.style.boxSizing = "border-box";
+      handle.style.cursor = CORNER_CURSOR[corner];
+      handle.style.display = "none";
+      handle.style.zIndex = "1000";
+      handle.addEventListener("mousedown", (event) => this.onHandleMouseDown(event, corner));
+      this.world.appendChild(handle);
+      this.handles[corner] = handle;
+    }
 
     this.applyWorldTransform();
     this.bindContainerEvents();
@@ -93,6 +150,28 @@ export class CanvasView {
     }
     entry.asset = asset;
     this.applyTransform(entry.el, asset);
+    if (asset.assetId === this.selectedAssetId) this.positionHandles();
+  }
+
+  // Applies a move/resize that originated from the network (another
+  // collaborator, or the server's echo of our own throttled send) —
+  // distinct from the instant local application during an active drag in
+  // onMouseMove. If this asset is the one currently being manipulated
+  // locally, the update is dropped: local optimistic state is authoritative
+  // mid-gesture, and applying a slightly-stale echo would fight with
+  // continued mouse movement.
+  applyRemoteMove(assetId: string, x: number, y: number, rotation: number, visible: boolean): void {
+    if (this.dragging && "assetId" in this.dragging && this.dragging.assetId === assetId) return;
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    this.upsert({ ...entry.asset, x, y, rotation, visible });
+  }
+
+  applyRemoteResize(assetId: string, x: number, y: number, width: number, height: number, visible: boolean): void {
+    if (this.dragging && "resizing" in this.dragging && this.dragging.resizing.assetId === assetId) return;
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    this.upsert({ ...entry.asset, x, y, width, height, visible });
   }
 
   remove(assetId: string): void {
@@ -101,7 +180,10 @@ export class CanvasView {
       entry.el.remove();
       this.entries.delete(assetId);
     }
-    if (this.selectedAssetId === assetId) this.selectedAssetId = undefined;
+    if (this.selectedAssetId === assetId) {
+      this.selectedAssetId = undefined;
+      this.positionHandles();
+    }
   }
 
   private applyTransform(el: HTMLElement, asset: Asset): void {
@@ -121,6 +203,7 @@ export class CanvasView {
       case "gif": {
         const img = document.createElement("img");
         if (asset.s3Key) img.src = this.mediaUrl(asset.s3Key);
+        img.draggable = false;
         el = img;
         break;
       }
@@ -153,25 +236,50 @@ export class CanvasView {
 
   private bindContainerEvents(): void {
     this.container.addEventListener("mousedown", (event) => {
-      if (event.target === this.container || event.target === this.world) {
+      if (event.button === 1) {
+        // Middle click pans regardless of what's under the cursor (even an
+        // asset) — browsers auto-scroll on middle-click by default, so this
+        // must be prevented or panning fights with that native behavior.
+        event.preventDefault();
         this.dragging = { panning: true };
+        return;
+      }
+      if (event.button === 0 && (event.target === this.container || event.target === this.world)) {
         this.selectedAssetId = undefined;
-        this.refreshSelectionOutlines();
+        this.refreshSelection();
       }
     });
 
     window.addEventListener("mousemove", (event) => this.onMouseMove(event));
-    window.addEventListener("mouseup", () => {
-      this.dragging = undefined;
+    window.addEventListener("mouseup", () => this.onMouseUp());
+
+    this.container.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const rect = this.container.getBoundingClientRect();
+      const screenX = event.clientX - rect.left;
+      const screenY = event.clientY - rect.top;
+      const world = this.screenToWorld(screenX, screenY);
+      this.callbacks.onContextMenu(world.x, world.y, screenX, screenY);
     });
 
     this.container.addEventListener(
       "wheel",
       (event) => {
         event.preventDefault();
-        const next = this.zoom * (1 - event.deltaY * ZOOM_STEP);
-        this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+        const rect = this.container.getBoundingClientRect();
+        const screenX = event.clientX - rect.left;
+        const screenY = event.clientY - rect.top;
+
+        // Cursor-centered zoom: find the world point currently under the
+        // cursor, change zoom, then solve for the pan that keeps that same
+        // world point under the same screen position.
+        const worldUnderCursor = this.screenToWorld(screenX, screenY);
+        const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * (1 - event.deltaY * ZOOM_STEP)));
+        this.pan.x = screenX - worldUnderCursor.x * nextZoom;
+        this.pan.y = screenY - worldUnderCursor.y * nextZoom;
+        this.zoom = nextZoom;
         this.applyWorldTransform();
+        this.positionHandles();
       },
       { passive: false }
     );
@@ -186,10 +294,20 @@ export class CanvasView {
   }
 
   private onAssetMouseDown(event: MouseEvent, assetId: string): void {
+    // Only left click selects/drags — middle click (panning) and right
+    // click (context menu) both need to fall through to the container's
+    // own handlers rather than being captured here.
+    if (event.button !== 0) return;
     event.stopPropagation();
     this.selectedAssetId = assetId;
-    this.refreshSelectionOutlines();
+    this.refreshSelection();
     this.dragging = { assetId };
+  }
+
+  private onHandleMouseDown(event: MouseEvent, corner: Corner): void {
+    if (event.button !== 0 || !this.selectedAssetId) return;
+    event.stopPropagation();
+    this.dragging = { resizing: { assetId: this.selectedAssetId, corner } };
   }
 
   private onMouseMove(event: MouseEvent): void {
@@ -198,26 +316,142 @@ export class CanvasView {
     if ("panning" in this.dragging) {
       this.pan.x += event.movementX;
       this.pan.y += event.movementY;
-      this.applyWorldTransform();
+      this.scheduleRender(() => {
+        this.applyWorldTransform();
+        this.positionHandles();
+      });
       return;
     }
-
-    const entry = this.entries.get(this.dragging.assetId);
-    if (!entry) return;
 
     // Screen-space mouse movement divided by zoom gives world-space delta —
     // deliberately independent of any container geometry (getBoundingClientRect
     // et al.), which keeps this correct under any layout and testable headlessly.
     const dx = event.movementX / this.zoom;
     const dy = event.movementY / this.zoom;
+
+    if ("resizing" in this.dragging) {
+      const entry = this.entries.get(this.dragging.resizing.assetId);
+      if (!entry) return;
+      entry.asset = this.applyResizeDelta(entry.asset, this.dragging.resizing.corner, dx, dy);
+      this.scheduleRender(() => {
+        this.applyTransform(entry.el, entry.asset);
+        this.positionHandles();
+      });
+
+      const now = performance.now();
+      if (now - this.lastMoveSentAt >= MOVE_SEND_THROTTLE_MS) {
+        this.lastMoveSentAt = now;
+        this.callbacks.onAssetResize(entry.asset.assetId, entry.asset.x, entry.asset.y, entry.asset.width, entry.asset.height);
+      }
+      return;
+    }
+
+    const entry = this.entries.get(this.dragging.assetId);
+    if (!entry) return;
     entry.asset = { ...entry.asset, x: entry.asset.x + dx, y: entry.asset.y + dy };
-    this.applyTransform(entry.el, entry.asset);
-    this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
+    this.scheduleRender(() => {
+      this.applyTransform(entry.el, entry.asset);
+      this.positionHandles();
+    });
+
+    const now = performance.now();
+    if (now - this.lastMoveSentAt >= MOVE_SEND_THROTTLE_MS) {
+      this.lastMoveSentAt = now;
+      this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
+    }
   }
 
-  private refreshSelectionOutlines(): void {
+  // Resizes from `corner`, keeping the *opposite* corner fixed exactly —
+  // computed from the opposite corner's absolute position rather than by
+  // independently adjusting x and width, so clamping to MIN_ASSET_SIZE
+  // never causes the fixed corner to visibly drift.
+  private applyResizeDelta(asset: Asset, corner: Corner, dx: number, dy: number): Asset {
+    const anchorX = corner === "ne" || corner === "se" ? asset.x : asset.x + asset.width;
+    const anchorY = corner === "sw" || corner === "se" ? asset.y : asset.y + asset.height;
+
+    const rawWidth = corner === "ne" || corner === "se" ? asset.width + dx : asset.width - dx;
+    const rawHeight = corner === "sw" || corner === "se" ? asset.height + dy : asset.height - dy;
+    const width = Math.max(MIN_ASSET_SIZE, rawWidth);
+    const height = Math.max(MIN_ASSET_SIZE, rawHeight);
+
+    const x = corner === "ne" || corner === "se" ? anchorX : anchorX - width;
+    const y = corner === "sw" || corner === "se" ? anchorY : anchorY - height;
+
+    return { ...asset, x, y, width, height };
+  }
+
+  private scheduleRender(render: () => void): void {
+    this.pendingRender = render;
+    if (this.rafScheduled) return;
+    this.rafScheduled = true;
+    requestAnimationFrame(() => {
+      this.rafScheduled = false;
+      this.pendingRender?.();
+      this.pendingRender = undefined;
+    });
+  }
+
+  private onMouseUp(): void {
+    if (this.dragging) {
+      // Always flush the exact final transform on release, bypassing the
+      // throttle — otherwise the last few pixels of a gesture could be lost
+      // if the mouse-up lands inside the throttle window.
+      if ("assetId" in this.dragging) {
+        const entry = this.entries.get(this.dragging.assetId);
+        if (entry) this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
+      } else if ("resizing" in this.dragging) {
+        const entry = this.entries.get(this.dragging.resizing.assetId);
+        if (entry) {
+          this.callbacks.onAssetResize(
+            entry.asset.assetId,
+            entry.asset.x,
+            entry.asset.y,
+            entry.asset.width,
+            entry.asset.height
+          );
+        }
+      }
+    }
+    this.dragging = undefined;
+  }
+
+  private screenToWorld(screenX: number, screenY: number): { x: number; y: number } {
+    return { x: (screenX - this.pan.x) / this.zoom, y: (screenY - this.pan.y) / this.zoom };
+  }
+
+  private refreshSelection(): void {
     for (const entry of this.entries.values()) {
       entry.el.style.outline = entry.asset.assetId === this.selectedAssetId ? "2px solid #4da3ff" : "none";
+    }
+    this.positionHandles();
+  }
+
+  // Handles are children of `world`, so they already pan with it — but
+  // world's CSS scale(zoom) would also scale their own 10px size along with
+  // it, making them balloon at high zoom / vanish at low zoom. Countering
+  // with scale(1/zoom) keeps them a constant apparent size on screen,
+  // matching a typical canvas editor's resize-handle behavior.
+  private positionHandles(): void {
+    const entry = this.selectedAssetId ? this.entries.get(this.selectedAssetId) : undefined;
+    if (!entry) {
+      for (const corner of CORNERS) this.handles[corner].style.display = "none";
+      return;
+    }
+
+    const { x, y, width, height } = entry.asset;
+    const positions: Record<Corner, { x: number; y: number }> = {
+      nw: { x, y },
+      ne: { x: x + width, y },
+      sw: { x, y: y + height },
+      se: { x: x + width, y: y + height },
+    };
+    for (const corner of CORNERS) {
+      const handle = this.handles[corner];
+      const pos = positions[corner];
+      handle.style.display = "block";
+      handle.style.left = `${pos.x}px`;
+      handle.style.top = `${pos.y}px`;
+      handle.style.transform = `translate(-50%, -50%) scale(${1 / this.zoom})`;
     }
   }
 
@@ -226,9 +460,7 @@ export class CanvasView {
   }
 
   // Media lives in the assets bucket/distribution, a completely separate
-  // CloudFront distribution from the one serving this app itself — an
-  // earlier version of this pointed at "/" + s3Key (relative to control-ui's
-  // own origin), which 403'd since that bucket never had the object at all.
+  // CloudFront distribution from the one serving this app itself.
   private mediaUrl(s3Key: string): string {
     return `https://${this.assetsDomain}/${s3Key}`;
   }

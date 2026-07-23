@@ -17,18 +17,24 @@ const canvasContainer = document.getElementById("canvas-container");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
 const addTextButton = document.getElementById("add-text-button");
 const grantAccessButton = document.getElementById("grant-access-button");
+const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
 const logoutButton = document.getElementById("logout-button");
 const statusEl = document.getElementById("status");
 
+const contextMenu = document.getElementById("context-menu");
+const contextMenuTextButton = document.getElementById("context-menu-text");
+const contextMenuMediaButton = document.getElementById("context-menu-media");
+
 if (
   !loginView || !appView || !loginForm || !usernameInput || !passwordInput || !registerButton || !loginError ||
-  !canvasContainer || !uploadInput || !addTextButton || !grantAccessButton || !logoutButton || !statusEl
+  !canvasContainer || !uploadInput || !addTextButton || !grantAccessButton || !copyBrowserSourceButton ||
+  !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton || !contextMenuMediaButton
 ) {
   throw new Error("Missing required DOM elements");
 }
 
 async function main(): Promise<void> {
-  const { wsUrl, httpApiUrl, assetsDomain } = await loadConfig();
+  const { wsUrl, httpApiUrl, assetsDomain, browserSourceUrl } = await loadConfig();
 
   let session = await checkSession(httpApiUrl);
   if (!session) {
@@ -37,7 +43,7 @@ async function main(): Promise<void> {
 
   loginView!.style.display = "none";
   appView!.style.display = "block";
-  startApp(wsUrl, httpApiUrl, assetsDomain, session);
+  startApp(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session);
 }
 
 function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
@@ -65,7 +71,13 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
   });
 }
 
-function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, session: SessionInfo): void {
+function startApp(
+  wsUrl: string,
+  httpApiUrl: string,
+  assetsDomain: string,
+  browserSourceUrl: string,
+  session: SessionInfo
+): void {
   const params = new URLSearchParams(window.location.search);
   const roomId = params.get("roomId") ?? session.personalRoomId;
 
@@ -79,18 +91,40 @@ function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, sessi
 
   statusEl!.textContent = `room: ${roomId} (${session.username})`;
 
+  // Where the next text/media asset created via the toolbar (viewport
+  // center) vs. the right-click context menu (cursor position) should land.
+  let createPosition: { x: number; y: number } | undefined;
+
   const canvas = new CanvasView(
     canvasContainer!,
     {
       onAssetMove: (assetId, x, y) => {
         connection.send({ action: "asset:move", roomId, assetId, x, y });
       },
+      onAssetResize: (assetId, x, y, width, height) => {
+        connection.send({ action: "asset:resize", roomId, assetId, x, y, width, height });
+      },
       onAssetDelete: (assetId) => {
         connection.send({ action: "asset:delete", roomId, assetId });
+      },
+      onContextMenu: (worldX, worldY, screenX, screenY) => {
+        createPosition = { x: worldX, y: worldY };
+        contextMenu!.style.left = `${screenX}px`;
+        contextMenu!.style.top = `${screenY}px`;
+        contextMenu!.style.display = "block";
       },
     },
     assetsDomain
   );
+
+  document.addEventListener("mousedown", (event) => {
+    if (contextMenu!.style.display !== "none" && !contextMenu!.contains(event.target as Node)) {
+      contextMenu!.style.display = "none";
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") contextMenu!.style.display = "none";
+  });
 
   const connection = new ResilientConnection({
     wsUrl,
@@ -107,19 +141,12 @@ function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, sessi
         case "asset:added":
           canvas.upsert(message.asset);
           break;
-        case "asset:moved": {
-          const existing = canvas.get(message.assetId);
-          if (existing) {
-            canvas.upsert({
-              ...existing,
-              x: message.x,
-              y: message.y,
-              rotation: message.rotation,
-              visible: message.visible,
-            });
-          }
+        case "asset:moved":
+          canvas.applyRemoteMove(message.assetId, message.x, message.y, message.rotation, message.visible);
           break;
-        }
+        case "asset:resized":
+          canvas.applyRemoteResize(message.assetId, message.x, message.y, message.width, message.height, message.visible);
+          break;
         case "asset:deleted":
           canvas.remove(message.assetId);
           break;
@@ -132,27 +159,43 @@ function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, sessi
 
   connection.start();
 
-  addTextButton!.addEventListener("click", () => {
+  function createTextAsset(): void {
     const text = window.prompt("Text content:");
     if (!text) return;
 
-    const viewport = canvas.getViewport();
     const width = 200;
     const height = 50;
+    const viewport = canvas.getViewport();
+    const pos = createPosition ?? {
+      x: viewport.x + viewport.width / 2 - width / 2,
+      y: viewport.y + viewport.height / 2 - height / 2,
+    };
+    createPosition = undefined;
+
     connection.send({
       action: "asset:add",
       roomId,
       asset: {
         assetId: crypto.randomUUID(),
         type: "text",
-        x: viewport.x + viewport.width / 2 - width / 2,
-        y: viewport.y + viewport.height / 2 - height / 2,
+        x: pos.x,
+        y: pos.y,
         width,
         height,
         text,
       },
     });
+  }
+
+  addTextButton!.addEventListener("click", createTextAsset);
+  contextMenuTextButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    createTextAsset();
   });
+
+  function triggerMediaUpload(): void {
+    uploadInput!.click();
+  }
 
   uploadInput!.addEventListener("change", () => {
     const file = uploadInput!.files?.[0];
@@ -167,6 +210,11 @@ function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, sessi
     if (file) handleUpload(file);
   });
 
+  contextMenuMediaButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    triggerMediaUpload();
+  });
+
   grantAccessButton!.addEventListener("click", async () => {
     const grantee = window.prompt("Grant room access to username:");
     if (!grantee) return;
@@ -175,6 +223,18 @@ function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, sessi
       statusEl!.textContent = `granted access to ${grantee}`;
     } catch (err) {
       statusEl!.textContent = `grant failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  });
+
+  copyBrowserSourceButton!.addEventListener("click", async () => {
+    const url = `${browserSourceUrl}/?roomId=${encodeURIComponent(roomId)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      statusEl!.textContent = "browser source URL copied to clipboard";
+    } catch (err) {
+      // Clipboard API can be denied (e.g. insecure context, permissions) --
+      // fall back to showing the URL directly so it's still usable.
+      statusEl!.textContent = `copy failed, URL: ${url}`;
     }
   });
 
@@ -188,14 +248,20 @@ function startApp(wsUrl: string, httpApiUrl: string, assetsDomain: string, sessi
     try {
       const result = await uploadFile(httpApiUrl, roomId, file);
       const viewport = canvas.getViewport();
+      const pos = createPosition ?? {
+        x: viewport.x + viewport.width / 2 - result.width / 2,
+        y: viewport.y + viewport.height / 2 - result.height / 2,
+      };
+      createPosition = undefined;
+
       connection.send({
         action: "asset:add",
         roomId,
         asset: {
           assetId: result.assetId,
           type: result.type,
-          x: viewport.x + viewport.width / 2 - result.width / 2,
-          y: viewport.y + viewport.height / 2 - result.height / 2,
+          x: pos.x,
+          y: pos.y,
           width: result.width,
           height: result.height,
           s3Key: result.s3Key,
