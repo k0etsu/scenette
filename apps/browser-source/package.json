@@ -7,7 +7,8 @@
     "build": "tsc --noEmit && esbuild src/main.ts --bundle --outfile=dist/main.js && cp index.html dist/index.html"
   },
   "dependencies": {
-    "@scenette/protocol": "*"
+    "@scenette/protocol": "*",
+    "@scenette/ws-client": "*"
   },
   "devDependencies": {
     "esbuild": "^0.23.0",

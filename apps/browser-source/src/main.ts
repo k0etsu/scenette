@@ -1,5 +1,5 @@
 import { ServerMessage } from "@scenette/protocol";
-import { ResilientConnection } from "./connection";
+import { ResilientConnection } from "@scenette/ws-client";
 import { Renderer } from "./render";
 
 // OBS browser sources are configured with a fully-qualified URL including
