@@ -2,27 +2,84 @@ import { ServerMessage } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { CanvasView } from "./canvas";
 import { uploadFile } from "./upload";
+import { loadConfig } from "./config";
+import { register, login, checkSession, logout, grantRoomAccess, SessionInfo } from "./auth";
 
-const params = new URLSearchParams(window.location.search);
-const roomId = params.get("roomId");
-const wsUrl = params.get("wsUrl");
-const httpApiUrl = params.get("httpApiUrl");
+const loginView = document.getElementById("login-view");
+const appView = document.getElementById("app-view");
+const loginForm = document.getElementById("login-form") as HTMLFormElement | null;
+const usernameInput = document.getElementById("login-username") as HTMLInputElement | null;
+const passwordInput = document.getElementById("login-password") as HTMLInputElement | null;
+const registerButton = document.getElementById("register-button");
+const loginError = document.getElementById("login-error");
 
 const canvasContainer = document.getElementById("canvas-container");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
 const addTextButton = document.getElementById("add-text-button");
+const grantAccessButton = document.getElementById("grant-access-button");
+const logoutButton = document.getElementById("logout-button");
 const statusEl = document.getElementById("status");
 
-if (!canvasContainer || !uploadInput || !addTextButton || !statusEl) {
+if (
+  !loginView || !appView || !loginForm || !usernameInput || !passwordInput || !registerButton || !loginError ||
+  !canvasContainer || !uploadInput || !addTextButton || !grantAccessButton || !logoutButton || !statusEl
+) {
   throw new Error("Missing required DOM elements");
 }
 
-if (!roomId || !wsUrl || !httpApiUrl) {
-  statusEl.textContent = "Missing roomId, wsUrl, or httpApiUrl query parameter";
-} else {
-  statusEl.textContent = `room: ${roomId}`;
+async function main(): Promise<void> {
+  const { wsUrl, httpApiUrl } = await loadConfig();
 
-  const canvas = new CanvasView(canvasContainer, {
+  let session = await checkSession(httpApiUrl);
+  if (!session) {
+    session = await promptLogin(httpApiUrl);
+  }
+
+  loginView!.style.display = "none";
+  appView!.style.display = "block";
+  startApp(wsUrl, httpApiUrl, session);
+}
+
+function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
+  return new Promise((resolve) => {
+    loginForm!.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      try {
+        loginError!.textContent = "";
+        const session = await login(httpApiUrl, usernameInput!.value, passwordInput!.value);
+        resolve(session);
+      } catch (err) {
+        loginError!.textContent = err instanceof Error ? err.message : String(err);
+      }
+    });
+
+    registerButton!.addEventListener("click", async () => {
+      try {
+        loginError!.textContent = "";
+        const session = await register(httpApiUrl, usernameInput!.value, passwordInput!.value);
+        resolve(session);
+      } catch (err) {
+        loginError!.textContent = err instanceof Error ? err.message : String(err);
+      }
+    });
+  });
+}
+
+function startApp(wsUrl: string, httpApiUrl: string, session: SessionInfo): void {
+  const params = new URLSearchParams(window.location.search);
+  const roomId = params.get("roomId") ?? session.personalRoomId;
+
+  if (!params.get("roomId")) {
+    // Landed here with no explicit room (the common case: a bare visit to
+    // the home page) — default to the account's own room and reflect that
+    // in the URL so it's bookmarkable/shareable going forward.
+    params.set("roomId", roomId);
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+  }
+
+  statusEl!.textContent = `room: ${roomId} (${session.username})`;
+
+  const canvas = new CanvasView(canvasContainer!, {
     onAssetMove: (assetId, x, y) => {
       connection.send({ action: "asset:move", roomId, assetId, x, y });
     },
@@ -47,11 +104,6 @@ if (!roomId || !wsUrl || !httpApiUrl) {
           canvas.upsert(message.asset);
           break;
         case "asset:moved": {
-          // The sender already applied its own move optimistically (see
-          // onAssetMove), but other collaborators' moves arrive only as
-          // this broadcast — merge the delta into whatever's rendered.
-          // Re-applying it on the sender's own client too is harmless
-          // (idempotent), so there's no need to special-case "was this us".
           const existing = canvas.get(message.assetId);
           if (existing) {
             canvas.upsert({
@@ -76,7 +128,7 @@ if (!roomId || !wsUrl || !httpApiUrl) {
 
   connection.start();
 
-  addTextButton.addEventListener("click", () => {
+  addTextButton!.addEventListener("click", () => {
     const text = window.prompt("Text content:");
     if (!text) return;
 
@@ -98,10 +150,10 @@ if (!roomId || !wsUrl || !httpApiUrl) {
     });
   });
 
-  uploadInput.addEventListener("change", () => {
-    const file = uploadInput.files?.[0];
+  uploadInput!.addEventListener("change", () => {
+    const file = uploadInput!.files?.[0];
     if (file) handleUpload(file);
-    uploadInput.value = "";
+    uploadInput!.value = "";
   });
 
   window.addEventListener("paste", (event) => {
@@ -111,8 +163,23 @@ if (!roomId || !wsUrl || !httpApiUrl) {
     if (file) handleUpload(file);
   });
 
+  grantAccessButton!.addEventListener("click", async () => {
+    const grantee = window.prompt("Grant room access to username:");
+    if (!grantee) return;
+    try {
+      await grantRoomAccess(httpApiUrl, roomId, grantee);
+      statusEl!.textContent = `granted access to ${grantee}`;
+    } catch (err) {
+      statusEl!.textContent = `grant failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  });
+
+  logoutButton!.addEventListener("click", async () => {
+    await logout(httpApiUrl);
+    window.location.href = window.location.pathname;
+  });
+
   async function handleUpload(file: File): Promise<void> {
-    if (!roomId || !httpApiUrl) return;
     statusEl!.textContent = `uploading ${file.name}...`;
     try {
       const result = await uploadFile(httpApiUrl, roomId, file);
@@ -130,9 +197,13 @@ if (!roomId || !wsUrl || !httpApiUrl) {
           s3Key: result.s3Key,
         },
       });
-      statusEl!.textContent = `room: ${roomId}`;
+      statusEl!.textContent = `room: ${roomId} (${session.username})`;
     } catch (err) {
       statusEl!.textContent = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 }
+
+main().catch((err) => {
+  document.body.textContent = `Failed to start: ${err instanceof Error ? err.message : String(err)}`;
+});

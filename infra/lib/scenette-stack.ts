@@ -74,6 +74,26 @@ export class ScenetteStack extends cdk.Stack {
       removalPolicy,
     });
 
+    // Lightweight username/password accounts — precedes real OAuth account
+    // linking (see AuthBrokerFn below, still stubbed). Session tokens are
+    // opaque (crypto.randomUUID, not signed) and looked up against this
+    // table, so logout/expiry is just a row delete/TTL — no signing secret
+    // to manage for what's meant to be a stopgap auth system.
+    const accountsTable = new dynamodb.Table(this, "AccountsTable", {
+      tableName: `scenette-${envName}-accounts`,
+      partitionKey: { name: "username", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy,
+    });
+
+    const sessionsTable = new dynamodb.Table(this, "SessionsTable", {
+      tableName: `scenette-${envName}-sessions`,
+      partitionKey: { name: "sessionToken", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy,
+    });
+
     // One item per placed asset: roomId+assetId as the key covers both the
     // "all assets in a room" access pattern (used by message.ts to build a
     // snapshot) and the "get one asset" pattern (move/delete) — no GSI needed.
@@ -233,6 +253,56 @@ export class ScenetteStack extends cdk.Stack {
       ),
     });
 
+    // ---- Accounts (lightweight username/password auth, HTTP API) ----
+
+    const accountsFn = new lambdaNode.NodejsFunction(this, "AccountsFn", {
+      entry: path.join(__dirname, "../../services/accounts/src/index.ts"),
+      runtime: lambda.Runtime.NODEJS_22_X,
+      environment: {
+        ACCOUNTS_TABLE: accountsTable.tableName,
+        SESSIONS_TABLE: sessionsTable.tableName,
+        MEMBERSHIPS_TABLE: membershipsTable.tableName,
+      },
+    });
+    accountsTable.grantReadWriteData(accountsFn);
+    sessionsTable.grantReadWriteData(accountsFn);
+    membershipsTable.grantReadWriteData(accountsFn);
+
+    const accountsIntegration = new apigwv2Integrations.HttpLambdaIntegration(
+      "AccountsIntegration",
+      accountsFn
+    );
+    httpApi.addRoutes({
+      path: "/auth/register",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/login",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/logout",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/session",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/rooms",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/rooms/{roomId}/grant",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+
     // ---- Retention job ----
 
     const retentionFn = new lambdaNode.NodejsFunction(this, "RetentionFn", {
@@ -290,11 +360,32 @@ export class ScenetteStack extends cdk.Stack {
       domainNames: [controlUiDomain],
       certificate,
     });
+    // Runtime config written alongside the static build output — the app
+    // fetches /config.json on load instead of requiring wsUrl/httpApiUrl as
+    // manual query params, since those values are only known once this
+    // stack's own WebSocket/HTTP APIs exist (i.e. right here, at deploy
+    // time), not at the app's build time.
+    //
+    // cacheControl: without this, S3 sends no caching header at all, which
+    // browsers still cache heuristically — a tab left open (or even just
+    // reopened) across a deploy can keep running the previous main.js
+    // indefinitely with no visible sign anything's stale. "no-cache" forces
+    // a revalidation request on every load rather than disabling caching
+    // outright, so a deploy takes effect on next visit without needing a
+    // manual hard refresh.
+    const noCache = [s3deploy.CacheControl.noCache(), s3deploy.CacheControl.mustRevalidate()];
     new s3deploy.BucketDeployment(this, "ControlUiDeployment", {
-      sources: [s3deploy.Source.asset(path.join(__dirname, "../../apps/control-ui/dist"))],
+      sources: [
+        s3deploy.Source.asset(path.join(__dirname, "../../apps/control-ui/dist")),
+        s3deploy.Source.jsonData("config.json", {
+          wsUrl: webSocketStage.url,
+          httpApiUrl: httpApi.apiEndpoint,
+        }),
+      ],
       destinationBucket: controlUiBucket,
       distribution: controlUiDistribution,
       distributionPaths: ["/*"],
+      cacheControl: noCache,
     });
 
     const browserSourceBucket = new s3.Bucket(this, "BrowserSourceBucket", {
@@ -312,10 +403,14 @@ export class ScenetteStack extends cdk.Stack {
       certificate,
     });
     new s3deploy.BucketDeployment(this, "BrowserSourceDeployment", {
-      sources: [s3deploy.Source.asset(path.join(__dirname, "../../apps/browser-source/dist"))],
+      sources: [
+        s3deploy.Source.asset(path.join(__dirname, "../../apps/browser-source/dist")),
+        s3deploy.Source.jsonData("config.json", { wsUrl: webSocketStage.url }),
+      ],
       destinationBucket: browserSourceBucket,
       distribution: browserSourceDistribution,
       distributionPaths: ["/*"],
+      cacheControl: noCache,
     });
 
     for (const [id, domain, distribution] of [

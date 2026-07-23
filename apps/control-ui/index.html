@@ -48,18 +48,76 @@
         box-sizing: border-box;
         pointer-events: auto;
       }
+      #login-view {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+      }
+      #login-form {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        width: 260px;
+        padding: 24px;
+        background: #26272e;
+        border-radius: 8px;
+      }
+      #login-form input {
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #444;
+        background: #1e1f24;
+        color: #eee;
+      }
+      #login-form .buttons {
+        display: flex;
+        gap: 8px;
+      }
+      #login-form .buttons button {
+        flex: 1;
+      }
+      #login-error {
+        color: #ff6b6b;
+        font-size: 13px;
+        min-height: 16px;
+      }
+      #login-hint {
+        color: #888;
+        font-size: 12px;
+      }
+      #app-view {
+        display: none;
+        height: 100%;
+      }
     </style>
   </head>
   <body>
-    <div id="toolbar">
-      <button id="add-text-button">Add text</button>
-      <label style="cursor: pointer">
-        Upload
-        <input id="upload-input" type="file" accept="image/*,video/*,audio/*" style="display: none" />
-      </label>
-      <span id="status"></span>
+    <div id="login-view">
+      <form id="login-form">
+        <input id="login-username" type="text" placeholder="Username" autocomplete="username" minlength="3" />
+        <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" minlength="8" />
+        <div id="login-hint">Registering requires a username of 3+ characters and a password of 8+ characters.</div>
+        <div id="login-error"></div>
+        <div class="buttons">
+          <button id="login-button" type="submit">Log in</button>
+          <button id="register-button" type="button">Register</button>
+        </div>
+      </form>
     </div>
-    <div id="canvas-container"></div>
+    <div id="app-view">
+      <div id="toolbar">
+        <button id="add-text-button">Add text</button>
+        <label style="cursor: pointer">
+          Upload
+          <input id="upload-input" type="file" accept="image/*,video/*,audio/*" style="display: none" />
+        </label>
+        <button id="grant-access-button">Grant room access</button>
+        <button id="logout-button">Log out</button>
+        <span id="status"></span>
+      </div>
+      <div id="canvas-container"></div>
+    </div>
     <script src="./main.js"></script>
   </body>
 </html>
