@@ -9,9 +9,20 @@ const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.001;
 
+// Caps how often a dragged asset's position is actually sent over the
+// network — local rendering stays instant every mousemove regardless (see
+// onMouseMove), but broadcasting every single pixel-delta event was
+// flooding the WebSocket and, worse, our own echoed move kept arriving
+// mid-drag and fighting with continued local movement, which is what made
+// dragging feel laggy/rubber-banded.
+const MOVE_SEND_THROTTLE_MS = 40;
+
 export interface CanvasCallbacks {
   onAssetMove: (assetId: string, x: number, y: number) => void;
   onAssetDelete: (assetId: string) => void;
+  // worldX/worldY: where a created asset should be placed. screenX/screenY:
+  // viewport-relative coordinates for positioning the context menu itself.
+  onContextMenu: (worldX: number, worldY: number, screenX: number, screenY: number) => void;
 }
 
 // The editing surface: a world-space plane containing the (fixed, per the
@@ -19,6 +30,10 @@ export interface CanvasCallbacks {
 // elements above it. Zoom/pan is local-only view state (see plan Q8: not
 // synced between collaborators), so none of it is sent over the wire —
 // only asset positions are.
+//
+// Mouse bindings: left click selects/drags assets, middle click pans,
+// scroll wheel zooms (anchored to the cursor), right click opens the
+// create-asset context menu.
 export class CanvasView {
   private readonly entries = new Map<string, Entry>();
   private readonly world: HTMLElement;
@@ -30,6 +45,7 @@ export class CanvasView {
 
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true };
+  private lastMoveSentAt = 0;
 
   constructor(
     private readonly container: HTMLElement,
@@ -95,6 +111,20 @@ export class CanvasView {
     this.applyTransform(entry.el, asset);
   }
 
+  // Applies a move that originated from the network (another collaborator,
+  // or the server's echo of our own throttled send) — distinct from the
+  // instant local application during an active drag in onMouseMove. If this
+  // asset is the one currently being dragged locally, the update is
+  // dropped: local optimistic state is authoritative mid-drag, and applying
+  // a slightly-stale echoed position would fight with continued mousemove
+  // deltas.
+  applyRemoteMove(assetId: string, x: number, y: number, rotation: number, visible: boolean): void {
+    if (this.dragging && "assetId" in this.dragging && this.dragging.assetId === assetId) return;
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    this.upsert({ ...entry.asset, x, y, rotation, visible });
+  }
+
   remove(assetId: string): void {
     const entry = this.entries.get(assetId);
     if (entry) {
@@ -121,6 +151,7 @@ export class CanvasView {
       case "gif": {
         const img = document.createElement("img");
         if (asset.s3Key) img.src = this.mediaUrl(asset.s3Key);
+        img.draggable = false;
         el = img;
         break;
       }
@@ -153,24 +184,48 @@ export class CanvasView {
 
   private bindContainerEvents(): void {
     this.container.addEventListener("mousedown", (event) => {
-      if (event.target === this.container || event.target === this.world) {
+      if (event.button === 1) {
+        // Middle click pans regardless of what's under the cursor (even an
+        // asset) — browsers auto-scroll on middle-click by default, so this
+        // must be prevented or panning fights with that native behavior.
+        event.preventDefault();
         this.dragging = { panning: true };
+        return;
+      }
+      if (event.button === 0 && (event.target === this.container || event.target === this.world)) {
         this.selectedAssetId = undefined;
         this.refreshSelectionOutlines();
       }
     });
 
     window.addEventListener("mousemove", (event) => this.onMouseMove(event));
-    window.addEventListener("mouseup", () => {
-      this.dragging = undefined;
+    window.addEventListener("mouseup", () => this.onMouseUp());
+
+    this.container.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      const rect = this.container.getBoundingClientRect();
+      const screenX = event.clientX - rect.left;
+      const screenY = event.clientY - rect.top;
+      const world = this.screenToWorld(screenX, screenY);
+      this.callbacks.onContextMenu(world.x, world.y, screenX, screenY);
     });
 
     this.container.addEventListener(
       "wheel",
       (event) => {
         event.preventDefault();
-        const next = this.zoom * (1 - event.deltaY * ZOOM_STEP);
-        this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, next));
+        const rect = this.container.getBoundingClientRect();
+        const screenX = event.clientX - rect.left;
+        const screenY = event.clientY - rect.top;
+
+        // Cursor-centered zoom: find the world point currently under the
+        // cursor, change zoom, then solve for the pan that keeps that same
+        // world point under the same screen position.
+        const worldUnderCursor = this.screenToWorld(screenX, screenY);
+        const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * (1 - event.deltaY * ZOOM_STEP)));
+        this.pan.x = screenX - worldUnderCursor.x * nextZoom;
+        this.pan.y = screenY - worldUnderCursor.y * nextZoom;
+        this.zoom = nextZoom;
         this.applyWorldTransform();
       },
       { passive: false }
@@ -186,6 +241,10 @@ export class CanvasView {
   }
 
   private onAssetMouseDown(event: MouseEvent, assetId: string): void {
+    // Only left click selects/drags — middle click (panning) and right
+    // click (context menu) both need to fall through to the container's
+    // own handlers rather than being captured here.
+    if (event.button !== 0) return;
     event.stopPropagation();
     this.selectedAssetId = assetId;
     this.refreshSelectionOutlines();
@@ -212,7 +271,29 @@ export class CanvasView {
     const dy = event.movementY / this.zoom;
     entry.asset = { ...entry.asset, x: entry.asset.x + dx, y: entry.asset.y + dy };
     this.applyTransform(entry.el, entry.asset);
-    this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
+
+    const now = performance.now();
+    if (now - this.lastMoveSentAt >= MOVE_SEND_THROTTLE_MS) {
+      this.lastMoveSentAt = now;
+      this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
+    }
+  }
+
+  private onMouseUp(): void {
+    if (this.dragging && "assetId" in this.dragging) {
+      // Always flush the exact final position on release, bypassing the
+      // throttle — otherwise the last few pixels of a drag could be lost if
+      // the mouse-up lands inside the throttle window.
+      const entry = this.entries.get(this.dragging.assetId);
+      if (entry) {
+        this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
+      }
+    }
+    this.dragging = undefined;
+  }
+
+  private screenToWorld(screenX: number, screenY: number): { x: number; y: number } {
+    return { x: (screenX - this.pan.x) / this.zoom, y: (screenY - this.pan.y) / this.zoom };
   }
 
   private refreshSelectionOutlines(): void {
@@ -226,9 +307,7 @@ export class CanvasView {
   }
 
   // Media lives in the assets bucket/distribution, a completely separate
-  // CloudFront distribution from the one serving this app itself — an
-  // earlier version of this pointed at "/" + s3Key (relative to control-ui's
-  // own origin), which 403'd since that bucket never had the object at all.
+  // CloudFront distribution from the one serving this app itself.
   private mediaUrl(s3Key: string): string {
     return `https://${this.assetsDomain}/${s3Key}`;
   }
