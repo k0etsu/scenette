@@ -1,10 +1,11 @@
 import { ServerMessage } from "@scenette/protocol";
 
 // API Gateway WebSocket connections have a hard 2-hour lifetime and a
-// 10-minute idle timeout — a stream can run far longer than that, so this
+// 10-minute idle timeout — both control-ui editing sessions and (especially)
+// the browser-source's OBS-embedded connection can outlive that, so this
 // reconnects proactively well before the limit. The swap is silent: a new
 // connection is opened and confirmed live before the old one is torn down,
-// so the last-rendered frame never disappears from the viewer's screen.
+// so nothing is ever visibly dropped mid-session.
 const RECONNECT_BEFORE_LIMIT_MS = 100 * 60 * 1000; // reconnect at the 100-minute mark
 const RETRY_BACKOFF_MS = [1000, 2000, 5000, 10000, 30000];
 
@@ -44,7 +45,7 @@ export class ResilientConnection {
       this.socket = next;
 
       // Only tear down the old socket once the new one is confirmed live —
-      // this is what keeps the render uninterrupted across a proactive swap.
+      // this is what keeps the client uninterrupted across a proactive swap.
       previous?.close();
       this.options.onOpen();
 
@@ -55,7 +56,7 @@ export class ResilientConnection {
       try {
         this.options.onMessage(JSON.parse(event.data));
       } catch {
-        // Malformed frame from the server — ignore rather than crash the render loop.
+        // Malformed frame from the server — ignore rather than crash the caller.
       }
     };
 
