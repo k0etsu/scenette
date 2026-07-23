@@ -2,20 +2,27 @@ import { ServerMessage } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { Renderer } from "./render";
 
-// OBS browser sources are configured with a fully-qualified URL including
-// query params — no build-time config needed, everything comes from the URL
-// the streamer pastes into their browser source settings.
-const params = new URLSearchParams(window.location.search);
-const roomId = params.get("roomId");
-const wsUrl = params.get("wsUrl");
-
 const root = document.getElementById("viewport-root");
 if (!root) throw new Error("Missing #viewport-root element");
 
-if (!roomId || !wsUrl) {
-  root.textContent = "scenette browser source: missing roomId or wsUrl query parameter";
-} else {
-  const renderer = new Renderer(root);
+async function main(): Promise<void> {
+  const params = new URLSearchParams(window.location.search);
+  const roomId = params.get("roomId");
+  if (!roomId) {
+    root!.textContent = "scenette browser source: missing roomId query parameter";
+    return;
+  }
+
+  // wsUrl comes from the deployed infra's /config.json (baked in at deploy
+  // time, since it doesn't exist until this stack's own WebSocket API does)
+  // unless explicitly overridden via query param for local testing.
+  const wsUrl = params.get("wsUrl") ?? (await fetchConfiguredWsUrl());
+  if (!wsUrl) {
+    root!.textContent = "scenette browser source: missing wsUrl (no query param and /config.json unavailable)";
+    return;
+  }
+
+  const renderer = new Renderer(root!);
 
   const connection = new ResilientConnection({
     wsUrl,
@@ -63,3 +70,16 @@ if (!roomId || !wsUrl) {
 
   connection.start();
 }
+
+async function fetchConfiguredWsUrl(): Promise<string | undefined> {
+  try {
+    const res = await fetch("/config.json");
+    if (!res.ok) return undefined;
+    const config = (await res.json()) as { wsUrl?: string };
+    return config.wsUrl;
+  } catch {
+    return undefined;
+  }
+}
+
+main();
