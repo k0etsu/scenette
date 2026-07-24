@@ -138,9 +138,16 @@ export class ScenetteStack extends cdk.Stack {
 
     // ---- WebSocket API ----
 
+    // 256MB rather than the 128MB default: Lambda's init-phase CPU scales
+    // with configured memory, so this directly cuts cold-start latency on
+    // these three -- they're on the critical path for how responsive a
+    // drag/pan/resize feels the moment a room's connections go cold (no
+    // traffic for ~5-15 min). At this workload's invocation volume the cost
+    // delta is negligible; it's not a real cost/latency trade-off here.
     const connectFn = new lambdaNode.NodejsFunction(this, "ConnectFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/connect.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
       environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
     });
     connectionsTable.grantWriteData(connectFn);
@@ -148,6 +155,7 @@ export class ScenetteStack extends cdk.Stack {
     const disconnectFn = new lambdaNode.NodejsFunction(this, "DisconnectFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/disconnect.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
       environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
     });
     connectionsTable.grantWriteData(disconnectFn);
@@ -155,6 +163,7 @@ export class ScenetteStack extends cdk.Stack {
     const messageFn = new lambdaNode.NodejsFunction(this, "MessageFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/message.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
+      memorySize: 256,
       environment: {
         CONNECTIONS_TABLE: connectionsTable.tableName,
         ASSETS_TABLE: assetsTable.tableName,
