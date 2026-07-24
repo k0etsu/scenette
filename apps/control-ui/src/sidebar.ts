@@ -270,22 +270,22 @@ export class Sidebar {
     const rotationValue = el<HTMLElement>("rotation-value");
     rotationInput.addEventListener("input", () => {
       rotationValue.textContent = rotationInput.value;
+      patch({ rotation: Number(rotationInput.value) });
     });
-    rotationInput.addEventListener("change", () => patch({ rotation: Number(rotationInput.value) }));
 
     const opacityInput = el<HTMLInputElement>("opacity");
     const opacityValue = el<HTMLElement>("opacity-value");
     opacityInput.addEventListener("input", () => {
       opacityValue.textContent = opacityInput.value;
+      patch({ opacity: Number(opacityInput.value) / 100 });
     });
-    opacityInput.addEventListener("change", () => patch({ opacity: Number(opacityInput.value) / 100 }));
 
     const blurInput = el<HTMLInputElement>("blur");
     const blurValue = el<HTMLElement>("blur-value");
     blurInput.addEventListener("input", () => {
       blurValue.textContent = blurInput.value;
+      patch({ blur: Number(blurInput.value) });
     });
-    blurInput.addEventListener("change", () => patch({ blur: Number(blurInput.value) }));
 
     el<HTMLButtonElement>("flip-x").addEventListener("click", () => {
       const current = this.assets.get(assetId);
@@ -311,8 +311,8 @@ export class Sidebar {
       const volumeValue = el<HTMLElement>("volume-value");
       volumeInput.addEventListener("input", () => {
         volumeValue.textContent = volumeInput.value;
+        patch({ volume: Number(volumeInput.value) / 100 });
       });
-      volumeInput.addEventListener("change", () => patch({ volume: Number(volumeInput.value) / 100 }));
     }
   }
 }
