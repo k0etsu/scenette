@@ -24,9 +24,23 @@ const SNAP_EPSILON = 0.5;
 export class Renderer {
   private readonly entries = new Map<string, Entry>();
   private viewport: Viewport = { roomId: "", x: 0, y: 0, width: 1920, height: 1080 };
-  private animationRunning = false;
 
-  constructor(private readonly root: HTMLElement, private readonly assetsDomain: string) {}
+  constructor(private readonly root: HTMLElement, private readonly assetsDomain: string) {
+    // Runs forever, not just while geometry is actively interpolating.
+    // jsdom-based tests can't catch this class of bug (it doesn't do real
+    // paint/compositing), but a page with no ongoing requestAnimationFrame
+    // activity risks having non-geometric style changes (opacity/blur/
+    // rotation/flip -- anything applied outside the interpolation path)
+    // never actually get flushed to a captured frame, since some browser/
+    // CEF (OBS's renderer) power-saving heuristics assume "no rAF = nothing
+    // visually changing = safe to skip compositing." A continuous rAF loop
+    // guarantees every applied style change gets composited on the very
+    // next frame regardless of the specific capture pipeline's heuristics.
+    // The idempotent per-frame paint() calls are cheap (pure style writes,
+    // no layout reads), so this isn't a meaningful CPU cost for what's a
+    // single always-visible overlay page.
+    requestAnimationFrame(() => this.tick());
+  }
 
   setViewport(viewport: Viewport): void {
     this.viewport = viewport;
@@ -72,7 +86,6 @@ export class Renderer {
     }
     entry.asset = asset;
     this.applyImmediateFields(entry);
-    this.ensureAnimating();
   }
 
   remove(assetId: string): void {
@@ -83,14 +96,7 @@ export class Renderer {
     }
   }
 
-  private ensureAnimating(): void {
-    if (this.animationRunning) return;
-    this.animationRunning = true;
-    requestAnimationFrame(() => this.tick());
-  }
-
   private tick(): void {
-    let anyMoving = false;
     for (const entry of this.entries.values()) {
       const { rendered, asset } = entry;
       const dx = asset.x - rendered.x;
@@ -108,18 +114,11 @@ export class Renderer {
         rendered.y += dy * SMOOTHING_FACTOR;
         rendered.width += dw * SMOOTHING_FACTOR;
         rendered.height += dh * SMOOTHING_FACTOR;
-        anyMoving = true;
       }
       this.paint(entry);
     }
 
-    if (anyMoving) {
-      requestAnimationFrame(() => this.tick());
-    } else {
-      // Stop the loop when everything's settled — no point spending CPU/battery
-      // animating a static scene, which is exactly what this renders most of the time.
-      this.animationRunning = false;
-    }
+    requestAnimationFrame(() => this.tick());
   }
 
   private paint(entry: Entry): void {

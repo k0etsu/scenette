@@ -1,4 +1,5 @@
 import { Asset, AssetPatch, Viewport } from "@scenette/protocol";
+import { ICON_AUDIO_LARGE } from "./icons";
 
 interface Entry {
   el: HTMLElement;
@@ -335,7 +336,10 @@ export class CanvasView {
       }
       case "audio": {
         const audio = document.createElement("div");
-        audio.textContent = "🔊 audio";
+        audio.style.display = "flex";
+        audio.style.alignItems = "center";
+        audio.style.justifyContent = "center";
+        audio.innerHTML = ICON_AUDIO_LARGE;
         el = audio;
         break;
       }

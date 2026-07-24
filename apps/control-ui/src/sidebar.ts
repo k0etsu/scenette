@@ -1,4 +1,18 @@
 import { Asset, AssetPatch, AssetType } from "@scenette/protocol";
+import {
+  ICON_EYE,
+  ICON_EYE_OFF,
+  ICON_LOCK,
+  ICON_UNLOCK,
+  ICON_TRASH,
+  ICON_DUPLICATE,
+  ICON_PLAY,
+  ICON_PAUSE,
+  ICON_TEXT,
+  ICON_IMAGE,
+  ICON_VIDEO,
+  ICON_AUDIO,
+} from "./icons";
 
 export interface SidebarCallbacks {
   onSelect: (assetId: string) => void;
@@ -13,11 +27,11 @@ export interface SidebarCallbacks {
 }
 
 const TYPE_ICON: Record<AssetType, string> = {
-  text: "🅰",
-  image: "🖼",
-  gif: "🖼",
-  video: "🎬",
-  audio: "🔊",
+  text: ICON_TEXT,
+  image: ICON_IMAGE,
+  gif: ICON_IMAGE,
+  video: ICON_VIDEO,
+  audio: ICON_AUDIO,
 };
 
 // Objects list + properties panel — lets a streamer/mod adjust an existing
@@ -92,37 +106,44 @@ export class Sidebar {
 
       const icon = document.createElement("span");
       icon.className = "object-icon";
-      icon.textContent = TYPE_ICON[asset.type];
+      icon.innerHTML = TYPE_ICON[asset.type];
 
       const name = document.createElement("span");
       name.className = "object-name";
       name.textContent = displayName(asset);
       name.title = displayName(asset);
 
+      // Reads this.assets.get(assetId) fresh at click time rather than
+      // closing over the `asset` from this render pass -- with a fast
+      // double-click (or any click before the server round-trip re-renders
+      // the row), a captured-at-render-time value would be stale, sending
+      // the same "toggle" value twice instead of actually toggling back.
       const eyeButton = document.createElement("button");
       eyeButton.type = "button";
       eyeButton.className = "sidebar-icon-button";
-      eyeButton.textContent = asset.hidden ? "🙈" : "👁";
+      eyeButton.innerHTML = asset.hidden ? ICON_EYE_OFF : ICON_EYE;
       eyeButton.title = asset.hidden ? "Show to viewers" : "Hide from viewers";
       eyeButton.addEventListener("click", (event) => {
         event.stopPropagation();
-        this.callbacks.onToggleHidden(asset.assetId, !asset.hidden);
+        const current = this.assets.get(asset.assetId);
+        if (current) this.callbacks.onToggleHidden(asset.assetId, !current.hidden);
       });
 
       const lockButton = document.createElement("button");
       lockButton.type = "button";
       lockButton.className = "sidebar-icon-button";
-      lockButton.textContent = asset.locked ? "🔒" : "🔓";
+      lockButton.innerHTML = asset.locked ? ICON_LOCK : ICON_UNLOCK;
       lockButton.title = asset.locked ? "Unlock" : "Lock (prevent drag/resize)";
       lockButton.addEventListener("click", (event) => {
         event.stopPropagation();
-        this.callbacks.onToggleLocked(asset.assetId, !asset.locked);
+        const current = this.assets.get(asset.assetId);
+        if (current) this.callbacks.onToggleLocked(asset.assetId, !current.locked);
       });
 
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
       deleteButton.className = "sidebar-icon-button";
-      deleteButton.textContent = "🗑";
+      deleteButton.innerHTML = ICON_TRASH;
       deleteButton.title = "Delete";
       deleteButton.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -153,10 +174,10 @@ export class Sidebar {
         <span title="${escapeHtml(displayName(asset))}">${escapeHtml(displayName(asset))}</span>
       </div>
       <div class="properties-buttons">
-        <button type="button" data-role="delete" class="sidebar-icon-button danger">🗑</button>
-        <button type="button" data-role="toggle-hidden" class="sidebar-icon-button">${asset.hidden ? "🙈" : "👁"}</button>
-        <button type="button" data-role="toggle-locked" class="sidebar-icon-button">${asset.locked ? "🔒" : "🔓"}</button>
-        <button type="button" data-role="duplicate" class="sidebar-icon-button">⧉</button>
+        <button type="button" data-role="delete" class="sidebar-icon-button danger">${ICON_TRASH}</button>
+        <button type="button" data-role="toggle-hidden" class="sidebar-icon-button">${asset.hidden ? ICON_EYE_OFF : ICON_EYE}</button>
+        <button type="button" data-role="toggle-locked" class="sidebar-icon-button">${asset.locked ? ICON_LOCK : ICON_UNLOCK}</button>
+        <button type="button" data-role="duplicate" class="sidebar-icon-button">${ICON_DUPLICATE}</button>
       </div>
       ${asset.type === "text" ? `
         <label class="prop-label">Text</label>
@@ -199,7 +220,7 @@ export class Sidebar {
       ${asset.type === "video" || asset.type === "audio" ? `
         <div class="sidebar-header"><span>Playback</span></div>
         <div class="properties-buttons">
-          <button type="button" data-role="play-pause">${asset.paused ? "▶ Play" : "⏸ Pause"}</button>
+          <button type="button" data-role="play-pause">${asset.paused ? ICON_PLAY : ICON_PAUSE}</button>
           <label class="prop-checkbox"><input type="checkbox" data-role="loop" ${asset.loop ? "checked" : ""} /> Loop</label>
           <label class="prop-checkbox"><input type="checkbox" data-role="muted" ${asset.muted ? "checked" : ""} /> Mute</label>
         </div>
@@ -211,12 +232,17 @@ export class Sidebar {
     const el = <T extends HTMLElement>(role: string) => this.propertiesPanel.querySelector<T>(`[data-role="${role}"]`)!;
 
     el<HTMLButtonElement>("delete").addEventListener("click", () => this.callbacks.onDelete(assetId));
-    el<HTMLButtonElement>("toggle-hidden").addEventListener("click", () =>
-      this.callbacks.onToggleHidden(assetId, !asset.hidden)
-    );
-    el<HTMLButtonElement>("toggle-locked").addEventListener("click", () =>
-      this.callbacks.onToggleLocked(assetId, !asset.locked)
-    );
+    // Reads this.assets.get(assetId) fresh at click time -- see the same
+    // note on the objects-list eye/lock buttons above for why closing over
+    // `asset` from this render pass would go stale on a rapid second click.
+    el<HTMLButtonElement>("toggle-hidden").addEventListener("click", () => {
+      const current = this.assets.get(assetId);
+      if (current) this.callbacks.onToggleHidden(assetId, !current.hidden);
+    });
+    el<HTMLButtonElement>("toggle-locked").addEventListener("click", () => {
+      const current = this.assets.get(assetId);
+      if (current) this.callbacks.onToggleLocked(assetId, !current.locked);
+    });
     el<HTMLButtonElement>("duplicate").addEventListener("click", () => this.callbacks.onDuplicate(assetId));
 
     if (asset.type === "text") {
@@ -261,11 +287,20 @@ export class Sidebar {
     });
     blurInput.addEventListener("change", () => patch({ blur: Number(blurInput.value) }));
 
-    el<HTMLButtonElement>("flip-x").addEventListener("click", () => patch({ flipX: !asset.flipX }));
-    el<HTMLButtonElement>("flip-y").addEventListener("click", () => patch({ flipY: !asset.flipY }));
+    el<HTMLButtonElement>("flip-x").addEventListener("click", () => {
+      const current = this.assets.get(assetId);
+      if (current) patch({ flipX: !current.flipX });
+    });
+    el<HTMLButtonElement>("flip-y").addEventListener("click", () => {
+      const current = this.assets.get(assetId);
+      if (current) patch({ flipY: !current.flipY });
+    });
 
     if (asset.type === "video" || asset.type === "audio") {
-      el<HTMLButtonElement>("play-pause").addEventListener("click", () => patch({ paused: !asset.paused }));
+      el<HTMLButtonElement>("play-pause").addEventListener("click", () => {
+        const current = this.assets.get(assetId);
+        if (current) patch({ paused: !current.paused });
+      });
       el<HTMLInputElement>("loop").addEventListener("change", (e) =>
         patch({ loop: (e.target as HTMLInputElement).checked })
       );

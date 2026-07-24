@@ -125,15 +125,38 @@ function startApp(
     assetsDomain
   );
 
+  // canvas.patchAsset/setAssetPosition/setAssetSize all apply their change
+  // to canvas's own local state immediately (optimistic, same as a mouse
+  // drag) -- but the sidebar has its own separate copy of asset data for
+  // rendering the objects list/properties panel, which otherwise wouldn't
+  // reflect that change until the server's broadcast round-trips back.
+  // Without this, a fast second click (e.g. double-toggling hidden) reads
+  // stale sidebar data and can send the same value twice instead of
+  // actually toggling.
   const sidebar = new Sidebar(objectsPanel!, propertiesPanel!, {
     onSelect: (assetId) => canvas.selectAsset(assetId),
-    onToggleHidden: (assetId, hidden) => canvas.patchAsset(assetId, { hidden }),
-    onToggleLocked: (assetId, locked) => canvas.patchAsset(assetId, { locked }),
+    onToggleHidden: (assetId, hidden) => {
+      canvas.patchAsset(assetId, { hidden });
+      syncSidebarFromCanvas(assetId);
+    },
+    onToggleLocked: (assetId, locked) => {
+      canvas.patchAsset(assetId, { locked });
+      syncSidebarFromCanvas(assetId);
+    },
     onDelete: (assetId) => connection.send({ action: "asset:delete", roomId, assetId }),
     onDuplicate: (assetId) => duplicateAsset(assetId),
-    onPatch: (assetId, patch) => canvas.patchAsset(assetId, patch),
-    onMove: (assetId, x, y) => canvas.setAssetPosition(assetId, x, y),
-    onResize: (assetId, width, height) => canvas.setAssetSize(assetId, width, height),
+    onPatch: (assetId, patch) => {
+      canvas.patchAsset(assetId, patch);
+      syncSidebarFromCanvas(assetId);
+    },
+    onMove: (assetId, x, y) => {
+      canvas.setAssetPosition(assetId, x, y);
+      syncSidebarFromCanvas(assetId);
+    },
+    onResize: (assetId, width, height) => {
+      canvas.setAssetSize(assetId, width, height);
+      syncSidebarFromCanvas(assetId);
+    },
     onCreateClick: () => {
       const rect = objectsPanel!.getBoundingClientRect();
       createPosition = undefined; // sidebar-triggered creates default to viewport center
