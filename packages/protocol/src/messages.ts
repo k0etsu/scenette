@@ -31,6 +31,10 @@ export interface AssetMoveMessage {
   x: number;
   y: number;
   rotation?: number;
+  // See Asset.seq — a client-assigned monotonic counter so the server (and
+  // every downstream receiver) can reject anything older than what's
+  // already been applied, regardless of network/Lambda delivery order.
+  seq: number;
 }
 
 // Carries x/y alongside width/height (not just a size delta) because
@@ -44,6 +48,7 @@ export interface AssetResizeMessage {
   y: number;
   width: number;
   height: number;
+  seq: number;
 }
 
 export interface AssetDeleteMessage {
@@ -64,7 +69,15 @@ export type ClientMessage =
 export type ServerMessage =
   | { type: "room:snapshot"; assets: Asset[]; viewport: { x: number; y: number; width: number; height: number } }
   | { type: "asset:added"; asset: Asset }
-  | { type: "asset:moved"; assetId: string; x: number; y: number; rotation: number; visible: boolean }
+  | {
+      type: "asset:moved";
+      assetId: string;
+      x: number;
+      y: number;
+      rotation: number;
+      visible: boolean;
+      seq: number;
+    }
   | {
       type: "asset:resized";
       assetId: string;
@@ -73,6 +86,7 @@ export type ServerMessage =
       width: number;
       height: number;
       visible: boolean;
+      seq: number;
     }
   | { type: "asset:deleted"; assetId: string }
   | { type: "error"; message: string };
@@ -129,6 +143,7 @@ export function parseClientMessage(raw: string): ClientMessage {
     case "asset:move": {
       if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
       if (typeof msg.x !== "number" || typeof msg.y !== "number") throw new Error("Missing x/y");
+      if (typeof msg.seq !== "number") throw new Error("Missing seq");
       return {
         action: "asset:move",
         roomId: msg.roomId,
@@ -136,12 +151,13 @@ export function parseClientMessage(raw: string): ClientMessage {
         x: msg.x,
         y: msg.y,
         rotation: typeof msg.rotation === "number" ? msg.rotation : undefined,
+        seq: msg.seq,
       };
     }
 
     case "asset:resize": {
       if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
-      for (const key of ["x", "y", "width", "height"] as const) {
+      for (const key of ["x", "y", "width", "height", "seq"] as const) {
         if (typeof msg[key] !== "number") throw new Error(`Missing/invalid ${key}`);
       }
       return {
@@ -152,6 +168,7 @@ export function parseClientMessage(raw: string): ClientMessage {
         y: msg.y as number,
         width: msg.width as number,
         height: msg.height as number,
+        seq: msg.seq as number,
       };
     }
 

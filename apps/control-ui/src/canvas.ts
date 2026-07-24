@@ -27,8 +27,8 @@ const MIN_ASSET_SIZE = 20;
 const MOVE_SEND_THROTTLE_MS = 40;
 
 export interface CanvasCallbacks {
-  onAssetMove: (assetId: string, x: number, y: number) => void;
-  onAssetResize: (assetId: string, x: number, y: number, width: number, height: number) => void;
+  onAssetMove: (assetId: string, x: number, y: number, seq: number) => void;
+  onAssetResize: (assetId: string, x: number, y: number, width: number, height: number, seq: number) => void;
   onAssetDelete: (assetId: string) => void;
   // worldX/worldY: where a created asset should be placed. screenX/screenY:
   // viewport-relative coordinates for positioning the context menu itself.
@@ -67,6 +67,12 @@ export class CanvasView {
   // event, so nothing is lost) fixes that independently of network timing.
   private pendingRender?: () => void;
   private rafScheduled = false;
+
+  // Global monotonic counter shared across all assets — a later real-time
+  // event for a given asset always gets a strictly larger value than any
+  // earlier one for that same asset, which is all the per-asset ordering
+  // check (see Asset.seq) needs; it doesn't need to be per-asset itself.
+  private nextSeq = 0;
 
   constructor(
     private readonly container: HTMLElement,
@@ -160,18 +166,32 @@ export class CanvasView {
   // locally, the update is dropped: local optimistic state is authoritative
   // mid-gesture, and applying a slightly-stale echo would fight with
   // continued mouse movement.
-  applyRemoteMove(assetId: string, x: number, y: number, rotation: number, visible: boolean): void {
+  applyRemoteMove(assetId: string, x: number, y: number, rotation: number, visible: boolean, seq: number): void {
     if (this.dragging && "assetId" in this.dragging && this.dragging.assetId === assetId) return;
     const entry = this.entries.get(assetId);
     if (!entry) return;
-    this.upsert({ ...entry.asset, x, y, rotation, visible });
+    // Defense in depth beyond the server's own conditional-write ordering
+    // guard: even a write that won the race server-side could still arrive
+    // at this specific connection after a chronologically later message,
+    // purely due to network/API Gateway delivery timing.
+    if (seq < entry.asset.seq) return;
+    this.upsert({ ...entry.asset, x, y, rotation, visible, seq });
   }
 
-  applyRemoteResize(assetId: string, x: number, y: number, width: number, height: number, visible: boolean): void {
+  applyRemoteResize(
+    assetId: string,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    visible: boolean,
+    seq: number
+  ): void {
     if (this.dragging && "resizing" in this.dragging && this.dragging.resizing.assetId === assetId) return;
     const entry = this.entries.get(assetId);
     if (!entry) return;
-    this.upsert({ ...entry.asset, x, y, width, height, visible });
+    if (seq < entry.asset.seq) return;
+    this.upsert({ ...entry.asset, x, y, width, height, visible, seq });
   }
 
   remove(assetId: string): void {
@@ -341,7 +361,15 @@ export class CanvasView {
       const now = performance.now();
       if (now - this.lastMoveSentAt >= MOVE_SEND_THROTTLE_MS) {
         this.lastMoveSentAt = now;
-        this.callbacks.onAssetResize(entry.asset.assetId, entry.asset.x, entry.asset.y, entry.asset.width, entry.asset.height);
+        entry.asset = { ...entry.asset, seq: ++this.nextSeq };
+        this.callbacks.onAssetResize(
+          entry.asset.assetId,
+          entry.asset.x,
+          entry.asset.y,
+          entry.asset.width,
+          entry.asset.height,
+          entry.asset.seq
+        );
       }
       return;
     }
@@ -357,7 +385,8 @@ export class CanvasView {
     const now = performance.now();
     if (now - this.lastMoveSentAt >= MOVE_SEND_THROTTLE_MS) {
       this.lastMoveSentAt = now;
-      this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
+      entry.asset = { ...entry.asset, seq: ++this.nextSeq };
+      this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y, entry.asset.seq);
     }
   }
 
@@ -398,16 +427,21 @@ export class CanvasView {
       // if the mouse-up lands inside the throttle window.
       if ("assetId" in this.dragging) {
         const entry = this.entries.get(this.dragging.assetId);
-        if (entry) this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y);
+        if (entry) {
+          entry.asset = { ...entry.asset, seq: ++this.nextSeq };
+          this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y, entry.asset.seq);
+        }
       } else if ("resizing" in this.dragging) {
         const entry = this.entries.get(this.dragging.resizing.assetId);
         if (entry) {
+          entry.asset = { ...entry.asset, seq: ++this.nextSeq };
           this.callbacks.onAssetResize(
             entry.asset.assetId,
             entry.asset.x,
             entry.asset.y,
             entry.asset.width,
-            entry.asset.height
+            entry.asset.height,
+            entry.asset.seq
           );
         }
       }

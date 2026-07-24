@@ -49,21 +49,30 @@ async function main(): Promise<void> {
           // The server only sends the delta, not the full asset — merge it into
           // what's already rendered rather than requiring a full asset payload
           // on every move (these fire continuously during a drag).
+          //
+          // browser-source has no local prediction of its own (unlike
+          // control-ui, which renders its own drag instantly) -- it's
+          // entirely at the mercy of message delivery order. WebSocket
+          // messages for rapid successive edits aren't guaranteed to
+          // arrive/process in order, so without this seq check a
+          // late-arriving stale update would visibly render as the asset
+          // jumping backward to an old position before "catching up" again.
           const existing = renderer.get(message.assetId);
-          if (existing) {
+          if (existing && message.seq >= existing.seq) {
             renderer.upsert({
               ...existing,
               x: message.x,
               y: message.y,
               rotation: message.rotation,
               visible: message.visible,
+              seq: message.seq,
             });
           }
           break;
         }
         case "asset:resized": {
           const existing = renderer.get(message.assetId);
-          if (existing) {
+          if (existing && message.seq >= existing.seq) {
             renderer.upsert({
               ...existing,
               x: message.x,
@@ -71,6 +80,7 @@ async function main(): Promise<void> {
               width: message.width,
               height: message.height,
               visible: message.visible,
+              seq: message.seq,
             });
           }
           break;
