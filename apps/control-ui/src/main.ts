@@ -297,6 +297,12 @@ function startApp(
       paused: source.paused,
     };
     connection.send({ action: "asset:add", roomId, asset });
+    // Select the new copy, not the original -- matches standard duplicate
+    // behavior (Figma, PowerPoint, etc.) so an immediate follow-up edit or
+    // delete applies to the copy. Safe to select before the asset:added
+    // broadcast round-trips: canvas/sidebar both tolerate selecting an ID
+    // that doesn't have an entry yet and pick it up once upsert() runs.
+    canvas.selectAsset(asset.assetId);
   }
 
   grantAccessButton!.addEventListener("click", async () => {
