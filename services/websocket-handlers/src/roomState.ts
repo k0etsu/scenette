@@ -68,8 +68,9 @@ export async function moveAsset(
   x: number,
   y: number,
   rotation: number | undefined,
+  seq: number,
   viewport: Viewport
-): Promise<{ visible: boolean; rotation: number } | undefined> {
+): Promise<{ visible: boolean; rotation: number } | "stale" | undefined> {
   const existing = await getAsset(roomId, assetId);
   if (!existing) return undefined;
 
@@ -79,22 +80,34 @@ export async function moveAsset(
     viewport
   );
 
-  await ddb.send(
-    new UpdateCommand({
-      TableName: ASSETS_TABLE,
-      Key: { roomId, assetId },
-      UpdateExpression:
-        "SET #x = :x, #y = :y, rotation = :rotation, visible = :visible, lastUsedAt = :now",
-      ExpressionAttributeNames: { "#x": "x", "#y": "y" },
-      ExpressionAttributeValues: {
-        ":x": x,
-        ":y": y,
-        ":rotation": nextRotation,
-        ":visible": visible,
-        ":now": new Date().toISOString(),
-      },
-    })
-  );
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: ASSETS_TABLE,
+        Key: { roomId, assetId },
+        UpdateExpression:
+          "SET #x = :x, #y = :y, rotation = :rotation, visible = :visible, lastUsedAt = :now, seq = :seq",
+        // Rejects the write outright if a newer (or equal) seq has already
+        // been applied -- an atomic guard against a message that arrived
+        // late (WebSocket delivery/Lambda invocation order isn't
+        // guaranteed) overwriting a position a client has already moved
+        // past. See Asset.seq for the full rationale.
+        ConditionExpression: "attribute_not_exists(seq) OR seq < :seq",
+        ExpressionAttributeNames: { "#x": "x", "#y": "y" },
+        ExpressionAttributeValues: {
+          ":x": x,
+          ":y": y,
+          ":rotation": nextRotation,
+          ":visible": visible,
+          ":now": new Date().toISOString(),
+          ":seq": seq,
+        },
+      })
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === "ConditionalCheckFailedException") return "stale";
+    throw err;
+  }
 
   return { visible, rotation: nextRotation };
 }
@@ -106,30 +119,38 @@ export async function resizeAsset(
   y: number,
   width: number,
   height: number,
+  seq: number,
   viewport: Viewport
-): Promise<{ visible: boolean } | undefined> {
+): Promise<{ visible: boolean } | "stale" | undefined> {
   const existing = await getAsset(roomId, assetId);
   if (!existing) return undefined;
 
   const visible = intersects({ x, y, width, height }, viewport);
 
-  await ddb.send(
-    new UpdateCommand({
-      TableName: ASSETS_TABLE,
-      Key: { roomId, assetId },
-      UpdateExpression:
-        "SET #x = :x, #y = :y, width = :width, height = :height, visible = :visible, lastUsedAt = :now",
-      ExpressionAttributeNames: { "#x": "x", "#y": "y" },
-      ExpressionAttributeValues: {
-        ":x": x,
-        ":y": y,
-        ":width": width,
-        ":height": height,
-        ":visible": visible,
-        ":now": new Date().toISOString(),
-      },
-    })
-  );
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: ASSETS_TABLE,
+        Key: { roomId, assetId },
+        UpdateExpression:
+          "SET #x = :x, #y = :y, width = :width, height = :height, visible = :visible, lastUsedAt = :now, seq = :seq",
+        ConditionExpression: "attribute_not_exists(seq) OR seq < :seq",
+        ExpressionAttributeNames: { "#x": "x", "#y": "y" },
+        ExpressionAttributeValues: {
+          ":x": x,
+          ":y": y,
+          ":width": width,
+          ":height": height,
+          ":visible": visible,
+          ":now": new Date().toISOString(),
+          ":seq": seq,
+        },
+      })
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === "ConditionalCheckFailedException") return "stale";
+    throw err;
+  }
 
   return { visible };
 }

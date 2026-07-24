@@ -98,11 +98,11 @@ function startApp(
   const canvas = new CanvasView(
     canvasContainer!,
     {
-      onAssetMove: (assetId, x, y) => {
-        connection.send({ action: "asset:move", roomId, assetId, x, y });
+      onAssetMove: (assetId, x, y, seq) => {
+        connection.send({ action: "asset:move", roomId, assetId, x, y, seq });
       },
-      onAssetResize: (assetId, x, y, width, height) => {
-        connection.send({ action: "asset:resize", roomId, assetId, x, y, width, height });
+      onAssetResize: (assetId, x, y, width, height, seq) => {
+        connection.send({ action: "asset:resize", roomId, assetId, x, y, width, height, seq });
       },
       onAssetDelete: (assetId) => {
         connection.send({ action: "asset:delete", roomId, assetId });
@@ -142,10 +142,18 @@ function startApp(
           canvas.upsert(message.asset);
           break;
         case "asset:moved":
-          canvas.applyRemoteMove(message.assetId, message.x, message.y, message.rotation, message.visible);
+          canvas.applyRemoteMove(message.assetId, message.x, message.y, message.rotation, message.visible, message.seq);
           break;
         case "asset:resized":
-          canvas.applyRemoteResize(message.assetId, message.x, message.y, message.width, message.height, message.visible);
+          canvas.applyRemoteResize(
+            message.assetId,
+            message.x,
+            message.y,
+            message.width,
+            message.height,
+            message.visible,
+            message.seq
+          );
           break;
         case "asset:deleted":
           canvas.remove(message.assetId);

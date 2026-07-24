@@ -53,6 +53,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           uploadedAt: now,
           lastUsedAt: now,
           keep: false,
+          seq: 0,
         };
         await putAsset(asset);
         await broadcastToRoom(apiGw, message.roomId, { type: "asset:added", asset });
@@ -66,12 +67,17 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           message.x,
           message.y,
           message.rotation,
+          message.seq,
           viewport
         );
-        if (!result) {
+        if (result === undefined) {
           await sendTo(apiGw, connectionId, { type: "error", message: "Unknown assetId" });
           break;
         }
+        // "stale" = a newer update already won for this asset (see
+        // Asset.seq) -- silently drop rather than error or broadcast,
+        // since this is a normal ordering artifact, not a client mistake.
+        if (result === "stale") break;
         await broadcastToRoom(apiGw, message.roomId, {
           type: "asset:moved",
           assetId: message.assetId,
@@ -79,6 +85,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           y: message.y,
           rotation: result.rotation,
           visible: result.visible,
+          seq: message.seq,
         });
         break;
       }
@@ -91,12 +98,14 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           message.y,
           message.width,
           message.height,
+          message.seq,
           viewport
         );
-        if (!result) {
+        if (result === undefined) {
           await sendTo(apiGw, connectionId, { type: "error", message: "Unknown assetId" });
           break;
         }
+        if (result === "stale") break;
         await broadcastToRoom(apiGw, message.roomId, {
           type: "asset:resized",
           assetId: message.assetId,
@@ -105,6 +114,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           width: message.width,
           height: message.height,
           visible: result.visible,
+          seq: message.seq,
         });
         break;
       }
