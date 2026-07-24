@@ -78,7 +78,15 @@ export class Sidebar {
   upsertAsset(asset: Asset): void {
     this.assets.set(asset.assetId, asset);
     this.renderObjectsList();
-    if (asset.assetId === this.selectedAssetId) this.renderProperties();
+    // Rebuilding the properties panel (innerHTML) while a range/text input
+    // inside it is actively focused -- e.g. mid-drag on a slider -- destroys
+    // and recreates that element, which drops the browser's mouse capture
+    // and stops the drag after a single tick. The panel already reflects the
+    // in-progress value via the input's own local listener, so skip the
+    // rebuild until focus leaves it.
+    const active = document.activeElement;
+    const isInteracting = active instanceof HTMLElement && this.propertiesPanel.contains(active);
+    if (asset.assetId === this.selectedAssetId && !isInteracting) this.renderProperties();
   }
 
   removeAsset(assetId: string): void {
@@ -272,6 +280,7 @@ export class Sidebar {
       rotationValue.textContent = rotationInput.value;
       patch({ rotation: Number(rotationInput.value) });
     });
+    rotationInput.addEventListener("change", () => this.renderProperties());
 
     const opacityInput = el<HTMLInputElement>("opacity");
     const opacityValue = el<HTMLElement>("opacity-value");
@@ -279,6 +288,7 @@ export class Sidebar {
       opacityValue.textContent = opacityInput.value;
       patch({ opacity: Number(opacityInput.value) / 100 });
     });
+    opacityInput.addEventListener("change", () => this.renderProperties());
 
     const blurInput = el<HTMLInputElement>("blur");
     const blurValue = el<HTMLElement>("blur-value");
@@ -286,6 +296,7 @@ export class Sidebar {
       blurValue.textContent = blurInput.value;
       patch({ blur: Number(blurInput.value) });
     });
+    blurInput.addEventListener("change", () => this.renderProperties());
 
     el<HTMLButtonElement>("flip-x").addEventListener("click", () => {
       const current = this.assets.get(assetId);
@@ -313,6 +324,7 @@ export class Sidebar {
         volumeValue.textContent = volumeInput.value;
         patch({ volume: Number(volumeInput.value) / 100 });
       });
+      volumeInput.addEventListener("change", () => this.renderProperties());
     }
   }
 }
