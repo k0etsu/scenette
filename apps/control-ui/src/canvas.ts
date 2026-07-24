@@ -68,11 +68,23 @@ export class CanvasView {
   private pendingRender?: () => void;
   private rafScheduled = false;
 
-  // Global monotonic counter shared across all assets — a later real-time
-  // event for a given asset always gets a strictly larger value than any
-  // earlier one for that same asset, which is all the per-asset ordering
-  // check (see Asset.seq) needs; it doesn't need to be per-asset itself.
-  private nextSeq = 0;
+  // Wall-clock-based, NOT a simple session-local counter starting at 0 --
+  // that was the original (buggy) design: server-stored seq persists across
+  // page reloads and across every other collaborator's session, so a fresh
+  // session's counter restarting at 0/1/2... is almost always *lower* than
+  // whatever's already stored, which made the server's conditional write
+  // (correctly) reject every move as stale forever after a refresh. Basing
+  // it on Date.now() means any new session's clock already exceeds
+  // whatever a previous session left behind. The `lastSeqValue` guard on
+  // top just guarantees strict monotonicity even if two sends from this
+  // session land in the same millisecond (the server's check is a strict
+  // `<`, so a tied value would otherwise be wrongly rejected too).
+  private lastSeqValue = 0;
+  private nextSeq(): number {
+    const now = Date.now();
+    this.lastSeqValue = now > this.lastSeqValue ? now : this.lastSeqValue + 1;
+    return this.lastSeqValue;
+  }
 
   constructor(
     private readonly container: HTMLElement,
@@ -361,7 +373,7 @@ export class CanvasView {
       const now = performance.now();
       if (now - this.lastMoveSentAt >= MOVE_SEND_THROTTLE_MS) {
         this.lastMoveSentAt = now;
-        entry.asset = { ...entry.asset, seq: ++this.nextSeq };
+        entry.asset = { ...entry.asset, seq: this.nextSeq() };
         this.callbacks.onAssetResize(
           entry.asset.assetId,
           entry.asset.x,
@@ -385,7 +397,7 @@ export class CanvasView {
     const now = performance.now();
     if (now - this.lastMoveSentAt >= MOVE_SEND_THROTTLE_MS) {
       this.lastMoveSentAt = now;
-      entry.asset = { ...entry.asset, seq: ++this.nextSeq };
+      entry.asset = { ...entry.asset, seq: this.nextSeq() };
       this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y, entry.asset.seq);
     }
   }
@@ -428,13 +440,13 @@ export class CanvasView {
       if ("assetId" in this.dragging) {
         const entry = this.entries.get(this.dragging.assetId);
         if (entry) {
-          entry.asset = { ...entry.asset, seq: ++this.nextSeq };
+          entry.asset = { ...entry.asset, seq: this.nextSeq() };
           this.callbacks.onAssetMove(entry.asset.assetId, entry.asset.x, entry.asset.y, entry.asset.seq);
         }
       } else if ("resizing" in this.dragging) {
         const entry = this.entries.get(this.dragging.resizing.assetId);
         if (entry) {
-          entry.asset = { ...entry.asset, seq: ++this.nextSeq };
+          entry.asset = { ...entry.asset, seq: this.nextSeq() };
           this.callbacks.onAssetResize(
             entry.asset.assetId,
             entry.asset.x,
