@@ -1,4 +1,4 @@
-import { Asset, Viewport } from "@scenette/protocol";
+import { Asset, AssetPatch, Viewport } from "@scenette/protocol";
 
 interface Entry {
   el: HTMLElement;
@@ -29,10 +29,15 @@ const MOVE_SEND_THROTTLE_MS = 40;
 export interface CanvasCallbacks {
   onAssetMove: (assetId: string, x: number, y: number, seq: number) => void;
   onAssetResize: (assetId: string, x: number, y: number, width: number, height: number, seq: number) => void;
+  onAssetPatch: (assetId: string, patch: AssetPatch, seq: number) => void;
   onAssetDelete: (assetId: string) => void;
   // worldX/worldY: where a created asset should be placed. screenX/screenY:
   // viewport-relative coordinates for positioning the context menu itself.
   onContextMenu: (worldX: number, worldY: number, screenX: number, screenY: number) => void;
+  // Fires on every selection change, including deselection (undefined) and
+  // programmatic selection via selectAsset() -- lets the sidebar's
+  // properties panel track whatever's selected on the canvas, and vice versa.
+  onSelectionChange: (assetId: string | undefined) => void;
 }
 
 // The editing surface: a world-space plane containing the (fixed, per the
@@ -80,7 +85,11 @@ export class CanvasView {
   // session land in the same millisecond (the server's check is a strict
   // `<`, so a tied value would otherwise be wrongly rejected too).
   private lastSeqValue = 0;
-  private nextSeq(): number {
+  // Public: the sidebar's properties-panel edits (numeric X/Y/W/H fields,
+  // toggles, etc.) aren't part of a mouse gesture but still need to go
+  // through the same seq-guarded path as a drag for consistent stale/
+  // out-of-order protection.
+  nextSeq(): number {
     const now = Date.now();
     this.lastSeqValue = now > this.lastSeqValue ? now : this.lastSeqValue + 1;
     return this.lastSeqValue;
@@ -142,6 +151,23 @@ export class CanvasView {
 
   get(assetId: string): Asset | undefined {
     return this.entries.get(assetId)?.asset;
+  }
+
+  getAllAssets(): Asset[] {
+    return [...this.entries.values()].map((entry) => entry.asset);
+  }
+
+  getSelectedAssetId(): string | undefined {
+    return this.selectedAssetId;
+  }
+
+  // Public counterpart to clicking an asset directly -- lets the sidebar's
+  // object list drive canvas selection.
+  selectAsset(assetId: string | undefined): void {
+    if (assetId === this.selectedAssetId) return;
+    this.selectedAssetId = assetId;
+    this.refreshSelection();
+    this.callbacks.onSelectionChange(assetId);
   }
 
   setAssets(assets: Asset[]): void {
@@ -206,6 +232,54 @@ export class CanvasView {
     this.upsert({ ...entry.asset, x, y, width, height, visible, seq });
   }
 
+  // Applies a patch that originated from the network (a collaborator's
+  // properties-panel edit, or the server's echo of our own) -- covers text
+  // content, hidden/locked/opacity/blur/flip, z-index, rotation, and
+  // video/audio playback state. Property edits aren't part of an active
+  // mouse gesture the way move/resize are, so there's no "currently
+  // manipulating this locally" guard to check here.
+  applyRemoteUpdate(assetId: string, patch: AssetPatch, visible: boolean, seq: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    if (seq < entry.asset.seq) return;
+    this.upsert({ ...entry.asset, ...patch, visible, seq });
+  }
+
+  // Programmatic counterparts to mouse drag/resize, for the sidebar's
+  // numeric X/Y/width/height fields -- goes through the same seq-guarded
+  // send path as a drag for consistent stale/out-of-order protection.
+  setAssetPosition(assetId: string, x: number, y: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, x, y, seq };
+    this.applyTransform(entry.el, entry.asset);
+    if (assetId === this.selectedAssetId) this.positionHandles();
+    this.callbacks.onAssetMove(assetId, x, y, seq);
+  }
+
+  setAssetSize(assetId: string, width: number, height: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    const w = Math.max(MIN_ASSET_SIZE, width);
+    const h = Math.max(MIN_ASSET_SIZE, height);
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, width: w, height: h, seq };
+    this.applyTransform(entry.el, entry.asset);
+    if (assetId === this.selectedAssetId) this.positionHandles();
+    this.callbacks.onAssetResize(assetId, entry.asset.x, entry.asset.y, w, h, seq);
+  }
+
+  patchAsset(assetId: string, patch: AssetPatch): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, ...patch, seq };
+    this.applyTransform(entry.el, entry.asset);
+    if (assetId === this.selectedAssetId) this.positionHandles();
+    this.callbacks.onAssetPatch(assetId, patch, seq);
+  }
+
   remove(assetId: string): void {
     const entry = this.entries.get(assetId);
     if (entry) {
@@ -215,6 +289,7 @@ export class CanvasView {
     if (this.selectedAssetId === assetId) {
       this.selectedAssetId = undefined;
       this.positionHandles();
+      this.callbacks.onSelectionChange(undefined);
     }
   }
 
@@ -223,9 +298,21 @@ export class CanvasView {
     el.style.top = `${asset.y}px`;
     el.style.width = `${asset.width}px`;
     el.style.height = `${asset.height}px`;
-    el.style.transform = `rotate(${asset.rotation}deg)`;
+    el.style.transform = `rotate(${asset.rotation}deg) scale(${asset.flipX ? -1 : 1}, ${asset.flipY ? -1 : 1})`;
     el.style.zIndex = String(asset.zIndex);
     el.style.outline = asset.assetId === this.selectedAssetId ? "2px solid #4da3ff" : "none";
+    el.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
+    el.style.cursor = asset.locked ? "default" : "grab";
+    if (asset.type === "text" && el.textContent !== asset.text) {
+      el.textContent = asset.text ?? "";
+    }
+    // The canvas always shows every asset regardless of the true `visible`
+    // flag (viewport-intersection + hidden) -- unlike browser-source, the
+    // editor needs an omniscient view so things can be found/edited even
+    // off-screen or manually hidden. `hidden` still gets a visual cue
+    // (extra dimming on top of the asset's own opacity) so it's obvious
+    // which assets won't actually show up for viewers.
+    el.style.opacity = String(asset.hidden ? asset.opacity * 0.4 : asset.opacity);
   }
 
   private createElement(asset: Asset): HTMLElement {
@@ -279,6 +366,7 @@ export class CanvasView {
       if (event.button === 0 && (event.target === this.container || event.target === this.world)) {
         this.selectedAssetId = undefined;
         this.refreshSelection();
+        this.callbacks.onSelectionChange(undefined);
       }
     });
 
@@ -331,13 +419,23 @@ export class CanvasView {
     // own handlers rather than being captured here.
     if (event.button !== 0) return;
     event.stopPropagation();
-    this.selectedAssetId = assetId;
-    this.refreshSelection();
-    this.dragging = { assetId };
+    if (this.selectedAssetId !== assetId) {
+      this.selectedAssetId = assetId;
+      this.refreshSelection();
+      this.callbacks.onSelectionChange(assetId);
+    }
+    // Selection always works, even on a locked asset (so it can be viewed/
+    // unlocked via the properties panel) -- only the drag itself is blocked.
+    const entry = this.entries.get(assetId);
+    if (!entry?.asset.locked) {
+      this.dragging = { assetId };
+    }
   }
 
   private onHandleMouseDown(event: MouseEvent, corner: Corner): void {
     if (event.button !== 0 || !this.selectedAssetId) return;
+    const entry = this.entries.get(this.selectedAssetId);
+    if (entry?.asset.locked) return;
     event.stopPropagation();
     this.dragging = { resizing: { assetId: this.selectedAssetId, corner } };
   }
@@ -479,7 +577,7 @@ export class CanvasView {
   // matching a typical canvas editor's resize-handle behavior.
   private positionHandles(): void {
     const entry = this.selectedAssetId ? this.entries.get(this.selectedAssetId) : undefined;
-    if (!entry) {
+    if (!entry || entry.asset.locked) {
       for (const corner of CORNERS) this.handles[corner].style.display = "none";
       return;
     }

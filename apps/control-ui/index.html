@@ -13,6 +13,11 @@
         font-family: system-ui, sans-serif;
         overflow: hidden;
       }
+      #app-view {
+        display: none;
+        flex-direction: column;
+        height: 100%;
+      }
       #toolbar {
         display: flex;
         align-items: center;
@@ -26,10 +31,143 @@
         font-size: 13px;
         color: #9aa;
       }
+      #main-area {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+      #sidebar {
+        width: 280px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        background: #24252b;
+        border-right: 1px solid #333;
+        overflow-y: auto;
+      }
+      #objects-panel, #properties-panel {
+        background: #2b2c34;
+        margin: 8px;
+        border-radius: 6px;
+        padding: 8px;
+      }
+      .sidebar-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 13px;
+        font-weight: 600;
+        color: #ccc;
+        padding: 2px 2px 8px;
+      }
+      .objects-list {
+        max-height: 320px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .object-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 6px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .object-row:hover {
+        background: #34353e;
+      }
+      .object-row.selected {
+        background: #3a4a63;
+      }
+      .object-icon {
+        flex-shrink: 0;
+      }
+      .object-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sidebar-icon-button {
+        background: none;
+        border: none;
+        color: #ccc;
+        cursor: pointer;
+        font-size: 14px;
+        padding: 2px 4px;
+        border-radius: 3px;
+        flex-shrink: 0;
+      }
+      .sidebar-icon-button:hover {
+        background: #454650;
+      }
+      .sidebar-icon-button.danger:hover {
+        background: #6b2b2b;
+      }
+      #properties-panel {
+        display: none;
+      }
+      .properties-buttons {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .sidebar-flip-button {
+        flex: 1;
+        background: #34353e;
+        border: 1px solid #454650;
+        color: #ccc;
+        border-radius: 4px;
+        padding: 4px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .sidebar-flip-button.active {
+        background: #4da3ff;
+        color: #12151a;
+        border-color: #4da3ff;
+      }
+      .prop-label {
+        display: block;
+        font-size: 11px;
+        color: #999;
+        margin: 6px 0 2px;
+      }
+      .prop-row-pair {
+        display: flex;
+        gap: 8px;
+      }
+      .prop-row-pair > div {
+        flex: 1;
+      }
+      #properties-panel input[type="number"],
+      #properties-panel textarea {
+        width: 100%;
+        box-sizing: border-box;
+        background: #1e1f24;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 13px;
+      }
+      #properties-panel input[type="range"] {
+        width: 100%;
+      }
+      .prop-checkbox {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+        color: #ccc;
+      }
       #canvas-container {
         position: relative;
-        width: 100%;
-        height: calc(100% - 45px);
+        flex: 1;
         overflow: hidden;
         background: #14151a;
         cursor: default;
@@ -116,10 +254,6 @@
         color: #888;
         font-size: 12px;
       }
-      #app-view {
-        display: none;
-        height: 100%;
-      }
     </style>
   </head>
   <body>
@@ -147,7 +281,13 @@
         <button id="logout-button">Log out</button>
         <span id="status"></span>
       </div>
-      <div id="canvas-container"></div>
+      <div id="main-area">
+        <div id="sidebar">
+          <div id="objects-panel"></div>
+          <div id="properties-panel"></div>
+        </div>
+        <div id="canvas-container"></div>
+      </div>
       <div id="context-menu">
         <div class="context-menu-header">Create</div>
         <button id="context-menu-text" type="button">Text</button>

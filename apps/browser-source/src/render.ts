@@ -130,18 +130,21 @@ export class Renderer {
     el.style.top = `${top}px`;
     el.style.width = `${rendered.width}px`;
     el.style.height = `${rendered.height}px`;
-    el.style.transform = `rotate(${asset.rotation}deg)`;
-    el.style.zIndex = String(asset.zIndex);
-    el.style.display = asset.visible ? "block" : "none";
+    this.applyImmediateFields(entry);
   }
 
   private applyImmediateFields(entry: Entry): void {
     const { el, asset } = entry;
-    el.style.transform = `rotate(${asset.rotation}deg)`;
+    el.style.transform = `rotate(${asset.rotation}deg) scale(${asset.flipX ? -1 : 1}, ${asset.flipY ? -1 : 1})`;
     el.style.zIndex = String(asset.zIndex);
     el.style.display = asset.visible ? "block" : "none";
+    el.style.opacity = String(asset.opacity);
+    el.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
     if (asset.type === "text" && el.textContent !== asset.text) {
       el.textContent = asset.text ?? "";
+    }
+    if (asset.type === "video" || asset.type === "audio") {
+      syncMediaState(el as HTMLMediaElement, asset);
     }
   }
 
@@ -158,17 +161,14 @@ export class Renderer {
       case "video": {
         const video = document.createElement("video");
         video.src = asset.s3Key ? this.mediaUrl(asset.s3Key) : "";
-        video.autoplay = true;
-        video.loop = true;
-        video.muted = false;
+        video.autoplay = !asset.paused;
         el = video;
         break;
       }
       case "audio": {
         const audio = document.createElement("audio");
         audio.src = asset.s3Key ? this.mediaUrl(asset.s3Key) : "";
-        audio.autoplay = true;
-        audio.loop = true;
+        audio.autoplay = !asset.paused;
         el = audio;
         break;
       }
@@ -193,4 +193,22 @@ export class Renderer {
 
 function elementTypeOf(el: HTMLElement): string | undefined {
   return el.dataset.assetType;
+}
+
+// Only touches properties that actually differ from the asset's target
+// state -- re-assigning .loop/.muted/.volume unconditionally is harmless,
+// but calling .play()/.pause() when already in that state can cause an
+// audible/visible stutter on some browsers.
+function syncMediaState(media: HTMLMediaElement, asset: Asset): void {
+  if (media.loop !== asset.loop) media.loop = asset.loop;
+  if (media.muted !== asset.muted) media.muted = asset.muted;
+  if (media.volume !== asset.volume) media.volume = asset.volume;
+  if (asset.paused && !media.paused) {
+    media.pause();
+  } else if (!asset.paused && media.paused) {
+    media.play().catch(() => {
+      // Autoplay can be blocked by the browser (e.g. no prior user
+      // interaction) -- nothing actionable to do about it here.
+    });
+  }
 }

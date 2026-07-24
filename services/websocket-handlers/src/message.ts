@@ -2,7 +2,7 @@ import type { APIGatewayProxyWebsocketHandlerV2 } from "aws-lambda";
 import { ApiGatewayManagementApiClient } from "@aws-sdk/client-apigatewaymanagementapi";
 import { Asset, intersects, parseClientMessage } from "@scenette/protocol";
 import { roomIdForConnection, sendTo, broadcastToRoom } from "./connections";
-import { getOrCreateViewport, listAssets, putAsset, moveAsset, resizeAsset, deleteAsset } from "./roomState";
+import { getOrCreateViewport, listAssets, putAsset, moveAsset, resizeAsset, updateAsset, deleteAsset } from "./roomState";
 
 export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   const connectionId = event.requestContext.connectionId;
@@ -37,6 +37,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
 
       case "asset:add": {
         const now = new Date().toISOString();
+        const hidden = message.asset.hidden ?? false;
         const asset: Asset = {
           roomId: message.roomId,
           assetId: message.asset.assetId,
@@ -47,7 +48,17 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           height: message.asset.height,
           rotation: message.asset.rotation ?? 0,
           zIndex: message.asset.zIndex ?? 0,
-          visible: intersects(message.asset, viewport),
+          visible: intersects(message.asset, viewport) && !hidden,
+          hidden,
+          locked: message.asset.locked ?? false,
+          opacity: message.asset.opacity ?? 1,
+          blur: message.asset.blur ?? 0,
+          flipX: message.asset.flipX ?? false,
+          flipY: message.asset.flipY ?? false,
+          loop: message.asset.loop ?? true,
+          muted: message.asset.muted ?? false,
+          volume: message.asset.volume ?? 1,
+          paused: message.asset.paused ?? false,
           s3Key: message.asset.s3Key,
           text: message.asset.text,
           uploadedAt: now,
@@ -113,6 +124,23 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           y: message.y,
           width: message.width,
           height: message.height,
+          visible: result.visible,
+          seq: message.seq,
+        });
+        break;
+      }
+
+      case "asset:update": {
+        const result = await updateAsset(message.roomId, message.assetId, message.patch, message.seq, viewport);
+        if (result === undefined) {
+          await sendTo(apiGw, connectionId, { type: "error", message: "Unknown assetId" });
+          break;
+        }
+        if (result === "stale") break;
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "asset:updated",
+          assetId: message.assetId,
+          patch: message.patch,
           visible: result.visible,
           seq: message.seq,
         });

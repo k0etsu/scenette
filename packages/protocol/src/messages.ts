@@ -21,7 +21,50 @@ export interface AssetAddMessage {
     zIndex?: number;
     s3Key?: string;
     text?: string;
+    // Optional so a plain new upload/text-add can omit them (server
+    // defaults apply) while a client-side "duplicate" can carry over the
+    // source asset's full styling/playback state in one message.
+    opacity?: number;
+    blur?: number;
+    flipX?: boolean;
+    flipY?: boolean;
+    locked?: boolean;
+    hidden?: boolean;
+    loop?: boolean;
+    muted?: boolean;
+    volume?: number;
+    paused?: boolean;
   };
+}
+
+// Patch-style: only changed fields are sent/applied, covering every asset
+// property that isn't part of the specialized (high-frequency, throttled)
+// move/resize messages. Kept as one generic message rather than one per
+// control (opacity, blur, flip, lock, loop, mute, volume, pause, text edit)
+// since these are all occasional, low-frequency edits with identical
+// handling needs.
+export interface AssetPatch {
+  text?: string;
+  hidden?: boolean;
+  locked?: boolean;
+  opacity?: number;
+  blur?: number;
+  flipX?: boolean;
+  flipY?: boolean;
+  zIndex?: number;
+  rotation?: number;
+  loop?: boolean;
+  muted?: boolean;
+  volume?: number;
+  paused?: boolean;
+}
+
+export interface AssetUpdateMessage {
+  action: "asset:update";
+  roomId: string;
+  assetId: string;
+  patch: AssetPatch;
+  seq: number;
 }
 
 export interface AssetMoveMessage {
@@ -62,6 +105,7 @@ export type ClientMessage =
   | AssetAddMessage
   | AssetMoveMessage
   | AssetResizeMessage
+  | AssetUpdateMessage
   | AssetDeleteMessage;
 
 // ---- Server -> client (broadcast or direct reply) ----
@@ -88,6 +132,7 @@ export type ServerMessage =
       visible: boolean;
       seq: number;
     }
+  | { type: "asset:updated"; assetId: string; patch: AssetPatch; visible: boolean; seq: number }
   | { type: "asset:deleted"; assetId: string }
   | { type: "error"; message: string };
 
@@ -136,6 +181,16 @@ export function parseClientMessage(raw: string): ClientMessage {
           zIndex: typeof asset.zIndex === "number" ? asset.zIndex : undefined,
           s3Key: typeof asset.s3Key === "string" ? asset.s3Key : undefined,
           text: typeof asset.text === "string" ? asset.text : undefined,
+          opacity: typeof asset.opacity === "number" ? asset.opacity : undefined,
+          blur: typeof asset.blur === "number" ? asset.blur : undefined,
+          flipX: typeof asset.flipX === "boolean" ? asset.flipX : undefined,
+          flipY: typeof asset.flipY === "boolean" ? asset.flipY : undefined,
+          locked: typeof asset.locked === "boolean" ? asset.locked : undefined,
+          hidden: typeof asset.hidden === "boolean" ? asset.hidden : undefined,
+          loop: typeof asset.loop === "boolean" ? asset.loop : undefined,
+          muted: typeof asset.muted === "boolean" ? asset.muted : undefined,
+          volume: typeof asset.volume === "number" ? asset.volume : undefined,
+          paused: typeof asset.paused === "boolean" ? asset.paused : undefined,
         },
       };
     }
@@ -170,6 +225,31 @@ export function parseClientMessage(raw: string): ClientMessage {
         height: msg.height as number,
         seq: msg.seq as number,
       };
+    }
+
+    case "asset:update": {
+      if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
+      if (typeof msg.seq !== "number") throw new Error("Missing seq");
+      const rawPatch = msg.patch as Record<string, unknown> | undefined;
+      if (!rawPatch || typeof rawPatch !== "object") throw new Error("Missing patch");
+
+      const patch: AssetPatch = {};
+      if (typeof rawPatch.text === "string") patch.text = rawPatch.text;
+      if (typeof rawPatch.hidden === "boolean") patch.hidden = rawPatch.hidden;
+      if (typeof rawPatch.locked === "boolean") patch.locked = rawPatch.locked;
+      if (typeof rawPatch.opacity === "number") patch.opacity = rawPatch.opacity;
+      if (typeof rawPatch.blur === "number") patch.blur = rawPatch.blur;
+      if (typeof rawPatch.flipX === "boolean") patch.flipX = rawPatch.flipX;
+      if (typeof rawPatch.flipY === "boolean") patch.flipY = rawPatch.flipY;
+      if (typeof rawPatch.zIndex === "number") patch.zIndex = rawPatch.zIndex;
+      if (typeof rawPatch.rotation === "number") patch.rotation = rawPatch.rotation;
+      if (typeof rawPatch.loop === "boolean") patch.loop = rawPatch.loop;
+      if (typeof rawPatch.muted === "boolean") patch.muted = rawPatch.muted;
+      if (typeof rawPatch.volume === "number") patch.volume = rawPatch.volume;
+      if (typeof rawPatch.paused === "boolean") patch.paused = rawPatch.paused;
+      if (Object.keys(patch).length === 0) throw new Error("Empty patch");
+
+      return { action: "asset:update", roomId: msg.roomId, assetId: msg.assetId, patch, seq: msg.seq };
     }
 
     case "asset:delete": {
