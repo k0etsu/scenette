@@ -1,4 +1,4 @@
-import { Asset, Viewport } from "@scenette/protocol";
+import { Asset, Variable, Viewport, interpolateText } from "@scenette/protocol";
 
 // Renders viewport-relative coordinates: an asset at world position (x,y)
 // is drawn at (x - viewport.x, y - viewport.y) so the OBS canvas only ever
@@ -24,6 +24,11 @@ const SNAP_EPSILON = 0.5;
 export class Renderer {
   private readonly entries = new Map<string, Entry>();
   private viewport: Viewport = { roomId: "", x: 0, y: 0, width: 1920, height: 1080 };
+  // Room-level master volume (see sound.ts in control-ui) -- unlike
+  // control-ui's own preview, there's no "local" knob here at all: this is
+  // what viewers actually hear, full stop.
+  private globalVolume = 1;
+  private variables: Record<string, Variable> = {};
 
   constructor(private readonly root: HTMLElement, private readonly assetsDomain: string) {
     // Runs forever, not just while geometry is actively interpolating.
@@ -55,6 +60,45 @@ export class Renderer {
 
   get(assetId: string): Asset | undefined {
     return this.entries.get(assetId)?.asset;
+  }
+
+  setGlobalVolume(globalVolume: number): void {
+    this.globalVolume = globalVolume;
+    for (const entry of this.entries.values()) {
+      if (entry.asset.type === "video" || entry.asset.type === "audio") {
+        syncMediaState(entry.el as HTMLMediaElement, entry.asset, this.effectiveVolume(entry.asset));
+      }
+    }
+  }
+
+  setVariables(variables: Record<string, Variable>): void {
+    this.variables = variables;
+    this.reapplyText();
+  }
+
+  upsertVariable(variable: Variable): void {
+    this.variables = { ...this.variables, [variable.key]: variable };
+    this.reapplyText();
+  }
+
+  removeVariable(key: string): void {
+    const next = { ...this.variables };
+    delete next[key];
+    this.variables = next;
+    this.reapplyText();
+  }
+
+  private reapplyText(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.asset.type === "text") {
+        const interpolated = interpolateText(entry.asset.text ?? "", this.variables);
+        if (entry.el.textContent !== interpolated) entry.el.textContent = interpolated;
+      }
+    }
+  }
+
+  private effectiveVolume(asset: Asset): number {
+    return Math.min(1, Math.max(0, asset.volume * this.globalVolume));
   }
 
   setAssets(assets: Asset[]): void {
@@ -139,11 +183,12 @@ export class Renderer {
     el.style.display = asset.visible ? "block" : "none";
     el.style.opacity = String(asset.opacity);
     el.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
-    if (asset.type === "text" && el.textContent !== asset.text) {
-      el.textContent = asset.text ?? "";
+    if (asset.type === "text") {
+      const interpolated = interpolateText(asset.text ?? "", this.variables);
+      if (el.textContent !== interpolated) el.textContent = interpolated;
     }
     if (asset.type === "video" || asset.type === "audio") {
-      syncMediaState(el as HTMLMediaElement, asset);
+      syncMediaState(el as HTMLMediaElement, asset, this.effectiveVolume(asset));
     }
   }
 
@@ -198,9 +243,9 @@ function elementTypeOf(el: HTMLElement): string | undefined {
 // state -- re-assigning .loop/.muted/.volume unconditionally is harmless,
 // but calling .play()/.pause() when already in that state can cause an
 // audible/visible stutter on some browsers.
-function syncMediaState(media: HTMLMediaElement, asset: Asset): void {
+function syncMediaState(media: HTMLMediaElement, asset: Asset, effectiveVolume: number): void {
   if (media.loop !== asset.loop) media.loop = asset.loop;
-  if (media.volume !== asset.volume) media.volume = asset.volume;
+  if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
   if (asset.paused && !media.paused) {
     media.pause();
     media.muted = asset.muted;

@@ -1,4 +1,4 @@
-import { Asset, AssetPatch, Viewport } from "@scenette/protocol";
+import { Asset, AssetPatch, Variable, Viewport, interpolateText } from "@scenette/protocol";
 import { ICON_AUDIO_LARGE } from "./icons";
 
 interface Entry {
@@ -70,6 +70,14 @@ export class CanvasView {
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
   private lastMoveSentAt = 0;
+
+  // Room-level master (synced, affects browser-source too) and this user's
+  // own local-only monitoring level -- see sound.ts. Multiplied together
+  // with each video asset's own volume to get what actually plays in this
+  // preview; browser-source only ever applies globalVolume, never local.
+  private globalVolume = 1;
+  private localVolume = 1;
+  private variables: Record<string, Variable> = {};
 
   // A high-polling-rate mouse can fire mousemove far more often than the
   // screen actually repaints (well past 60/sec) — writing to el.style on
@@ -155,6 +163,50 @@ export class CanvasView {
 
   getViewport(): Viewport {
     return this.viewport;
+  }
+
+  // Deliberately touches only video elements' .volume, not a full
+  // applyTransform() over every entry -- the sound panel's sliders fire
+  // live on every drag tick, and re-running position/blur/etc for every
+  // non-video asset on each tick would be pure waste.
+  setVolumeMultipliers(globalVolume: number, localVolume: number): void {
+    this.globalVolume = globalVolume;
+    this.localVolume = localVolume;
+    for (const entry of this.entries.values()) {
+      if (entry.asset.type === "video") {
+        syncMediaState(entry.content as HTMLVideoElement, entry.asset, this.effectiveVolume(entry.asset));
+      }
+    }
+  }
+
+  setVariables(variables: Record<string, Variable>): void {
+    this.variables = variables;
+    this.reapplyText();
+  }
+
+  upsertVariable(variable: Variable): void {
+    this.variables = { ...this.variables, [variable.key]: variable };
+    this.reapplyText();
+  }
+
+  removeVariable(key: string): void {
+    const next = { ...this.variables };
+    delete next[key];
+    this.variables = next;
+    this.reapplyText();
+  }
+
+  private reapplyText(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.asset.type === "text") {
+        const interpolated = interpolateText(entry.asset.text ?? "", this.variables);
+        if (entry.content.textContent !== interpolated) entry.content.textContent = interpolated;
+      }
+    }
+  }
+
+  private effectiveVolume(asset: Asset): number {
+    return Math.min(1, Math.max(0, asset.volume * this.globalVolume * this.localVolume));
   }
 
   get(assetId: string): Asset | undefined {
@@ -315,8 +367,9 @@ export class CanvasView {
     // the selection outline, and a CSS filter blurs everything painted for
     // the element it's on, so applying it to `el` blurred the outline too.
     content.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
-    if (asset.type === "text" && content.textContent !== asset.text) {
-      content.textContent = asset.text ?? "";
+    if (asset.type === "text") {
+      const interpolated = interpolateText(asset.text ?? "", this.variables);
+      if (content.textContent !== interpolated) content.textContent = interpolated;
     }
     // The editor's own preview never actually played video -- only
     // browser-source synced .loop/.muted/.volume/.play()/.pause() from the
@@ -324,7 +377,7 @@ export class CanvasView {
     // canvas shows a placeholder icon; actual audio only plays for viewers
     // via browser-source), so only video needs this.
     if (asset.type === "video") {
-      syncMediaState(content as HTMLVideoElement, asset);
+      syncMediaState(content as HTMLVideoElement, asset, this.effectiveVolume(asset));
     }
     // The canvas always shows every asset regardless of the true `visible`
     // flag (viewport-intersection + hidden) -- unlike browser-source, the
@@ -659,9 +712,9 @@ export class CanvasView {
 // state -- re-assigning .loop/.volume unconditionally is harmless, but
 // calling .play()/.pause() when already in that state can cause an
 // audible/visible stutter on some browsers.
-function syncMediaState(media: HTMLVideoElement, asset: Asset): void {
+function syncMediaState(media: HTMLVideoElement, asset: Asset, effectiveVolume: number): void {
   if (media.loop !== asset.loop) media.loop = asset.loop;
-  if (media.volume !== asset.volume) media.volume = asset.volume;
+  if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
   if (asset.paused && !media.paused) {
     media.pause();
     media.muted = asset.muted;

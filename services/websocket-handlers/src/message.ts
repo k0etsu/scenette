@@ -1,8 +1,19 @@
 import type { APIGatewayProxyWebsocketHandlerV2 } from "aws-lambda";
 import { ApiGatewayManagementApiClient } from "@aws-sdk/client-apigatewaymanagementapi";
-import { Asset, intersects, parseClientMessage } from "@scenette/protocol";
-import { roomIdForConnection, sendTo, broadcastToRoom } from "./connections";
-import { getOrCreateViewport, listAssets, putAsset, moveAsset, resizeAsset, updateAsset, deleteAsset } from "./roomState";
+import { Asset, Variable, intersects, parseClientMessage } from "@scenette/protocol";
+import { roomIdForConnection, sendTo, broadcastToRoom, listPresence } from "./connections";
+import {
+  getOrCreateRoom,
+  listAssets,
+  putAsset,
+  moveAsset,
+  resizeAsset,
+  updateAsset,
+  deleteAsset,
+  setGlobalVolume,
+  setVariable,
+  deleteVariable,
+} from "./roomState";
 
 export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   const connectionId = event.requestContext.connectionId;
@@ -22,15 +33,19 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
       return { statusCode: 200, body: "OK" };
     }
 
-    const viewport = await getOrCreateViewport(message.roomId);
+    const room = await getOrCreateRoom(message.roomId);
+    const viewport = { roomId: room.roomId, x: room.x, y: room.y, width: room.width, height: room.height };
 
     switch (message.action) {
       case "room:snapshot:request": {
-        const assets = await listAssets(message.roomId);
+        const [assets, presence] = await Promise.all([listAssets(message.roomId), listPresence(message.roomId)]);
         await sendTo(apiGw, connectionId, {
           type: "room:snapshot",
           assets,
           viewport: { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height },
+          globalVolume: room.globalVolume,
+          variables: Object.values(room.variables),
+          presence,
         });
         break;
       }
@@ -153,6 +168,27 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           type: "asset:deleted",
           assetId: message.assetId,
         });
+        break;
+      }
+
+      case "room:setGlobalVolume": {
+        await setGlobalVolume(message.roomId, message.globalVolume);
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "room:globalVolumeChanged",
+          globalVolume: message.globalVolume,
+        });
+        break;
+      }
+
+      case "variable:set": {
+        const variable: Variable = await setVariable(message.roomId, message.key, message.type, message.value);
+        await broadcastToRoom(apiGw, message.roomId, { type: "variable:updated", variable });
+        break;
+      }
+
+      case "variable:delete": {
+        await deleteVariable(message.roomId, message.key);
+        await broadcastToRoom(apiGw, message.roomId, { type: "variable:deleted", key: message.key });
         break;
       }
     }

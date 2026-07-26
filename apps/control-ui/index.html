@@ -36,41 +36,43 @@
         flex: 1;
         min-height: 0;
       }
+      /* A scrolling stack of cards (objects, properties, sound, connected
+         users, variables) -- with five panels there's no single sensible
+         way to split a fixed height evenly between them the way the old
+         50/50 objects/properties split did, so the sidebar as a whole
+         scrolls and each card just takes the height its content needs. */
       #sidebar {
         width: 280px;
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
         min-height: 0;
+        overflow-y: auto;
         background: #24252b;
         border-right: 1px solid #333;
       }
-      /* Top/bottom split: the objects list and the properties panel each
-         get a share of the sidebar's full height (flex: 1) rather than
-         stacking with the sidebar itself scrolling as one column -- so
-         both stay reachable regardless of how many objects or properties
-         there are, matching the reference tool's layout. */
-      #objects-panel, #properties-panel {
-        flex: 1;
-        min-height: 0;
+      #objects-panel, #properties-panel, #sound-panel, #connected-users-panel, #variables-panel {
+        flex: 0 0 auto;
         display: flex;
         flex-direction: column;
         background: #2b2c34;
-        margin: 8px;
+        margin: 8px 8px 0;
         border-radius: 6px;
         padding: 8px;
         box-sizing: border-box;
-        overflow: hidden;
       }
+      #variables-panel {
+        margin-bottom: 8px;
+      }
+      /* Objects is the one card that still benefits from an internal cap +
+         scroll (a room can easily have far more assets than fit on screen)
+         -- a fixed budget here keeps it from pushing every other card
+         below it out of view. */
       #objects-panel {
-        margin-bottom: 4px;
+        max-height: 260px;
       }
-      /* Unlike #objects-panel (fixed header + independently-scrolling
-         .objects-list below it), the properties panel has no such inner
-         wrapper -- its header and fields are direct children -- so the
-         panel itself needs to scroll as a whole. */
-      #properties-panel {
-        overflow-y: auto;
+      .panel-collapsed > *:not(.sidebar-header) {
+        display: none !important;
       }
       .sidebar-header {
         display: flex;
@@ -196,7 +198,9 @@
         min-width: 0;
       }
       #properties-panel input[type="number"],
-      #properties-panel textarea {
+      #properties-panel textarea,
+      #variables-panel input,
+      #variables-panel select {
         width: 100%;
         box-sizing: border-box;
         background: #1e1f24;
@@ -206,8 +210,64 @@
         padding: 4px 6px;
         font-size: 13px;
       }
-      #properties-panel input[type="range"] {
+      #properties-panel input[type="range"],
+      #sound-panel input[type="range"] {
         width: 100%;
+      }
+      .presence-row, .variable-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 2px;
+        font-size: 13px;
+      }
+      .presence-elapsed {
+        margin-left: auto;
+        color: #999;
+        font-size: 12px;
+      }
+      .variable-name {
+        flex: 1;
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .variable-name:hover {
+        text-decoration: underline;
+      }
+      .variable-stepper {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .variable-value {
+        min-width: 24px;
+        text-align: center;
+        font-size: 13px;
+      }
+      .variable-value-text {
+        color: #999;
+        max-width: 100px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .variables-help {
+        font-size: 12px;
+        color: #999;
+        line-height: 1.4;
+        margin: 8px 0;
+      }
+      .variables-help code {
+        background: #1e1f24;
+        border-radius: 3px;
+        padding: 1px 4px;
+      }
+      .variables-form {
+        margin-top: 8px;
+        border-top: 1px solid #383838;
+        padding-top: 8px;
       }
       .prop-checkbox {
         display: flex;
@@ -336,6 +396,9 @@
         <div id="sidebar">
           <div id="objects-panel"></div>
           <div id="properties-panel"></div>
+          <div id="sound-panel"></div>
+          <div id="connected-users-panel"></div>
+          <div id="variables-panel"></div>
         </div>
         <div id="canvas-container"></div>
       </div>

@@ -41,6 +41,8 @@ async function main(): Promise<void> {
         case "room:snapshot":
           renderer.setViewport({ roomId, ...message.viewport });
           renderer.setAssets(message.assets);
+          renderer.setGlobalVolume(message.globalVolume);
+          renderer.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
           break;
         case "asset:added":
           renderer.upsert(message.asset);
@@ -85,15 +87,17 @@ async function main(): Promise<void> {
           }
           break;
         }
-        case "asset:updated": {
-          const existing = renderer.get(message.assetId);
-          if (existing && message.seq >= existing.seq) {
-            renderer.upsert({ ...existing, ...message.patch, visible: message.visible, seq: message.seq });
-          }
-          break;
-        }
         case "asset:deleted":
           renderer.remove(message.assetId);
+          break;
+        case "room:globalVolumeChanged":
+          renderer.setGlobalVolume(message.globalVolume);
+          break;
+        case "variable:updated":
+          renderer.upsertVariable(message.variable);
+          break;
+        case "variable:deleted":
+          renderer.removeVariable(message.key);
           break;
         case "error":
           console.error("scenette server error:", message.message);

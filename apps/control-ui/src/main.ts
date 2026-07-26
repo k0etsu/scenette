@@ -2,9 +2,12 @@ import { AssetAddMessage, ServerMessage } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { CanvasView } from "./canvas";
 import { Sidebar } from "./sidebar";
+import { SoundPanel } from "./sound";
+import { ConnectedUsersPanel } from "./connectedUsers";
+import { VariablesPanel } from "./variablesPanel";
 import { uploadFile } from "./upload";
 import { loadConfig } from "./config";
-import { register, login, checkSession, logout, grantRoomAccess, SessionInfo } from "./auth";
+import { register, login, checkSession, logout, grantRoomAccess, getStoredToken, SessionInfo } from "./auth";
 
 const loginView = document.getElementById("login-view");
 const appView = document.getElementById("app-view");
@@ -17,6 +20,9 @@ const loginError = document.getElementById("login-error");
 const canvasContainer = document.getElementById("canvas-container");
 const objectsPanel = document.getElementById("objects-panel");
 const propertiesPanel = document.getElementById("properties-panel");
+const soundPanelEl = document.getElementById("sound-panel");
+const connectedUsersPanelEl = document.getElementById("connected-users-panel");
+const variablesPanelEl = document.getElementById("variables-panel");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
 const addTextButton = document.getElementById("add-text-button");
 const grantAccessButton = document.getElementById("grant-access-button");
@@ -30,7 +36,8 @@ const contextMenuMediaButton = document.getElementById("context-menu-media");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !passwordInput || !registerButton || !loginError ||
-  !canvasContainer || !objectsPanel || !propertiesPanel || !uploadInput || !addTextButton || !grantAccessButton ||
+  !canvasContainer || !objectsPanel || !propertiesPanel || !soundPanelEl || !connectedUsersPanelEl ||
+  !variablesPanelEl || !uploadInput || !addTextButton || !grantAccessButton ||
   !copyBrowserSourceButton || !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton ||
   !contextMenuMediaButton
 ) {
@@ -179,9 +186,28 @@ function startApp(
     if (event.key === "Escape") contextMenu!.style.display = "none";
   });
 
+  const soundPanel = new SoundPanel(soundPanelEl!, {
+    onGlobalVolumeChange: (globalVolume) => {
+      connection.send({ action: "room:setGlobalVolume", roomId, globalVolume });
+    },
+    onMultipliersChanged: (globalVolume, localVolume) => {
+      canvas.setVolumeMultipliers(globalVolume, localVolume);
+    },
+  });
+
+  const connectedUsersPanel = new ConnectedUsersPanel(connectedUsersPanelEl!, {
+    onRefresh: () => connection.send({ action: "room:snapshot:request", roomId }),
+  });
+
+  const variablesPanel = new VariablesPanel(variablesPanelEl!, {
+    onSet: (key, type, value) => connection.send({ action: "variable:set", roomId, key, type, value }),
+    onDelete: (key) => connection.send({ action: "variable:delete", roomId, key }),
+  });
+
   const connection = new ResilientConnection({
     wsUrl,
     roomId,
+    token: getStoredToken() ?? undefined,
     onOpen: () => {
       connection.send({ action: "room:snapshot:request", roomId });
     },
@@ -191,6 +217,10 @@ function startApp(
           canvas.setViewport({ roomId, ...message.viewport });
           canvas.setAssets(message.assets);
           sidebar.setAssets(message.assets);
+          soundPanel.setGlobalVolume(message.globalVolume);
+          canvas.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
+          variablesPanel.setVariables(message.variables);
+          connectedUsersPanel.setPresence(message.presence);
           break;
         case "asset:added":
           canvas.upsert(message.asset);
@@ -219,6 +249,23 @@ function startApp(
         case "asset:deleted":
           canvas.remove(message.assetId);
           sidebar.removeAsset(message.assetId);
+          break;
+        case "room:globalVolumeChanged":
+          soundPanel.setGlobalVolume(message.globalVolume);
+          break;
+        case "variable:updated":
+          variablesPanel.upsertVariable(message.variable);
+          canvas.upsertVariable(message.variable);
+          break;
+        case "variable:deleted":
+          variablesPanel.removeVariable(message.key);
+          canvas.removeVariable(message.key);
+          break;
+        case "presence:joined":
+          connectedUsersPanel.addPresence(message.entry);
+          break;
+        case "presence:left":
+          connectedUsersPanel.removePresence(message.username, message.connectedAt);
           break;
         case "error":
           console.error("scenette server error:", message.message);
