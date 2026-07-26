@@ -614,12 +614,25 @@ export class CanvasView {
       return;
     }
 
-    const { x, y, width, height } = entry.asset;
+    const { x, y, width, height, rotation } = entry.asset;
+    // Corner offsets from the asset's center, rotated by the asset's own
+    // rotation -- otherwise the handles stay in an axis-aligned bounding
+    // box while the asset itself visibly rotates, drifting away from its
+    // actual corners instead of tracking them.
+    const cx = x + width / 2;
+    const cy = y + height / 2;
+    const rad = (rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const rotate = (dx: number, dy: number) => ({
+      x: cx + dx * cos - dy * sin,
+      y: cy + dx * sin + dy * cos,
+    });
     const positions: Record<Corner, { x: number; y: number }> = {
-      nw: { x, y },
-      ne: { x: x + width, y },
-      sw: { x, y: y + height },
-      se: { x: x + width, y: y + height },
+      nw: rotate(-width / 2, -height / 2),
+      ne: rotate(width / 2, -height / 2),
+      sw: rotate(-width / 2, height / 2),
+      se: rotate(width / 2, height / 2),
     };
     for (const corner of CORNERS) {
       const handle = this.handles[corner];

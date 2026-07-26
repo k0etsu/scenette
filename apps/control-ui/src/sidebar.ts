@@ -227,11 +227,20 @@ export class Sidebar {
           <input type="number" data-role="height" value="${Math.round(asset.height)}" min="20" />
         </div>
       </div>
-      <label class="prop-label">Rotation: <span data-role="rotation-value">${Math.round(asset.rotation)}</span>°</label>
-      <input type="range" data-role="rotation" min="0" max="360" value="${asset.rotation}" />
-      <label class="prop-label">Opacity: <span data-role="opacity-value">${Math.round(asset.opacity * 100)}</span>%</label>
+      <div class="prop-slider-row">
+        <label class="prop-label">Rotation</label>
+        <input type="number" data-role="rotation-number" class="prop-slider-number" value="${normalizeRotation(asset.rotation)}" />
+      </div>
+      <input type="range" data-role="rotation" min="-180" max="180" value="${normalizeRotation(asset.rotation)}" />
+      <div class="prop-slider-row">
+        <label class="prop-label">Opacity</label>
+        <input type="number" data-role="opacity-number" class="prop-slider-number" value="${Math.round(asset.opacity * 100)}" />
+      </div>
       <input type="range" data-role="opacity" min="0" max="100" value="${Math.round(asset.opacity * 100)}" />
-      <label class="prop-label">Blur: <span data-role="blur-value">${asset.blur}</span>px</label>
+      <div class="prop-slider-row">
+        <label class="prop-label">Blur</label>
+        <input type="number" data-role="blur-number" class="prop-slider-number" value="${asset.blur}" />
+      </div>
       <input type="range" data-role="blur" min="0" max="20" value="${asset.blur}" />
       <div class="properties-buttons">
         <button type="button" data-role="flip-x" class="sidebar-flip-button${asset.flipX ? " active" : ""}">Flip H</button>
@@ -244,7 +253,10 @@ export class Sidebar {
           <label class="prop-checkbox"><input type="checkbox" data-role="loop" ${asset.loop ? "checked" : ""} /> Loop</label>
           <label class="prop-checkbox"><input type="checkbox" data-role="muted" ${asset.muted ? "checked" : ""} /> Mute</label>
         </div>
-        <label class="prop-label">Volume: <span data-role="volume-value">${Math.round(asset.volume * 100)}</span>%</label>
+        <div class="prop-slider-row">
+          <label class="prop-label">Volume</label>
+          <input type="number" data-role="volume-number" class="prop-slider-number" value="${Math.round(asset.volume * 100)}" />
+        </div>
         <input type="range" data-role="volume" min="0" max="100" value="${Math.round(asset.volume * 100)}" />
       ` : ""}
     `;
@@ -286,29 +298,9 @@ export class Sidebar {
     widthInput.addEventListener("change", sendSize);
     heightInput.addEventListener("change", sendSize);
 
-    const rotationInput = el<HTMLInputElement>("rotation");
-    const rotationValue = el<HTMLElement>("rotation-value");
-    rotationInput.addEventListener("input", () => {
-      rotationValue.textContent = rotationInput.value;
-      patch({ rotation: Number(rotationInput.value) });
-    });
-    rotationInput.addEventListener("change", () => this.renderProperties());
-
-    const opacityInput = el<HTMLInputElement>("opacity");
-    const opacityValue = el<HTMLElement>("opacity-value");
-    opacityInput.addEventListener("input", () => {
-      opacityValue.textContent = opacityInput.value;
-      patch({ opacity: Number(opacityInput.value) / 100 });
-    });
-    opacityInput.addEventListener("change", () => this.renderProperties());
-
-    const blurInput = el<HTMLInputElement>("blur");
-    const blurValue = el<HTMLElement>("blur-value");
-    blurInput.addEventListener("input", () => {
-      blurValue.textContent = blurInput.value;
-      patch({ blur: Number(blurInput.value) });
-    });
-    blurInput.addEventListener("change", () => this.renderProperties());
+    this.bindSlider(patch, "rotation", "rotation-number", -180, 180, (v) => ({ rotation: v }));
+    this.bindSlider(patch, "opacity", "opacity-number", 0, 100, (v) => ({ opacity: v / 100 }));
+    this.bindSlider(patch, "blur", "blur-number", 0, 20, (v) => ({ blur: v }));
 
     el<HTMLButtonElement>("flip-x").addEventListener("click", () => {
       const current = this.assets.get(assetId);
@@ -330,15 +322,52 @@ export class Sidebar {
       el<HTMLInputElement>("muted").addEventListener("change", (e) =>
         patch({ muted: (e.target as HTMLInputElement).checked })
       );
-      const volumeInput = el<HTMLInputElement>("volume");
-      const volumeValue = el<HTMLElement>("volume-value");
-      volumeInput.addEventListener("input", () => {
-        volumeValue.textContent = volumeInput.value;
-        patch({ volume: Number(volumeInput.value) / 100 });
-      });
-      volumeInput.addEventListener("change", () => this.renderProperties());
+      this.bindSlider(patch, "volume", "volume-number", 0, 100, (v) => ({ volume: v / 100 }));
     }
   }
+
+  // Wires a slider + its paired numeric input together: dragging the slider
+  // live-updates the number, typing in the number live-updates the slider,
+  // and either one sends the patch. Both fire a final renderProperties() on
+  // "change" (release/blur) to pick up anything that changed via other
+  // clients while this one was mid-edit -- see the mid-drag rebuild note in
+  // upsertAsset for why that rebuild must NOT happen while `interacting`.
+  private bindSlider(
+    patch: (p: AssetPatch) => void,
+    rangeRole: string,
+    numberRole: string,
+    min: number,
+    max: number,
+    toPatch: (value: number) => AssetPatch
+  ): void {
+    const range = this.propertiesPanel.querySelector<HTMLInputElement>(`[data-role="${rangeRole}"]`)!;
+    const number = this.propertiesPanel.querySelector<HTMLInputElement>(`[data-role="${numberRole}"]`)!;
+    const apply = (value: number) => {
+      const clamped = Math.min(max, Math.max(min, value));
+      range.value = String(clamped);
+      number.value = String(clamped);
+      patch(toPatch(clamped));
+    };
+    range.addEventListener("input", () => apply(Number(range.value)));
+    range.addEventListener("change", () => this.renderProperties());
+    number.addEventListener("input", () => {
+      if (number.value === "" || number.value === "-") return;
+      const parsed = Number(number.value);
+      if (Number.isFinite(parsed)) apply(parsed);
+    });
+    number.addEventListener("change", () => this.renderProperties());
+  }
+}
+
+// The rotation slider/input work in -180..180 (0 in the middle), but
+// CSS rotate() and the stored value are just degrees with no inherent
+// range -- an asset rotated via some other path (or a legacy value) could
+// sit outside that window (e.g. 350deg, equivalent to -10deg). Normalize
+// to the nearest equivalent angle in -180..180 purely for display; the
+// value sent back on edit is already in that range going forward.
+function normalizeRotation(deg: number): number {
+  const wrapped = ((deg % 360) + 360) % 360;
+  return wrapped > 180 ? wrapped - 360 : wrapped;
 }
 
 function displayName(asset: Asset): string {
