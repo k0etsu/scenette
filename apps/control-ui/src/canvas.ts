@@ -350,6 +350,11 @@ export class CanvasView {
         const video = document.createElement("video");
         if (asset.s3Key) video.src = this.mediaUrl(asset.s3Key);
         video.controls = false;
+        // Unlike <img>, a <video> is natively draggable by default in most
+        // browsers (e.g. dragging out its current frame as a thumbnail) --
+        // that native drag-and-drop hijacks the mouse mid-gesture, which
+        // looks exactly like our own drag breaking after one tick.
+        video.draggable = false;
         content = video;
         break;
       }

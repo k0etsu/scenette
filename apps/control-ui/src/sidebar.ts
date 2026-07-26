@@ -42,6 +42,13 @@ export class Sidebar {
   private assets = new Map<string, Asset>();
   private selectedAssetId?: string;
 
+  // Explicitly tracked rather than relying on document.activeElement:
+  // clicking/dragging a range input doesn't reliably focus it in every
+  // browser (mouse-driven form-control focus behavior differs across
+  // engines), so activeElement-based detection silently failed to guard
+  // the rebuild below in some browsers -- see upsertAsset.
+  private interacting = false;
+
   private readonly objectsList: HTMLElement;
   private readonly propertiesPanel: HTMLElement;
 
@@ -63,6 +70,13 @@ export class Sidebar {
     });
 
     this.propertiesPanel = this.propertiesPanelRoot;
+    this.propertiesPanel.addEventListener("mousedown", (event) => {
+      const target = event.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") this.interacting = true;
+    });
+    window.addEventListener("mouseup", () => {
+      this.interacting = false;
+    });
     this.renderProperties();
   }
 
@@ -79,14 +93,12 @@ export class Sidebar {
     this.assets.set(asset.assetId, asset);
     this.renderObjectsList();
     // Rebuilding the properties panel (innerHTML) while a range/text input
-    // inside it is actively focused -- e.g. mid-drag on a slider -- destroys
-    // and recreates that element, which drops the browser's mouse capture
-    // and stops the drag after a single tick. The panel already reflects the
-    // in-progress value via the input's own local listener, so skip the
-    // rebuild until focus leaves it.
-    const active = document.activeElement;
-    const isInteracting = active instanceof HTMLElement && this.propertiesPanel.contains(active);
-    if (asset.assetId === this.selectedAssetId && !isInteracting) this.renderProperties();
+    // inside it is mid-drag destroys and recreates that element, which
+    // drops the browser's mouse capture and stops the drag after a single
+    // tick. The panel already reflects the in-progress value via the
+    // input's own local listener, so skip the rebuild until the mouse is
+    // released (see `interacting`, tracked via mousedown/mouseup above).
+    if (asset.assetId === this.selectedAssetId && !this.interacting) this.renderProperties();
   }
 
   removeAsset(assetId: string): void {
