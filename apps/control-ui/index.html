@@ -187,8 +187,14 @@
         margin: 0;
       }
       #properties-panel .prop-slider-number {
-        width: 64px;
-        flex-shrink: 0;
+        /* flex-basis (not width) so this reliably wins the main-axis size
+           against the #properties-panel input[type="number"] rule's
+           width: 100% below -- flex-basis takes priority over width for a
+           flex item's sizing regardless of which rule has higher CSS
+           specificity or comes later in the stylesheet. */
+        flex: 0 0 64px;
+        min-width: 0;
+        text-align: right;
       }
       #properties-panel input[type="number"],
       #properties-panel textarea {
