@@ -172,7 +172,7 @@ export class Sidebar {
       this.propertiesPanel.style.display = "none";
       return;
     }
-    this.propertiesPanel.style.display = "block";
+    this.propertiesPanel.style.display = "flex";
 
     const assetId = asset.assetId;
     const patch = (p: AssetPatch) => this.callbacks.onPatch(assetId, p);

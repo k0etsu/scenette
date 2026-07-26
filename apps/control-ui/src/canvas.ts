@@ -3,6 +3,13 @@ import { ICON_AUDIO_LARGE } from "./icons";
 
 interface Entry {
   el: HTMLElement;
+  // The actual visual content (img/video/audio icon/text), one level inside
+  // `el`. Blur is applied here rather than on `el` itself -- a CSS filter
+  // blurs everything painted for the element it's on, including outline, so
+  // applying it to `el` (which also carries the selection outline) blurred
+  // the selection indicator right along with the asset, making it useless
+  // for judging exactly how blurred the asset itself looks.
+  content: HTMLElement;
   asset: Asset;
 }
 
@@ -188,13 +195,13 @@ export class CanvasView {
   upsert(asset: Asset): void {
     let entry = this.entries.get(asset.assetId);
     if (!entry) {
-      const el = this.createElement(asset);
-      entry = { el, asset };
+      const { el, content } = this.createElement(asset);
+      entry = { el, content, asset };
       this.entries.set(asset.assetId, entry);
       this.world.appendChild(el);
     }
     entry.asset = asset;
-    this.applyTransform(entry.el, asset);
+    this.applyTransform(entry, asset);
     if (asset.assetId === this.selectedAssetId) this.positionHandles();
   }
 
@@ -254,7 +261,7 @@ export class CanvasView {
     if (!entry) return;
     const seq = this.nextSeq();
     entry.asset = { ...entry.asset, x, y, seq };
-    this.applyTransform(entry.el, entry.asset);
+    this.applyTransform(entry, entry.asset);
     if (assetId === this.selectedAssetId) this.positionHandles();
     this.callbacks.onAssetMove(assetId, x, y, seq);
   }
@@ -266,7 +273,7 @@ export class CanvasView {
     const h = Math.max(MIN_ASSET_SIZE, height);
     const seq = this.nextSeq();
     entry.asset = { ...entry.asset, width: w, height: h, seq };
-    this.applyTransform(entry.el, entry.asset);
+    this.applyTransform(entry, entry.asset);
     if (assetId === this.selectedAssetId) this.positionHandles();
     this.callbacks.onAssetResize(assetId, entry.asset.x, entry.asset.y, w, h, seq);
   }
@@ -276,7 +283,7 @@ export class CanvasView {
     if (!entry) return;
     const seq = this.nextSeq();
     entry.asset = { ...entry.asset, ...patch, seq };
-    this.applyTransform(entry.el, entry.asset);
+    this.applyTransform(entry, entry.asset);
     if (assetId === this.selectedAssetId) this.positionHandles();
     this.callbacks.onAssetPatch(assetId, patch, seq);
   }
@@ -294,7 +301,8 @@ export class CanvasView {
     }
   }
 
-  private applyTransform(el: HTMLElement, asset: Asset): void {
+  private applyTransform(entry: Entry, asset: Asset): void {
+    const { el, content } = entry;
     el.style.left = `${asset.x}px`;
     el.style.top = `${asset.y}px`;
     el.style.width = `${asset.width}px`;
@@ -302,10 +310,13 @@ export class CanvasView {
     el.style.transform = `rotate(${asset.rotation}deg) scale(${asset.flipX ? -1 : 1}, ${asset.flipY ? -1 : 1})`;
     el.style.zIndex = String(asset.zIndex);
     el.style.outline = asset.assetId === this.selectedAssetId ? "2px solid #4da3ff" : "none";
-    el.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
     el.style.cursor = asset.locked ? "default" : "grab";
-    if (asset.type === "text" && el.textContent !== asset.text) {
-      el.textContent = asset.text ?? "";
+    // Blur lives on `content`, one level inside `el` -- `el` itself carries
+    // the selection outline, and a CSS filter blurs everything painted for
+    // the element it's on, so applying it to `el` blurred the outline too.
+    content.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
+    if (asset.type === "text" && content.textContent !== asset.text) {
+      content.textContent = asset.text ?? "";
     }
     // The canvas always shows every asset regardless of the true `visible`
     // flag (viewport-intersection + hidden) -- unlike browser-source, the
@@ -316,22 +327,22 @@ export class CanvasView {
     el.style.opacity = String(asset.hidden ? asset.opacity * 0.4 : asset.opacity);
   }
 
-  private createElement(asset: Asset): HTMLElement {
-    let el: HTMLElement;
+  private createElement(asset: Asset): { el: HTMLElement; content: HTMLElement } {
+    let content: HTMLElement;
     switch (asset.type) {
       case "image":
       case "gif": {
         const img = document.createElement("img");
         if (asset.s3Key) img.src = this.mediaUrl(asset.s3Key);
         img.draggable = false;
-        el = img;
+        content = img;
         break;
       }
       case "video": {
         const video = document.createElement("video");
         if (asset.s3Key) video.src = this.mediaUrl(asset.s3Key);
         video.controls = false;
-        el = video;
+        content = video;
         break;
       }
       case "audio": {
@@ -340,21 +351,26 @@ export class CanvasView {
         audio.style.alignItems = "center";
         audio.style.justifyContent = "center";
         audio.innerHTML = ICON_AUDIO_LARGE;
-        el = audio;
+        content = audio;
         break;
       }
       case "text": {
-        el = document.createElement("div");
-        el.textContent = asset.text ?? "";
+        content = document.createElement("div");
+        content.textContent = asset.text ?? "";
         break;
       }
     }
-    el.dataset.assetType = asset.type;
+    content.dataset.assetType = asset.type;
+    content.style.width = "100%";
+    content.style.height = "100%";
+
+    const el = document.createElement("div");
     el.dataset.assetId = asset.assetId;
     el.style.position = "absolute";
     el.style.cursor = "grab";
+    el.appendChild(content);
     el.addEventListener("mousedown", (event) => this.onAssetMouseDown(event, asset.assetId));
-    return el;
+    return { el, content };
   }
 
   private bindContainerEvents(): void {
@@ -367,11 +383,10 @@ export class CanvasView {
         this.dragging = { panning: true };
         return;
       }
-      if (event.button === 0 && (event.target === this.container || event.target === this.world)) {
-        this.selectedAssetId = undefined;
-        this.refreshSelection();
-        this.callbacks.onSelectionChange(undefined);
-      }
+      // Deliberately does NOT deselect on an empty-canvas click -- selection
+      // only ever changes by picking a different asset (or an explicit
+      // delete), so the properties panel stays put while adjusting pan/zoom
+      // or clicking around the canvas.
     });
 
     window.addEventListener("mousemove", (event) => this.onMouseMove(event));
@@ -468,7 +483,7 @@ export class CanvasView {
       if (!entry) return;
       entry.asset = this.applyResizeDelta(entry.asset, this.dragging.resizing.corner, dx, dy);
       this.scheduleRender(() => {
-        this.applyTransform(entry.el, entry.asset);
+        this.applyTransform(entry, entry.asset);
         this.positionHandles();
       });
 
@@ -492,7 +507,7 @@ export class CanvasView {
     if (!entry) return;
     entry.asset = { ...entry.asset, x: entry.asset.x + dx, y: entry.asset.y + dy };
     this.scheduleRender(() => {
-      this.applyTransform(entry.el, entry.asset);
+      this.applyTransform(entry, entry.asset);
       this.positionHandles();
     });
 

@@ -41,15 +41,36 @@
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
+        min-height: 0;
         background: #24252b;
         border-right: 1px solid #333;
-        overflow-y: auto;
       }
+      /* Top/bottom split: the objects list and the properties panel each
+         get a share of the sidebar's full height (flex: 1) rather than
+         stacking with the sidebar itself scrolling as one column -- so
+         both stay reachable regardless of how many objects or properties
+         there are, matching the reference tool's layout. */
       #objects-panel, #properties-panel {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
         background: #2b2c34;
         margin: 8px;
         border-radius: 6px;
         padding: 8px;
+        box-sizing: border-box;
+        overflow: hidden;
+      }
+      #objects-panel {
+        margin-bottom: 4px;
+      }
+      /* Unlike #objects-panel (fixed header + independently-scrolling
+         .objects-list below it), the properties panel has no such inner
+         wrapper -- its header and fields are direct children -- so the
+         panel itself needs to scroll as a whole. */
+      #properties-panel {
+        overflow-y: auto;
       }
       .sidebar-header {
         display: flex;
@@ -59,9 +80,11 @@
         font-weight: 600;
         color: #ccc;
         padding: 2px 2px 8px;
+        flex-shrink: 0;
       }
       .objects-list {
-        max-height: 320px;
+        flex: 1;
+        min-height: 0;
         overflow-y: auto;
         display: flex;
         flex-direction: column;
