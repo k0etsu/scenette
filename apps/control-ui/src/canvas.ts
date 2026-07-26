@@ -318,6 +318,14 @@ export class CanvasView {
     if (asset.type === "text" && content.textContent !== asset.text) {
       content.textContent = asset.text ?? "";
     }
+    // The editor's own preview never actually played video -- only
+    // browser-source synced .loop/.muted/.volume/.play()/.pause() from the
+    // asset's playback fields. Audio has no real media element here (the
+    // canvas shows a placeholder icon; actual audio only plays for viewers
+    // via browser-source), so only video needs this.
+    if (asset.type === "video") {
+      syncMediaState(content as HTMLVideoElement, asset);
+    }
     // The canvas always shows every asset regardless of the true `visible`
     // flag (viewport-intersection + hidden) -- unlike browser-source, the
     // editor needs an omniscient view so things can be found/edited even
@@ -626,5 +634,37 @@ export class CanvasView {
   // CloudFront distribution from the one serving this app itself.
   private mediaUrl(s3Key: string): string {
     return `https://${this.assetsDomain}/${s3Key}`;
+  }
+}
+
+// Only touches properties that actually differ from the asset's target
+// state -- re-assigning .loop/.volume unconditionally is harmless, but
+// calling .play()/.pause() when already in that state can cause an
+// audible/visible stutter on some browsers.
+function syncMediaState(media: HTMLVideoElement, asset: Asset): void {
+  if (media.loop !== asset.loop) media.loop = asset.loop;
+  if (media.volume !== asset.volume) media.volume = asset.volume;
+  if (asset.paused && !media.paused) {
+    media.pause();
+    media.muted = asset.muted;
+  } else if (!asset.paused && media.paused) {
+    // A freshly-added video's very first .play() call can be rejected by
+    // the browser's autoplay policy (no user gesture directly on this
+    // element) with no automatic retry -- previously that left the asset
+    // stuck paused until the page was reloaded. Muted autoplay is allowed
+    // essentially everywhere, so force-mute just for this call and restore
+    // the asset's real mute state once playback has actually started.
+    const wantMuted = asset.muted;
+    media.muted = true;
+    media
+      .play()
+      .then(() => {
+        media.muted = wantMuted;
+      })
+      .catch(() => {
+        media.muted = wantMuted;
+      });
+  } else if (media.muted !== asset.muted) {
+    media.muted = asset.muted;
   }
 }

@@ -228,7 +228,7 @@ export class Sidebar {
       ${asset.type === "video" || asset.type === "audio" ? `
         <div class="sidebar-header"><span>Playback</span></div>
         <div class="properties-buttons">
-          <button type="button" data-role="play-pause">${asset.paused ? ICON_PLAY : ICON_PAUSE}</button>
+          <button type="button" data-role="play-pause" class="sidebar-icon-button playback-button">${asset.paused ? ICON_PLAY : ICON_PAUSE}</button>
           <label class="prop-checkbox"><input type="checkbox" data-role="loop" ${asset.loop ? "checked" : ""} /> Loop</label>
           <label class="prop-checkbox"><input type="checkbox" data-role="muted" ${asset.muted ? "checked" : ""} /> Mute</label>
         </div>

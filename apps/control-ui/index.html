@@ -115,6 +115,9 @@
         white-space: nowrap;
       }
       .sidebar-icon-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         background: none;
         border: none;
         color: #ccc;
@@ -123,12 +126,19 @@
         padding: 2px 4px;
         border-radius: 3px;
         flex-shrink: 0;
+        line-height: 0;
       }
       .sidebar-icon-button:hover {
         background: #454650;
       }
       .sidebar-icon-button.danger:hover {
         background: #6b2b2b;
+      }
+      .playback-button {
+        width: 28px;
+        height: 28px;
+        border: 1px solid #454650;
+        background: #34353e;
       }
       #properties-panel {
         display: none;

@@ -200,14 +200,29 @@ function elementTypeOf(el: HTMLElement): string | undefined {
 // audible/visible stutter on some browsers.
 function syncMediaState(media: HTMLMediaElement, asset: Asset): void {
   if (media.loop !== asset.loop) media.loop = asset.loop;
-  if (media.muted !== asset.muted) media.muted = asset.muted;
   if (media.volume !== asset.volume) media.volume = asset.volume;
   if (asset.paused && !media.paused) {
     media.pause();
+    media.muted = asset.muted;
   } else if (!asset.paused && media.paused) {
-    media.play().catch(() => {
-      // Autoplay can be blocked by the browser (e.g. no prior user
-      // interaction) -- nothing actionable to do about it here.
-    });
+    // A freshly-added asset's very first .play() call can be rejected by
+    // the browser/CEF's autoplay policy (no user gesture -- browser-source
+    // has none to offer) with no automatic retry, which previously left the
+    // asset stuck paused until the OBS browser source was manually
+    // refreshed. Muted autoplay is allowed essentially everywhere, so
+    // force-mute just for this call and restore the asset's real mute
+    // state once playback has actually started.
+    const wantMuted = asset.muted;
+    media.muted = true;
+    media
+      .play()
+      .then(() => {
+        media.muted = wantMuted;
+      })
+      .catch(() => {
+        media.muted = wantMuted;
+      });
+  } else if (media.muted !== asset.muted) {
+    media.muted = asset.muted;
   }
 }
