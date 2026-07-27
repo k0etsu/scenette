@@ -52,7 +52,21 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
     const apiGw = new ApiGatewayManagementApiClient({
       endpoint: `https://${event.requestContext.domainName}/${event.requestContext.stage}`,
     });
-    await broadcastToRoom(apiGw, roomId, { type: "presence:joined", entry: { username, connectedAt } });
+    // Exclude this connection itself: from API Gateway's Management API
+    // perspective a connection isn't fully "active" until $connect returns,
+    // so PostToConnection targeting it (from within its own $connect
+    // invocation) fails with GoneException -- which sendTo() treats as "this
+    // client disconnected" and deletes the connections-table row it just
+    // wrote, wiping out its own room association before this handler even
+    // returns. The connecting client doesn't need to hear about its own
+    // join anyway; it'll see itself in the presence list it requests right
+    // after via room:snapshot.
+    await broadcastToRoom(
+      apiGw,
+      roomId,
+      { type: "presence:joined", entry: { username, connectedAt } },
+      connectionId
+    );
   }
 
   return { statusCode: 200, body: "Connected" };
