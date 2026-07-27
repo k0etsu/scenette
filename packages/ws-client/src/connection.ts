@@ -17,6 +17,11 @@ export interface ConnectionOptions {
   // later reconnect alike — since a fresh connection has no server-side
   // memory of this client and needs a snapshot request either way.
   onOpen: () => void;
+  // Session token for an authenticated control-ui connection -- lets
+  // connect.ts attach a username to this connection so it shows up in the
+  // room's connected-users presence list. Omitted entirely for an anonymous
+  // browser-source connection, which never appears in that list.
+  token?: string;
 }
 
 export class ResilientConnection {
@@ -36,7 +41,8 @@ export class ResilientConnection {
   }
 
   private open(): void {
-    const url = `${this.options.wsUrl}?roomId=${encodeURIComponent(this.options.roomId)}`;
+    let url = `${this.options.wsUrl}?roomId=${encodeURIComponent(this.options.roomId)}`;
+    if (this.options.token) url += `&token=${encodeURIComponent(this.options.token)}`;
     const next = new WebSocket(url);
 
     next.onopen = () => {

@@ -1,7 +1,15 @@
-import { Asset, Viewport } from "@scenette/protocol";
+import { Asset, AssetPatch, Variable, Viewport, interpolateText } from "@scenette/protocol";
+import { ICON_AUDIO_LARGE } from "./icons";
 
 interface Entry {
   el: HTMLElement;
+  // The actual visual content (img/video/audio icon/text), one level inside
+  // `el`. Blur is applied here rather than on `el` itself -- a CSS filter
+  // blurs everything painted for the element it's on, including outline, so
+  // applying it to `el` (which also carries the selection outline) blurred
+  // the selection indicator right along with the asset, making it useless
+  // for judging exactly how blurred the asset itself looks.
+  content: HTMLElement;
   asset: Asset;
 }
 
@@ -29,10 +37,15 @@ const MOVE_SEND_THROTTLE_MS = 40;
 export interface CanvasCallbacks {
   onAssetMove: (assetId: string, x: number, y: number, seq: number) => void;
   onAssetResize: (assetId: string, x: number, y: number, width: number, height: number, seq: number) => void;
+  onAssetPatch: (assetId: string, patch: AssetPatch, seq: number) => void;
   onAssetDelete: (assetId: string) => void;
   // worldX/worldY: where a created asset should be placed. screenX/screenY:
   // viewport-relative coordinates for positioning the context menu itself.
   onContextMenu: (worldX: number, worldY: number, screenX: number, screenY: number) => void;
+  // Fires on every selection change, including deselection (undefined) and
+  // programmatic selection via selectAsset() -- lets the sidebar's
+  // properties panel track whatever's selected on the canvas, and vice versa.
+  onSelectionChange: (assetId: string | undefined) => void;
 }
 
 // The editing surface: a world-space plane containing the (fixed, per the
@@ -58,6 +71,14 @@ export class CanvasView {
   private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
   private lastMoveSentAt = 0;
 
+  // Room-level master (synced, affects browser-source too) and this user's
+  // own local-only monitoring level -- see sound.ts. Multiplied together
+  // with each video asset's own volume to get what actually plays in this
+  // preview; browser-source only ever applies globalVolume, never local.
+  private globalVolume = 1;
+  private localVolume = 1;
+  private variables: Record<string, Variable> = {};
+
   // A high-polling-rate mouse can fire mousemove far more often than the
   // screen actually repaints (well past 60/sec) — writing to el.style on
   // every single event forces the browser to do that many layout/paint
@@ -80,7 +101,11 @@ export class CanvasView {
   // session land in the same millisecond (the server's check is a strict
   // `<`, so a tied value would otherwise be wrongly rejected too).
   private lastSeqValue = 0;
-  private nextSeq(): number {
+  // Public: the sidebar's properties-panel edits (numeric X/Y/W/H fields,
+  // toggles, etc.) aren't part of a mouse gesture but still need to go
+  // through the same seq-guarded path as a drag for consistent stale/
+  // out-of-order protection.
+  nextSeq(): number {
     const now = Date.now();
     this.lastSeqValue = now > this.lastSeqValue ? now : this.lastSeqValue + 1;
     return this.lastSeqValue;
@@ -140,8 +165,77 @@ export class CanvasView {
     return this.viewport;
   }
 
+  // Deliberately touches only video elements' .volume, not a full
+  // applyTransform() over every entry -- the sound panel's sliders fire
+  // live on every drag tick, and re-running position/blur/etc for every
+  // non-video asset on each tick would be pure waste. Also deliberately
+  // uses applyVolume (not the full syncMediaState) for the same reason
+  // syncGlobalVolume does in browser-source's render.ts: routing a
+  // volume-only change through the play/pause branch meant a volume drag
+  // could re-issue .play() dozens of times a second on a video that was
+  // merely mid-buffer (media.paused momentarily true while asset.paused is
+  // false), each call interrupting the previous one's promise and racing
+  // the forced-mute/restore -- which is what made playback go unresponsive
+  // while someone was just touching the volume slider.
+  setVolumeMultipliers(globalVolume: number, localVolume: number): void {
+    this.globalVolume = globalVolume;
+    this.localVolume = localVolume;
+    for (const entry of this.entries.values()) {
+      if (entry.asset.type === "video") {
+        applyVolume(entry.content as HTMLVideoElement, this.effectiveVolume(entry.asset));
+      }
+    }
+  }
+
+  setVariables(variables: Record<string, Variable>): void {
+    this.variables = variables;
+    this.reapplyText();
+  }
+
+  upsertVariable(variable: Variable): void {
+    this.variables = { ...this.variables, [variable.key]: variable };
+    this.reapplyText();
+  }
+
+  removeVariable(key: string): void {
+    const next = { ...this.variables };
+    delete next[key];
+    this.variables = next;
+    this.reapplyText();
+  }
+
+  private reapplyText(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.asset.type === "text") {
+        const interpolated = interpolateText(entry.asset.text ?? "", this.variables);
+        if (entry.content.textContent !== interpolated) entry.content.textContent = interpolated;
+      }
+    }
+  }
+
+  private effectiveVolume(asset: Asset): number {
+    return Math.min(1, Math.max(0, asset.volume * this.globalVolume * this.localVolume));
+  }
+
   get(assetId: string): Asset | undefined {
     return this.entries.get(assetId)?.asset;
+  }
+
+  getAllAssets(): Asset[] {
+    return [...this.entries.values()].map((entry) => entry.asset);
+  }
+
+  getSelectedAssetId(): string | undefined {
+    return this.selectedAssetId;
+  }
+
+  // Public counterpart to clicking an asset directly -- lets the sidebar's
+  // object list drive canvas selection.
+  selectAsset(assetId: string | undefined): void {
+    if (assetId === this.selectedAssetId) return;
+    this.selectedAssetId = assetId;
+    this.refreshSelection();
+    this.callbacks.onSelectionChange(assetId);
   }
 
   setAssets(assets: Asset[]): void {
@@ -161,13 +255,13 @@ export class CanvasView {
   upsert(asset: Asset): void {
     let entry = this.entries.get(asset.assetId);
     if (!entry) {
-      const el = this.createElement(asset);
-      entry = { el, asset };
+      const { el, content } = this.createElement(asset);
+      entry = { el, content, asset };
       this.entries.set(asset.assetId, entry);
       this.world.appendChild(el);
     }
     entry.asset = asset;
-    this.applyTransform(entry.el, asset);
+    this.applyTransform(entry, asset);
     if (asset.assetId === this.selectedAssetId) this.positionHandles();
   }
 
@@ -206,6 +300,54 @@ export class CanvasView {
     this.upsert({ ...entry.asset, x, y, width, height, visible, seq });
   }
 
+  // Applies a patch that originated from the network (a collaborator's
+  // properties-panel edit, or the server's echo of our own) -- covers text
+  // content, hidden/locked/opacity/blur/flip, z-index, rotation, and
+  // video/audio playback state. Property edits aren't part of an active
+  // mouse gesture the way move/resize are, so there's no "currently
+  // manipulating this locally" guard to check here.
+  applyRemoteUpdate(assetId: string, patch: AssetPatch, visible: boolean, seq: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    if (seq < entry.asset.seq) return;
+    this.upsert({ ...entry.asset, ...patch, visible, seq });
+  }
+
+  // Programmatic counterparts to mouse drag/resize, for the sidebar's
+  // numeric X/Y/width/height fields -- goes through the same seq-guarded
+  // send path as a drag for consistent stale/out-of-order protection.
+  setAssetPosition(assetId: string, x: number, y: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, x, y, seq };
+    this.applyTransform(entry, entry.asset);
+    if (assetId === this.selectedAssetId) this.positionHandles();
+    this.callbacks.onAssetMove(assetId, x, y, seq);
+  }
+
+  setAssetSize(assetId: string, width: number, height: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    const w = Math.max(MIN_ASSET_SIZE, width);
+    const h = Math.max(MIN_ASSET_SIZE, height);
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, width: w, height: h, seq };
+    this.applyTransform(entry, entry.asset);
+    if (assetId === this.selectedAssetId) this.positionHandles();
+    this.callbacks.onAssetResize(assetId, entry.asset.x, entry.asset.y, w, h, seq);
+  }
+
+  patchAsset(assetId: string, patch: AssetPatch): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, ...patch, seq };
+    this.applyTransform(entry, entry.asset);
+    if (assetId === this.selectedAssetId) this.positionHandles();
+    this.callbacks.onAssetPatch(assetId, patch, seq);
+  }
+
   remove(assetId: string): void {
     const entry = this.entries.get(assetId);
     if (entry) {
@@ -215,55 +357,94 @@ export class CanvasView {
     if (this.selectedAssetId === assetId) {
       this.selectedAssetId = undefined;
       this.positionHandles();
+      this.callbacks.onSelectionChange(undefined);
     }
   }
 
-  private applyTransform(el: HTMLElement, asset: Asset): void {
+  private applyTransform(entry: Entry, asset: Asset): void {
+    const { el, content } = entry;
     el.style.left = `${asset.x}px`;
     el.style.top = `${asset.y}px`;
     el.style.width = `${asset.width}px`;
     el.style.height = `${asset.height}px`;
-    el.style.transform = `rotate(${asset.rotation}deg)`;
+    el.style.transform = `rotate(${asset.rotation}deg) scale(${asset.flipX ? -1 : 1}, ${asset.flipY ? -1 : 1})`;
     el.style.zIndex = String(asset.zIndex);
     el.style.outline = asset.assetId === this.selectedAssetId ? "2px solid #4da3ff" : "none";
+    el.style.cursor = asset.locked ? "default" : "grab";
+    // Blur lives on `content`, one level inside `el` -- `el` itself carries
+    // the selection outline, and a CSS filter blurs everything painted for
+    // the element it's on, so applying it to `el` blurred the outline too.
+    content.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
+    if (asset.type === "text") {
+      const interpolated = interpolateText(asset.text ?? "", this.variables);
+      if (content.textContent !== interpolated) content.textContent = interpolated;
+    }
+    // The editor's own preview never actually played video -- only
+    // browser-source synced .loop/.muted/.volume/.play()/.pause() from the
+    // asset's playback fields. Audio has no real media element here (the
+    // canvas shows a placeholder icon; actual audio only plays for viewers
+    // via browser-source), so only video needs this.
+    if (asset.type === "video") {
+      syncMediaState(content as HTMLVideoElement, asset, this.effectiveVolume(asset));
+    }
+    // The canvas always shows every asset regardless of the true `visible`
+    // flag (viewport-intersection + hidden) -- unlike browser-source, the
+    // editor needs an omniscient view so things can be found/edited even
+    // off-screen or manually hidden. `hidden` still gets a visual cue
+    // (extra dimming on top of the asset's own opacity) so it's obvious
+    // which assets won't actually show up for viewers.
+    el.style.opacity = String(asset.hidden ? asset.opacity * 0.4 : asset.opacity);
   }
 
-  private createElement(asset: Asset): HTMLElement {
-    let el: HTMLElement;
+  private createElement(asset: Asset): { el: HTMLElement; content: HTMLElement } {
+    let content: HTMLElement;
     switch (asset.type) {
       case "image":
       case "gif": {
         const img = document.createElement("img");
         if (asset.s3Key) img.src = this.mediaUrl(asset.s3Key);
         img.draggable = false;
-        el = img;
+        content = img;
         break;
       }
       case "video": {
         const video = document.createElement("video");
         if (asset.s3Key) video.src = this.mediaUrl(asset.s3Key);
         video.controls = false;
-        el = video;
+        // Unlike <img>, a <video> is natively draggable by default in most
+        // browsers (e.g. dragging out its current frame as a thumbnail) --
+        // that native drag-and-drop hijacks the mouse mid-gesture, which
+        // looks exactly like our own drag breaking after one tick.
+        video.draggable = false;
+        content = video;
         break;
       }
       case "audio": {
         const audio = document.createElement("div");
-        audio.textContent = "🔊 audio";
-        el = audio;
+        audio.style.display = "flex";
+        audio.style.alignItems = "center";
+        audio.style.justifyContent = "center";
+        audio.innerHTML = ICON_AUDIO_LARGE;
+        content = audio;
         break;
       }
       case "text": {
-        el = document.createElement("div");
-        el.textContent = asset.text ?? "";
+        content = document.createElement("div");
+        content.textContent = asset.text ?? "";
         break;
       }
     }
-    el.dataset.assetType = asset.type;
+    content.dataset.assetType = asset.type;
+    content.style.width = "100%";
+    content.style.height = "100%";
+
+    const el = document.createElement("div");
     el.dataset.assetId = asset.assetId;
     el.style.position = "absolute";
     el.style.cursor = "grab";
+    el.appendChild(content);
     el.addEventListener("mousedown", (event) => this.onAssetMouseDown(event, asset.assetId));
-    return el;
+    return { el, content };
   }
 
   private bindContainerEvents(): void {
@@ -276,10 +457,10 @@ export class CanvasView {
         this.dragging = { panning: true };
         return;
       }
-      if (event.button === 0 && (event.target === this.container || event.target === this.world)) {
-        this.selectedAssetId = undefined;
-        this.refreshSelection();
-      }
+      // Deliberately does NOT deselect on an empty-canvas click -- selection
+      // only ever changes by picking a different asset (or an explicit
+      // delete), so the properties panel stays put while adjusting pan/zoom
+      // or clicking around the canvas.
     });
 
     window.addEventListener("mousemove", (event) => this.onMouseMove(event));
@@ -331,13 +512,23 @@ export class CanvasView {
     // own handlers rather than being captured here.
     if (event.button !== 0) return;
     event.stopPropagation();
-    this.selectedAssetId = assetId;
-    this.refreshSelection();
-    this.dragging = { assetId };
+    if (this.selectedAssetId !== assetId) {
+      this.selectedAssetId = assetId;
+      this.refreshSelection();
+      this.callbacks.onSelectionChange(assetId);
+    }
+    // Selection always works, even on a locked asset (so it can be viewed/
+    // unlocked via the properties panel) -- only the drag itself is blocked.
+    const entry = this.entries.get(assetId);
+    if (!entry?.asset.locked) {
+      this.dragging = { assetId };
+    }
   }
 
   private onHandleMouseDown(event: MouseEvent, corner: Corner): void {
     if (event.button !== 0 || !this.selectedAssetId) return;
+    const entry = this.entries.get(this.selectedAssetId);
+    if (entry?.asset.locked) return;
     event.stopPropagation();
     this.dragging = { resizing: { assetId: this.selectedAssetId, corner } };
   }
@@ -366,7 +557,7 @@ export class CanvasView {
       if (!entry) return;
       entry.asset = this.applyResizeDelta(entry.asset, this.dragging.resizing.corner, dx, dy);
       this.scheduleRender(() => {
-        this.applyTransform(entry.el, entry.asset);
+        this.applyTransform(entry, entry.asset);
         this.positionHandles();
       });
 
@@ -390,7 +581,7 @@ export class CanvasView {
     if (!entry) return;
     entry.asset = { ...entry.asset, x: entry.asset.x + dx, y: entry.asset.y + dy };
     this.scheduleRender(() => {
-      this.applyTransform(entry.el, entry.asset);
+      this.applyTransform(entry, entry.asset);
       this.positionHandles();
     });
 
@@ -479,17 +670,30 @@ export class CanvasView {
   // matching a typical canvas editor's resize-handle behavior.
   private positionHandles(): void {
     const entry = this.selectedAssetId ? this.entries.get(this.selectedAssetId) : undefined;
-    if (!entry) {
+    if (!entry || entry.asset.locked) {
       for (const corner of CORNERS) this.handles[corner].style.display = "none";
       return;
     }
 
-    const { x, y, width, height } = entry.asset;
+    const { x, y, width, height, rotation } = entry.asset;
+    // Corner offsets from the asset's center, rotated by the asset's own
+    // rotation -- otherwise the handles stay in an axis-aligned bounding
+    // box while the asset itself visibly rotates, drifting away from its
+    // actual corners instead of tracking them.
+    const cx = x + width / 2;
+    const cy = y + height / 2;
+    const rad = (rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const rotate = (dx: number, dy: number) => ({
+      x: cx + dx * cos - dy * sin,
+      y: cy + dx * sin + dy * cos,
+    });
     const positions: Record<Corner, { x: number; y: number }> = {
-      nw: { x, y },
-      ne: { x: x + width, y },
-      sw: { x, y: y + height },
-      se: { x: x + width, y: y + height },
+      nw: rotate(-width / 2, -height / 2),
+      ne: rotate(width / 2, -height / 2),
+      sw: rotate(-width / 2, height / 2),
+      se: rotate(width / 2, height / 2),
     };
     for (const corner of CORNERS) {
       const handle = this.handles[corner];
@@ -509,5 +713,43 @@ export class CanvasView {
   // CloudFront distribution from the one serving this app itself.
   private mediaUrl(s3Key: string): string {
     return `https://${this.assetsDomain}/${s3Key}`;
+  }
+}
+
+// See setVolumeMultipliers -- volume-only updates must never touch
+// loop/play/pause/mute, only used from there.
+function applyVolume(media: HTMLVideoElement, effectiveVolume: number): void {
+  if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
+}
+
+// Only touches properties that actually differ from the asset's target
+// state -- re-assigning .loop/.volume unconditionally is harmless, but
+// calling .play()/.pause() when already in that state can cause an
+// audible/visible stutter on some browsers.
+function syncMediaState(media: HTMLVideoElement, asset: Asset, effectiveVolume: number): void {
+  if (media.loop !== asset.loop) media.loop = asset.loop;
+  applyVolume(media, effectiveVolume);
+  if (asset.paused && !media.paused) {
+    media.pause();
+    media.muted = asset.muted;
+  } else if (!asset.paused && media.paused) {
+    // A freshly-added video's very first .play() call can be rejected by
+    // the browser's autoplay policy (no user gesture directly on this
+    // element) with no automatic retry -- previously that left the asset
+    // stuck paused until the page was reloaded. Muted autoplay is allowed
+    // essentially everywhere, so force-mute just for this call and restore
+    // the asset's real mute state once playback has actually started.
+    const wantMuted = asset.muted;
+    media.muted = true;
+    media
+      .play()
+      .then(() => {
+        media.muted = wantMuted;
+      })
+      .catch(() => {
+        media.muted = wantMuted;
+      });
+  } else if (media.muted !== asset.muted) {
+    media.muted = asset.muted;
   }
 }

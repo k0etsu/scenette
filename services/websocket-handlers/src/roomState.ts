@@ -7,7 +7,7 @@ import {
   DeleteCommand,
   QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { Asset, Viewport, intersects } from "@scenette/protocol";
+import { Asset, AssetPatch, Variable, VariableType, Viewport, intersects } from "@scenette/protocol";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ASSETS_TABLE = process.env.ASSETS_TABLE!;
@@ -19,17 +19,39 @@ const ROOMS_TABLE = process.env.ROOMS_TABLE!;
 // step once accounts/ownership exist.
 const DEFAULT_VIEWPORT = { x: 0, y: 0, width: 1920, height: 1080 };
 
-export async function getOrCreateViewport(roomId: string): Promise<Viewport> {
+export interface Room extends Viewport {
+  // Master multiplier broadcast to every client (control-ui AND
+  // browser-source) -- distinct from control-ui's own purely-local volume
+  // knob, which never touches the server at all.
+  globalVolume: number;
+  // Same rationale as Asset.seq -- the global-volume slider fires on every
+  // drag tick, each a separate message/Lambda invocation with no ordering
+  // guarantee, so this guards against an earlier-sent-but-later-processed
+  // tick's write clobbering a later tick's already-applied value.
+  globalVolumeSeq: number;
+  variables: Record<string, Variable>;
+}
+
+export async function getOrCreateRoom(roomId: string): Promise<Room> {
   const { Item } = await ddb.send(new GetCommand({ TableName: ROOMS_TABLE, Key: { roomId } }));
   if (Item) {
-    return { roomId, x: Item.x, y: Item.y, width: Item.width, height: Item.height };
+    return {
+      roomId,
+      x: Item.x,
+      y: Item.y,
+      width: Item.width,
+      height: Item.height,
+      globalVolume: Item.globalVolume ?? 1,
+      globalVolumeSeq: Item.globalVolumeSeq ?? 0,
+      variables: Item.variables ?? {},
+    };
   }
 
-  const viewport: Viewport = { roomId, ...DEFAULT_VIEWPORT };
+  const room: Room = { roomId, ...DEFAULT_VIEWPORT, globalVolume: 1, globalVolumeSeq: 0, variables: {} };
   await ddb.send(
     new PutCommand({
       TableName: ROOMS_TABLE,
-      Item: { ...viewport, createdAt: new Date().toISOString() },
+      Item: { ...room, createdAt: new Date().toISOString() },
       ConditionExpression: "attribute_not_exists(roomId)",
     })
   ).catch((err: unknown) => {
@@ -37,7 +59,63 @@ export async function getOrCreateViewport(roomId: string): Promise<Viewport> {
     if (!(err instanceof Error && err.name === "ConditionalCheckFailedException")) throw err;
   });
 
-  return viewport;
+  return room;
+}
+
+export async function setGlobalVolume(roomId: string, globalVolume: number, seq: number): Promise<"stale" | undefined> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: ROOMS_TABLE,
+        Key: { roomId },
+        UpdateExpression: "SET globalVolume = :v, globalVolumeSeq = :seq",
+        ConditionExpression: "attribute_not_exists(globalVolumeSeq) OR globalVolumeSeq < :seq",
+        ExpressionAttributeValues: { ":v": globalVolume, ":seq": seq },
+      })
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === "ConditionalCheckFailedException") return "stale";
+    throw err;
+  }
+  return undefined;
+}
+
+// Upsert: creates a new variable, or edits an existing one's value/type
+// (its createdAt is preserved across edits, so the list order the sidebar
+// sorts by doesn't reshuffle every time someone bumps a counter).
+export async function setVariable(
+  roomId: string,
+  key: string,
+  type: VariableType,
+  value: string
+): Promise<Variable> {
+  const { Item } = await ddb.send(
+    new GetCommand({ TableName: ROOMS_TABLE, Key: { roomId }, ProjectionExpression: "variables" })
+  );
+  const existing = Item?.variables?.[key] as Variable | undefined;
+  const variable: Variable = { key, type, value, createdAt: existing?.createdAt ?? new Date().toISOString() };
+
+  await ddb.send(
+    new UpdateCommand({
+      TableName: ROOMS_TABLE,
+      Key: { roomId },
+      UpdateExpression: "SET variables.#key = :v",
+      ExpressionAttributeNames: { "#key": key },
+      ExpressionAttributeValues: { ":v": variable },
+    })
+  );
+  return variable;
+}
+
+export async function deleteVariable(roomId: string, key: string): Promise<void> {
+  await ddb.send(
+    new UpdateCommand({
+      TableName: ROOMS_TABLE,
+      Key: { roomId },
+      UpdateExpression: "REMOVE variables.#key",
+      ExpressionAttributeNames: { "#key": key },
+    })
+  );
 }
 
 export async function listAssets(roomId: string): Promise<Asset[]> {
@@ -75,10 +153,8 @@ export async function moveAsset(
   if (!existing) return undefined;
 
   const nextRotation = rotation ?? existing.rotation;
-  const visible = intersects(
-    { x, y, width: existing.width, height: existing.height },
-    viewport
-  );
+  const visible =
+    intersects({ x, y, width: existing.width, height: existing.height }, viewport) && !existing.hidden;
 
   try {
     await ddb.send(
@@ -125,7 +201,7 @@ export async function resizeAsset(
   const existing = await getAsset(roomId, assetId);
   if (!existing) return undefined;
 
-  const visible = intersects({ x, y, width, height }, viewport);
+  const visible = intersects({ x, y, width, height }, viewport) && !existing.hidden;
 
   try {
     await ddb.send(
@@ -145,6 +221,57 @@ export async function resizeAsset(
           ":now": new Date().toISOString(),
           ":seq": seq,
         },
+      })
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === "ConditionalCheckFailedException") return "stale";
+    throw err;
+  }
+
+  return { visible };
+}
+
+// Generic patch path for every asset property outside the specialized,
+// high-frequency move/resize messages (text content, hidden/locked flags,
+// opacity/blur/flip, z-index, rotation, and video/audio playback state).
+// Builds its SET clause dynamically from whatever keys are present in
+// `patch` rather than needing a dedicated function per property.
+export async function updateAsset(
+  roomId: string,
+  assetId: string,
+  patch: AssetPatch,
+  seq: number,
+  viewport: Viewport
+): Promise<{ visible: boolean } | "stale" | undefined> {
+  const existing = await getAsset(roomId, assetId);
+  if (!existing) return undefined;
+
+  const nextHidden = patch.hidden ?? existing.hidden;
+  const visible = intersects(existing, viewport) && !nextHidden;
+
+  const names: Record<string, string> = {};
+  const values: Record<string, unknown> = {
+    ":visible": visible,
+    ":now": new Date().toISOString(),
+    ":seq": seq,
+  };
+  const setClauses = ["visible = :visible", "lastUsedAt = :now", "seq = :seq"];
+
+  for (const [key, value] of Object.entries(patch)) {
+    names[`#${key}`] = key;
+    values[`:${key}`] = value;
+    setClauses.push(`#${key} = :${key}`);
+  }
+
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: ASSETS_TABLE,
+        Key: { roomId, assetId },
+        UpdateExpression: `SET ${setClauses.join(", ")}`,
+        ConditionExpression: "attribute_not_exists(seq) OR seq < :seq",
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
       })
     );
   } catch (err) {

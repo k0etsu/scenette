@@ -1,8 +1,19 @@
 import type { APIGatewayProxyWebsocketHandlerV2 } from "aws-lambda";
 import { ApiGatewayManagementApiClient } from "@aws-sdk/client-apigatewaymanagementapi";
-import { Asset, intersects, parseClientMessage } from "@scenette/protocol";
-import { roomIdForConnection, sendTo, broadcastToRoom } from "./connections";
-import { getOrCreateViewport, listAssets, putAsset, moveAsset, resizeAsset, deleteAsset } from "./roomState";
+import { Asset, Variable, intersects, parseClientMessage } from "@scenette/protocol";
+import { roomIdForConnection, sendTo, broadcastToRoom, listPresence } from "./connections";
+import {
+  getOrCreateRoom,
+  listAssets,
+  putAsset,
+  moveAsset,
+  resizeAsset,
+  updateAsset,
+  deleteAsset,
+  setGlobalVolume,
+  setVariable,
+  deleteVariable,
+} from "./roomState";
 
 export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   const connectionId = event.requestContext.connectionId;
@@ -22,21 +33,27 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
       return { statusCode: 200, body: "OK" };
     }
 
-    const viewport = await getOrCreateViewport(message.roomId);
+    const room = await getOrCreateRoom(message.roomId);
+    const viewport = { roomId: room.roomId, x: room.x, y: room.y, width: room.width, height: room.height };
 
     switch (message.action) {
       case "room:snapshot:request": {
-        const assets = await listAssets(message.roomId);
+        const [assets, presence] = await Promise.all([listAssets(message.roomId), listPresence(message.roomId)]);
         await sendTo(apiGw, connectionId, {
           type: "room:snapshot",
           assets,
           viewport: { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height },
+          globalVolume: room.globalVolume,
+          globalVolumeSeq: room.globalVolumeSeq,
+          variables: Object.values(room.variables),
+          presence,
         });
         break;
       }
 
       case "asset:add": {
         const now = new Date().toISOString();
+        const hidden = message.asset.hidden ?? false;
         const asset: Asset = {
           roomId: message.roomId,
           assetId: message.asset.assetId,
@@ -47,7 +64,17 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           height: message.asset.height,
           rotation: message.asset.rotation ?? 0,
           zIndex: message.asset.zIndex ?? 0,
-          visible: intersects(message.asset, viewport),
+          visible: intersects(message.asset, viewport) && !hidden,
+          hidden,
+          locked: message.asset.locked ?? false,
+          opacity: message.asset.opacity ?? 1,
+          blur: message.asset.blur ?? 0,
+          flipX: message.asset.flipX ?? false,
+          flipY: message.asset.flipY ?? false,
+          loop: message.asset.loop ?? true,
+          muted: message.asset.muted ?? false,
+          volume: message.asset.volume ?? 1,
+          paused: message.asset.paused ?? false,
           s3Key: message.asset.s3Key,
           text: message.asset.text,
           uploadedAt: now,
@@ -119,12 +146,55 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
         break;
       }
 
+      case "asset:update": {
+        const result = await updateAsset(message.roomId, message.assetId, message.patch, message.seq, viewport);
+        if (result === undefined) {
+          await sendTo(apiGw, connectionId, { type: "error", message: "Unknown assetId" });
+          break;
+        }
+        if (result === "stale") break;
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "asset:updated",
+          assetId: message.assetId,
+          patch: message.patch,
+          visible: result.visible,
+          seq: message.seq,
+        });
+        break;
+      }
+
       case "asset:delete": {
         await deleteAsset(message.roomId, message.assetId);
         await broadcastToRoom(apiGw, message.roomId, {
           type: "asset:deleted",
           assetId: message.assetId,
         });
+        break;
+      }
+
+      case "room:setGlobalVolume": {
+        const result = await setGlobalVolume(message.roomId, message.globalVolume, message.seq);
+        // "stale" = a newer update already won (see Room.globalVolumeSeq) --
+        // silently drop rather than broadcast a value that's already been
+        // superseded locally on the sender's own slider.
+        if (result === "stale") break;
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "room:globalVolumeChanged",
+          globalVolume: message.globalVolume,
+          seq: message.seq,
+        });
+        break;
+      }
+
+      case "variable:set": {
+        const variable: Variable = await setVariable(message.roomId, message.key, message.type, message.value);
+        await broadcastToRoom(apiGw, message.roomId, { type: "variable:updated", variable });
+        break;
+      }
+
+      case "variable:delete": {
+        await deleteVariable(message.roomId, message.key);
+        await broadcastToRoom(apiGw, message.roomId, { type: "variable:deleted", key: message.key });
         break;
       }
     }

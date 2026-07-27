@@ -13,6 +13,11 @@
         font-family: system-ui, sans-serif;
         overflow: hidden;
       }
+      #app-view {
+        display: none;
+        flex-direction: column;
+        height: 100%;
+      }
       #toolbar {
         display: flex;
         align-items: center;
@@ -26,10 +31,264 @@
         font-size: 13px;
         color: #9aa;
       }
+      #main-area {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+      /* Top/bottom split: two independently-scrolling halves, each taking
+         half the sidebar's height regardless of how much content is in the
+         other -- matches the reference tool's layout, where the top half
+         (sound/objects/connected-users/variables) and the bottom half
+         (the selected asset's controls) scroll separately rather than one
+         long shared column. */
+      #sidebar {
+        width: 280px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: #24252b;
+        border-right: 1px solid #333;
+      }
+      #sidebar-top, #sidebar-bottom {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+      }
+      #sidebar-top {
+        border-bottom: 1px solid #333;
+      }
+      #sound-panel, #objects-panel, #connected-users-panel, #variables-panel, #properties-panel {
+        flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
+        background: #2b2c34;
+        margin: 8px 8px 0;
+        border-radius: 6px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #variables-panel, #properties-panel {
+        margin-bottom: 8px;
+      }
+      /* Objects is the one card that still benefits from an internal cap +
+         scroll (a room can easily have far more assets than fit on screen)
+         -- a fixed budget here keeps it from pushing every other card in
+         the top half out of view. */
+      #objects-panel {
+        max-height: 260px;
+      }
+      .panel-collapsed > *:not(.sidebar-header) {
+        display: none !important;
+      }
+      .sidebar-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 13px;
+        font-weight: 600;
+        color: #ccc;
+        padding: 2px 2px 8px;
+        flex-shrink: 0;
+      }
+      .objects-list {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .object-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 6px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .object-row:hover {
+        background: #34353e;
+      }
+      .object-row.selected {
+        background: #3a4a63;
+      }
+      .object-icon {
+        flex-shrink: 0;
+      }
+      .object-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sidebar-icon-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: none;
+        color: #ccc;
+        cursor: pointer;
+        font-size: 14px;
+        padding: 2px 4px;
+        border-radius: 3px;
+        flex-shrink: 0;
+        line-height: 0;
+      }
+      .sidebar-icon-button:hover {
+        background: #454650;
+      }
+      .sidebar-icon-button.danger:hover {
+        background: #6b2b2b;
+      }
+      .playback-button {
+        width: 28px;
+        height: 28px;
+        border: 1px solid #454650;
+        background: #34353e;
+      }
+      #properties-panel {
+        display: none;
+      }
+      .properties-buttons {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .sidebar-flip-button {
+        flex: 1;
+        background: #34353e;
+        border: 1px solid #454650;
+        color: #ccc;
+        border-radius: 4px;
+        padding: 4px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .sidebar-flip-button.active {
+        background: #4da3ff;
+        color: #12151a;
+        border-color: #4da3ff;
+      }
+      .prop-label {
+        display: block;
+        font-size: 11px;
+        color: #999;
+        margin: 6px 0 2px;
+      }
+      .prop-row-pair {
+        display: flex;
+        gap: 8px;
+      }
+      .prop-row-pair > div {
+        flex: 1;
+      }
+      .prop-slider-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin: 6px 0 2px;
+      }
+      .prop-slider-row .prop-label {
+        margin: 0;
+      }
+      #properties-panel .prop-slider-number {
+        /* flex-basis (not width) so this reliably wins the main-axis size
+           against the #properties-panel input[type="number"] rule's
+           width: 100% below -- flex-basis takes priority over width for a
+           flex item's sizing regardless of which rule has higher CSS
+           specificity or comes later in the stylesheet. */
+        flex: 0 0 64px;
+        min-width: 0;
+      }
+      #properties-panel input[type="number"],
+      #properties-panel textarea,
+      #variables-panel input,
+      #variables-panel select {
+        width: 100%;
+        box-sizing: border-box;
+        background: #1e1f24;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 13px;
+      }
+      #properties-panel input[type="range"],
+      #sound-panel input[type="range"] {
+        width: 100%;
+      }
+      .presence-row, .variable-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 2px;
+        font-size: 13px;
+      }
+      .presence-elapsed {
+        margin-left: auto;
+        color: #999;
+        font-size: 12px;
+      }
+      .variable-name {
+        flex: 1;
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .variable-name:hover {
+        text-decoration: underline;
+      }
+      .variable-stepper {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .variable-value {
+        min-width: 24px;
+        text-align: center;
+        font-size: 13px;
+      }
+      .variable-value-text {
+        color: #999;
+        max-width: 100px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .variables-help {
+        font-size: 12px;
+        color: #999;
+        line-height: 1.4;
+        margin: 8px 0;
+      }
+      .variables-help code {
+        background: #1e1f24;
+        border-radius: 3px;
+        padding: 1px 4px;
+      }
+      .variables-form {
+        margin-top: 8px;
+        border-top: 1px solid #383838;
+        padding-top: 8px;
+      }
+      .prop-checkbox {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+        color: #ccc;
+      }
       #canvas-container {
         position: relative;
-        width: 100%;
-        height: calc(100% - 45px);
+        flex: 1;
         overflow: hidden;
         background: #14151a;
         cursor: default;
@@ -116,10 +375,6 @@
         color: #888;
         font-size: 12px;
       }
-      #app-view {
-        display: none;
-        height: 100%;
-      }
     </style>
   </head>
   <body>
@@ -147,7 +402,20 @@
         <button id="logout-button">Log out</button>
         <span id="status"></span>
       </div>
-      <div id="canvas-container"></div>
+      <div id="main-area">
+        <div id="sidebar">
+          <div id="sidebar-top">
+            <div id="sound-panel"></div>
+            <div id="objects-panel"></div>
+            <div id="connected-users-panel"></div>
+            <div id="variables-panel"></div>
+          </div>
+          <div id="sidebar-bottom">
+            <div id="properties-panel"></div>
+          </div>
+        </div>
+        <div id="canvas-container"></div>
+      </div>
       <div id="context-menu">
         <div class="context-menu-header">Create</div>
         <button id="context-menu-text" type="button">Text</button>

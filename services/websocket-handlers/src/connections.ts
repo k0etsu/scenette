@@ -4,7 +4,7 @@ import {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
 } from "@aws-sdk/client-apigatewaymanagementapi";
-import { ServerMessage } from "@scenette/protocol";
+import { PresenceEntry, ServerMessage } from "@scenette/protocol";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE!;
@@ -14,6 +14,24 @@ export async function roomIdForConnection(connectionId: string): Promise<string 
     new GetCommand({ TableName: CONNECTIONS_TABLE, Key: { connectionId } })
   );
   return Item?.roomId;
+}
+
+// One row per connected control-ui session -- anonymous browser-source
+// connections have no `username` attribute at all (see connect.ts) and are
+// filtered out here rather than ever being counted/listed as a "user".
+export async function listPresence(roomId: string): Promise<PresenceEntry[]> {
+  const { Items = [] } = await ddb.send(
+    new QueryCommand({
+      TableName: CONNECTIONS_TABLE,
+      IndexName: "byRoom",
+      KeyConditionExpression: "roomId = :roomId",
+      ExpressionAttributeValues: { ":roomId": roomId },
+    })
+  );
+  return Items.filter((c) => typeof c.username === "string").map((c) => ({
+    username: c.username,
+    connectedAt: c.connectedAt,
+  }));
 }
 
 export async function sendTo(

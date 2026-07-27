@@ -1,9 +1,13 @@
-import { ServerMessage } from "@scenette/protocol";
+import { AssetAddMessage, ServerMessage } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { CanvasView } from "./canvas";
+import { Sidebar } from "./sidebar";
+import { SoundPanel } from "./sound";
+import { ConnectedUsersPanel } from "./connectedUsers";
+import { VariablesPanel } from "./variablesPanel";
 import { uploadFile } from "./upload";
 import { loadConfig } from "./config";
-import { register, login, checkSession, logout, grantRoomAccess, SessionInfo } from "./auth";
+import { register, login, checkSession, logout, grantRoomAccess, getStoredToken, SessionInfo } from "./auth";
 
 const loginView = document.getElementById("login-view");
 const appView = document.getElementById("app-view");
@@ -14,6 +18,11 @@ const registerButton = document.getElementById("register-button");
 const loginError = document.getElementById("login-error");
 
 const canvasContainer = document.getElementById("canvas-container");
+const objectsPanel = document.getElementById("objects-panel");
+const propertiesPanel = document.getElementById("properties-panel");
+const soundPanelEl = document.getElementById("sound-panel");
+const connectedUsersPanelEl = document.getElementById("connected-users-panel");
+const variablesPanelEl = document.getElementById("variables-panel");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
 const addTextButton = document.getElementById("add-text-button");
 const grantAccessButton = document.getElementById("grant-access-button");
@@ -27,8 +36,10 @@ const contextMenuMediaButton = document.getElementById("context-menu-media");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !passwordInput || !registerButton || !loginError ||
-  !canvasContainer || !uploadInput || !addTextButton || !grantAccessButton || !copyBrowserSourceButton ||
-  !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton || !contextMenuMediaButton
+  !canvasContainer || !objectsPanel || !propertiesPanel || !soundPanelEl || !connectedUsersPanelEl ||
+  !variablesPanelEl || !uploadInput || !addTextButton || !grantAccessButton ||
+  !copyBrowserSourceButton || !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton ||
+  !contextMenuMediaButton
 ) {
   throw new Error("Missing required DOM elements");
 }
@@ -42,7 +53,7 @@ async function main(): Promise<void> {
   }
 
   loginView!.style.display = "none";
-  appView!.style.display = "block";
+  appView!.style.display = "flex";
   startApp(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session);
 }
 
@@ -92,7 +103,7 @@ function startApp(
   statusEl!.textContent = `room: ${roomId} (${session.username})`;
 
   // Where the next text/media asset created via the toolbar (viewport
-  // center) vs. the right-click context menu (cursor position) should land.
+  // center) vs. the right-click context menu / sidebar "+" button should land.
   let createPosition: { x: number; y: number } | undefined;
 
   const canvas = new CanvasView(
@@ -104,18 +115,67 @@ function startApp(
       onAssetResize: (assetId, x, y, width, height, seq) => {
         connection.send({ action: "asset:resize", roomId, assetId, x, y, width, height, seq });
       },
+      onAssetPatch: (assetId, patch, seq) => {
+        connection.send({ action: "asset:update", roomId, assetId, patch, seq });
+      },
       onAssetDelete: (assetId) => {
         connection.send({ action: "asset:delete", roomId, assetId });
       },
       onContextMenu: (worldX, worldY, screenX, screenY) => {
         createPosition = { x: worldX, y: worldY };
-        contextMenu!.style.left = `${screenX}px`;
-        contextMenu!.style.top = `${screenY}px`;
-        contextMenu!.style.display = "block";
+        showContextMenu(screenX, screenY);
+      },
+      onSelectionChange: (assetId) => {
+        sidebar.setSelected(assetId);
       },
     },
     assetsDomain
   );
+
+  // canvas.patchAsset/setAssetPosition/setAssetSize all apply their change
+  // to canvas's own local state immediately (optimistic, same as a mouse
+  // drag) -- but the sidebar has its own separate copy of asset data for
+  // rendering the objects list/properties panel, which otherwise wouldn't
+  // reflect that change until the server's broadcast round-trips back.
+  // Without this, a fast second click (e.g. double-toggling hidden) reads
+  // stale sidebar data and can send the same value twice instead of
+  // actually toggling.
+  const sidebar = new Sidebar(objectsPanel!, propertiesPanel!, {
+    onSelect: (assetId) => canvas.selectAsset(assetId),
+    onToggleHidden: (assetId, hidden) => {
+      canvas.patchAsset(assetId, { hidden });
+      syncSidebarFromCanvas(assetId);
+    },
+    onToggleLocked: (assetId, locked) => {
+      canvas.patchAsset(assetId, { locked });
+      syncSidebarFromCanvas(assetId);
+    },
+    onDelete: (assetId) => connection.send({ action: "asset:delete", roomId, assetId }),
+    onDuplicate: (assetId) => duplicateAsset(assetId),
+    onPatch: (assetId, patch) => {
+      canvas.patchAsset(assetId, patch);
+      syncSidebarFromCanvas(assetId);
+    },
+    onMove: (assetId, x, y) => {
+      canvas.setAssetPosition(assetId, x, y);
+      syncSidebarFromCanvas(assetId);
+    },
+    onResize: (assetId, width, height) => {
+      canvas.setAssetSize(assetId, width, height);
+      syncSidebarFromCanvas(assetId);
+    },
+    onCreateClick: () => {
+      const rect = objectsPanel!.getBoundingClientRect();
+      createPosition = undefined; // sidebar-triggered creates default to viewport center
+      showContextMenu(rect.right + 4, rect.top);
+    },
+  });
+
+  function showContextMenu(screenX: number, screenY: number): void {
+    contextMenu!.style.left = `${screenX}px`;
+    contextMenu!.style.top = `${screenY}px`;
+    contextMenu!.style.display = "block";
+  }
 
   document.addEventListener("mousedown", (event) => {
     if (contextMenu!.style.display !== "none" && !contextMenu!.contains(event.target as Node)) {
@@ -126,9 +186,28 @@ function startApp(
     if (event.key === "Escape") contextMenu!.style.display = "none";
   });
 
+  const soundPanel = new SoundPanel(soundPanelEl!, {
+    onGlobalVolumeChange: (globalVolume, seq) => {
+      connection.send({ action: "room:setGlobalVolume", roomId, globalVolume, seq });
+    },
+    onMultipliersChanged: (globalVolume, localVolume) => {
+      canvas.setVolumeMultipliers(globalVolume, localVolume);
+    },
+  });
+
+  const connectedUsersPanel = new ConnectedUsersPanel(connectedUsersPanelEl!, {
+    onRefresh: () => connection.send({ action: "room:snapshot:request", roomId }),
+  });
+
+  const variablesPanel = new VariablesPanel(variablesPanelEl!, {
+    onSet: (key, type, value) => connection.send({ action: "variable:set", roomId, key, type, value }),
+    onDelete: (key) => connection.send({ action: "variable:delete", roomId, key }),
+  });
+
   const connection = new ResilientConnection({
     wsUrl,
     roomId,
+    token: getStoredToken() ?? undefined,
     onOpen: () => {
       connection.send({ action: "room:snapshot:request", roomId });
     },
@@ -137,12 +216,19 @@ function startApp(
         case "room:snapshot":
           canvas.setViewport({ roomId, ...message.viewport });
           canvas.setAssets(message.assets);
+          sidebar.setAssets(message.assets);
+          soundPanel.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
+          canvas.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
+          variablesPanel.setVariables(message.variables);
+          connectedUsersPanel.setPresence(message.presence);
           break;
         case "asset:added":
           canvas.upsert(message.asset);
+          sidebar.upsertAsset(message.asset);
           break;
         case "asset:moved":
           canvas.applyRemoteMove(message.assetId, message.x, message.y, message.rotation, message.visible, message.seq);
+          syncSidebarFromCanvas(message.assetId);
           break;
         case "asset:resized":
           canvas.applyRemoteResize(
@@ -154,9 +240,32 @@ function startApp(
             message.visible,
             message.seq
           );
+          syncSidebarFromCanvas(message.assetId);
+          break;
+        case "asset:updated":
+          canvas.applyRemoteUpdate(message.assetId, message.patch, message.visible, message.seq);
+          syncSidebarFromCanvas(message.assetId);
           break;
         case "asset:deleted":
           canvas.remove(message.assetId);
+          sidebar.removeAsset(message.assetId);
+          break;
+        case "room:globalVolumeChanged":
+          soundPanel.setGlobalVolume(message.globalVolume, message.seq);
+          break;
+        case "variable:updated":
+          variablesPanel.upsertVariable(message.variable);
+          canvas.upsertVariable(message.variable);
+          break;
+        case "variable:deleted":
+          variablesPanel.removeVariable(message.key);
+          canvas.removeVariable(message.key);
+          break;
+        case "presence:joined":
+          connectedUsersPanel.addPresence(message.entry);
+          break;
+        case "presence:left":
+          connectedUsersPanel.removePresence(message.username, message.connectedAt);
           break;
         case "error":
           console.error("scenette server error:", message.message);
@@ -164,6 +273,14 @@ function startApp(
       }
     },
   });
+
+  // asset:moved/resized/updated broadcasts only carry the changed fields,
+  // not the full asset -- read back whatever canvas ended up applying
+  // (already merged) rather than duplicating that merge logic here.
+  function syncSidebarFromCanvas(assetId: string): void {
+    const asset = canvas.get(assetId);
+    if (asset) sidebar.upsertAsset(asset);
+  }
 
   connection.start();
 
@@ -222,6 +339,41 @@ function startApp(
     contextMenu!.style.display = "none";
     triggerMediaUpload();
   });
+
+  function duplicateAsset(assetId: string): void {
+    const source = canvas.get(assetId);
+    if (!source) return;
+    const offset = 20;
+    const asset: AssetAddMessage["asset"] = {
+      assetId: crypto.randomUUID(),
+      type: source.type,
+      x: source.x + offset,
+      y: source.y + offset,
+      width: source.width,
+      height: source.height,
+      rotation: source.rotation,
+      zIndex: source.zIndex,
+      s3Key: source.s3Key,
+      text: source.text,
+      opacity: source.opacity,
+      blur: source.blur,
+      flipX: source.flipX,
+      flipY: source.flipY,
+      locked: false, // a duplicate of a locked asset shouldn't itself start locked and unmovable
+      hidden: source.hidden,
+      loop: source.loop,
+      muted: source.muted,
+      volume: source.volume,
+      paused: source.paused,
+    };
+    connection.send({ action: "asset:add", roomId, asset });
+    // Select the new copy, not the original -- matches standard duplicate
+    // behavior (Figma, PowerPoint, etc.) so an immediate follow-up edit or
+    // delete applies to the copy. Safe to select before the asset:added
+    // broadcast round-trips: canvas/sidebar both tolerate selecting an ID
+    // that doesn't have an entry yet and pick it up once upsert() runs.
+    canvas.selectAsset(asset.assetId);
+  }
 
   grantAccessButton!.addEventListener("click", async () => {
     const grantee = window.prompt("Grant room access to username:");

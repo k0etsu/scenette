@@ -148,9 +148,17 @@ export class ScenetteStack extends cdk.Stack {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/connect.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
       memorySize: 256,
-      environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
+      environment: {
+        CONNECTIONS_TABLE: connectionsTable.tableName,
+        SESSIONS_TABLE: sessionsTable.tableName,
+      },
     });
-    connectionsTable.grantWriteData(connectFn);
+    // Read+write: still writes its own connection row, but also needs read
+    // access for broadcastToRoom's Query (announcing presence:joined to
+    // everyone else already in the room). Read-only on sessionsTable -- it
+    // only ever resolves a token to a username, never issues/revokes one.
+    connectionsTable.grantReadWriteData(connectFn);
+    sessionsTable.grantReadData(connectFn);
 
     const disconnectFn = new lambdaNode.NodejsFunction(this, "DisconnectFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/disconnect.ts"),
@@ -158,7 +166,10 @@ export class ScenetteStack extends cdk.Stack {
       memorySize: 256,
       environment: { CONNECTIONS_TABLE: connectionsTable.tableName },
     });
-    connectionsTable.grantWriteData(disconnectFn);
+    // Read+write: now reads the departing connection's row (for its
+    // username/roomId) before deleting it, and broadcastToRoom's Query needs
+    // read access too (announcing presence:left).
+    connectionsTable.grantReadWriteData(disconnectFn);
 
     const messageFn = new lambdaNode.NodejsFunction(this, "MessageFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/message.ts"),
@@ -203,6 +214,10 @@ export class ScenetteStack extends cdk.Stack {
     });
 
     webSocketApi.grantManageConnections(messageFn);
+    // connect/disconnect now also broadcast presence:joined/presence:left
+    // (via PostToConnection), not just messageFn's asset broadcasts.
+    webSocketApi.grantManageConnections(connectFn);
+    webSocketApi.grantManageConnections(disconnectFn);
 
     // ---- Auth broker (HTTP API) ----
 
