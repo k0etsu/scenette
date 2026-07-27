@@ -87,6 +87,13 @@ async function main(): Promise<void> {
           }
           break;
         }
+        case "asset:updated": {
+          const existing = renderer.get(message.assetId);
+          if (existing && message.seq >= existing.seq) {
+            renderer.upsert({ ...existing, ...message.patch, visible: message.visible, seq: message.seq });
+          }
+          break;
+        }
         case "asset:deleted":
           renderer.remove(message.assetId);
           break;
