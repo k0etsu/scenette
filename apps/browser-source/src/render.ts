@@ -28,6 +28,10 @@ export class Renderer {
   // control-ui's own preview, there's no "local" knob here at all: this is
   // what viewers actually hear, full stop.
   private globalVolume = 1;
+  // Guards against an out-of-order broadcast (the slider fires on every
+  // drag tick, each a separate message with no ordering guarantee) undoing
+  // a later tick's already-applied value.
+  private globalVolumeSeq = 0;
   private variables: Record<string, Variable> = {};
 
   constructor(private readonly root: HTMLElement, private readonly assetsDomain: string) {
@@ -62,7 +66,9 @@ export class Renderer {
     return this.entries.get(assetId)?.asset;
   }
 
-  setGlobalVolume(globalVolume: number): void {
+  setGlobalVolume(globalVolume: number, seq: number): void {
+    if (seq < this.globalVolumeSeq) return;
+    this.globalVolumeSeq = seq;
     this.globalVolume = globalVolume;
     for (const entry of this.entries.values()) {
       if (entry.asset.type === "video" || entry.asset.type === "audio") {

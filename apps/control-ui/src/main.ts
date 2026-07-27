@@ -187,8 +187,8 @@ function startApp(
   });
 
   const soundPanel = new SoundPanel(soundPanelEl!, {
-    onGlobalVolumeChange: (globalVolume) => {
-      connection.send({ action: "room:setGlobalVolume", roomId, globalVolume });
+    onGlobalVolumeChange: (globalVolume, seq) => {
+      connection.send({ action: "room:setGlobalVolume", roomId, globalVolume, seq });
     },
     onMultipliersChanged: (globalVolume, localVolume) => {
       canvas.setVolumeMultipliers(globalVolume, localVolume);
@@ -217,7 +217,7 @@ function startApp(
           canvas.setViewport({ roomId, ...message.viewport });
           canvas.setAssets(message.assets);
           sidebar.setAssets(message.assets);
-          soundPanel.setGlobalVolume(message.globalVolume);
+          soundPanel.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
           canvas.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
           variablesPanel.setVariables(message.variables);
           connectedUsersPanel.setPresence(message.presence);
@@ -251,7 +251,7 @@ function startApp(
           sidebar.removeAsset(message.assetId);
           break;
         case "room:globalVolumeChanged":
-          soundPanel.setGlobalVolume(message.globalVolume);
+          soundPanel.setGlobalVolume(message.globalVolume, message.seq);
           break;
         case "variable:updated":
           variablesPanel.upsertVariable(message.variable);

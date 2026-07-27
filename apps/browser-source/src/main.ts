@@ -41,7 +41,7 @@ async function main(): Promise<void> {
         case "room:snapshot":
           renderer.setViewport({ roomId, ...message.viewport });
           renderer.setAssets(message.assets);
-          renderer.setGlobalVolume(message.globalVolume);
+          renderer.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
           renderer.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
           break;
         case "asset:added":
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
           renderer.remove(message.assetId);
           break;
         case "room:globalVolumeChanged":
-          renderer.setGlobalVolume(message.globalVolume);
+          renderer.setGlobalVolume(message.globalVolume, message.seq);
           break;
         case "variable:updated":
           renderer.upsertVariable(message.variable);

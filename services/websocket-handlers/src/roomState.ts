@@ -24,6 +24,11 @@ export interface Room extends Viewport {
   // browser-source) -- distinct from control-ui's own purely-local volume
   // knob, which never touches the server at all.
   globalVolume: number;
+  // Same rationale as Asset.seq -- the global-volume slider fires on every
+  // drag tick, each a separate message/Lambda invocation with no ordering
+  // guarantee, so this guards against an earlier-sent-but-later-processed
+  // tick's write clobbering a later tick's already-applied value.
+  globalVolumeSeq: number;
   variables: Record<string, Variable>;
 }
 
@@ -37,11 +42,12 @@ export async function getOrCreateRoom(roomId: string): Promise<Room> {
       width: Item.width,
       height: Item.height,
       globalVolume: Item.globalVolume ?? 1,
+      globalVolumeSeq: Item.globalVolumeSeq ?? 0,
       variables: Item.variables ?? {},
     };
   }
 
-  const room: Room = { roomId, ...DEFAULT_VIEWPORT, globalVolume: 1, variables: {} };
+  const room: Room = { roomId, ...DEFAULT_VIEWPORT, globalVolume: 1, globalVolumeSeq: 0, variables: {} };
   await ddb.send(
     new PutCommand({
       TableName: ROOMS_TABLE,
@@ -56,15 +62,22 @@ export async function getOrCreateRoom(roomId: string): Promise<Room> {
   return room;
 }
 
-export async function setGlobalVolume(roomId: string, globalVolume: number): Promise<void> {
-  await ddb.send(
-    new UpdateCommand({
-      TableName: ROOMS_TABLE,
-      Key: { roomId },
-      UpdateExpression: "SET globalVolume = :v",
-      ExpressionAttributeValues: { ":v": globalVolume },
-    })
-  );
+export async function setGlobalVolume(roomId: string, globalVolume: number, seq: number): Promise<"stale" | undefined> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: ROOMS_TABLE,
+        Key: { roomId },
+        UpdateExpression: "SET globalVolume = :v, globalVolumeSeq = :seq",
+        ConditionExpression: "attribute_not_exists(globalVolumeSeq) OR globalVolumeSeq < :seq",
+        ExpressionAttributeValues: { ":v": globalVolume, ":seq": seq },
+      })
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === "ConditionalCheckFailedException") return "stale";
+    throw err;
+  }
+  return undefined;
 }
 
 // Upsert: creates a new variable, or edits an existing one's value/type

@@ -112,6 +112,13 @@ export interface RoomSetGlobalVolumeMessage {
   action: "room:setGlobalVolume";
   roomId: string;
   globalVolume: number;
+  // Same rationale as Asset.seq: the global-volume slider fires on every
+  // drag tick, each a separate WebSocket message/Lambda invocation with no
+  // guaranteed processing order -- without a monotonic guard, an
+  // earlier-sent-but-later-processed tick's broadcast echo can overwrite a
+  // later tick's already-applied value, which looks like the slider
+  // jumping backward before "catching up" again.
+  seq: number;
 }
 
 // Upsert -- covers both creating a new variable and editing an existing
@@ -160,6 +167,7 @@ export type ServerMessage =
       assets: Asset[];
       viewport: { x: number; y: number; width: number; height: number };
       globalVolume: number;
+      globalVolumeSeq: number;
       variables: Variable[];
       presence: PresenceEntry[];
     }
@@ -185,7 +193,7 @@ export type ServerMessage =
     }
   | { type: "asset:updated"; assetId: string; patch: AssetPatch; visible: boolean; seq: number }
   | { type: "asset:deleted"; assetId: string }
-  | { type: "room:globalVolumeChanged"; globalVolume: number }
+  | { type: "room:globalVolumeChanged"; globalVolume: number; seq: number }
   | { type: "variable:updated"; variable: Variable }
   | { type: "variable:deleted"; key: string }
   | { type: "presence:joined"; entry: PresenceEntry }
@@ -318,7 +326,8 @@ export function parseClientMessage(raw: string): ClientMessage {
 
     case "room:setGlobalVolume": {
       if (typeof msg.globalVolume !== "number") throw new Error("Missing/invalid globalVolume");
-      return { action: "room:setGlobalVolume", roomId: msg.roomId, globalVolume: msg.globalVolume };
+      if (typeof msg.seq !== "number") throw new Error("Missing seq");
+      return { action: "room:setGlobalVolume", roomId: msg.roomId, globalVolume: msg.globalVolume, seq: msg.seq };
     }
 
     case "variable:set": {

@@ -6,7 +6,7 @@ export interface SoundCallbacks {
   // Global volume is room state (a master multiplier broadcast to every
   // client, control-ui AND browser-source) -- only a user-initiated drag on
   // that slider needs to actually send it over the network.
-  onGlobalVolumeChange: (globalVolume: number) => void;
+  onGlobalVolumeChange: (globalVolume: number, seq: number) => void;
   // Fires whenever either slider moves, or an external (collaborator's)
   // global-volume change arrives -- tells the caller to recompute this
   // preview's actual playing volume (asset.volume * global * local).
@@ -21,6 +21,19 @@ export interface SoundCallbacks {
 export class SoundPanel {
   private globalVolume = 1;
   private localVolume: number;
+
+  // Wall-clock-based monotonic seq, same rationale/pattern as canvas.ts's
+  // nextSeq(): the global-volume slider fires on every drag tick, each a
+  // separate WebSocket message with no guaranteed processing/delivery
+  // order, so an out-of-order echo of an earlier tick must not be allowed
+  // to overwrite a later tick's already-applied value (which is exactly
+  // what looked like the slider jumping backward before "catching up").
+  private lastSeq = 0;
+  private nextSeq(): number {
+    const now = Date.now();
+    this.lastSeq = now > this.lastSeq ? now : this.lastSeq + 1;
+    return this.lastSeq;
+  }
 
   private readonly globalSlider: HTMLInputElement;
   private readonly globalLabel: HTMLElement;
@@ -54,7 +67,11 @@ export class SoundPanel {
     this.globalSlider.addEventListener("input", () => {
       this.globalVolume = Number(this.globalSlider.value) / 100;
       this.updateLabels();
-      this.callbacks.onGlobalVolumeChange(this.globalVolume);
+      // nextSeq() also updates this.lastSeq immediately (optimistic, same
+      // as the local value) so that a delayed echo of an earlier tick --
+      // which will carry a lower seq -- gets rejected by setGlobalVolume's
+      // guard below instead of clobbering this tick's value.
+      this.callbacks.onGlobalVolumeChange(this.globalVolume, this.nextSeq());
       this.callbacks.onMultipliersChanged(this.globalVolume, this.localVolume);
     });
 
@@ -75,7 +92,12 @@ export class SoundPanel {
   // Applies a collaborator's global-volume change (or the server's echo of
   // our own) -- always safe to call mid-drag on either slider since this
   // only ever sets .value/.textContent on already-existing elements.
-  setGlobalVolume(globalVolume: number): void {
+  // Guarded by seq: an echo/broadcast older than whatever's already been
+  // applied (including this panel's own more-recent local tick) is ignored
+  // rather than visibly snapping the slider backward.
+  setGlobalVolume(globalVolume: number, seq: number): void {
+    if (seq < this.lastSeq) return;
+    this.lastSeq = seq;
     this.globalVolume = globalVolume;
     this.globalSlider.value = String(Math.round(globalVolume * 100));
     this.updateLabels();

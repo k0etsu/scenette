@@ -44,6 +44,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           assets,
           viewport: { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height },
           globalVolume: room.globalVolume,
+          globalVolumeSeq: room.globalVolumeSeq,
           variables: Object.values(room.variables),
           presence,
         });
@@ -172,10 +173,15 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
       }
 
       case "room:setGlobalVolume": {
-        await setGlobalVolume(message.roomId, message.globalVolume);
+        const result = await setGlobalVolume(message.roomId, message.globalVolume, message.seq);
+        // "stale" = a newer update already won (see Room.globalVolumeSeq) --
+        // silently drop rather than broadcast a value that's already been
+        // superseded locally on the sender's own slider.
+        if (result === "stale") break;
         await broadcastToRoom(apiGw, message.roomId, {
           type: "room:globalVolumeChanged",
           globalVolume: message.globalVolume,
+          seq: message.seq,
         });
         break;
       }
