@@ -168,13 +168,21 @@ export class CanvasView {
   // Deliberately touches only video elements' .volume, not a full
   // applyTransform() over every entry -- the sound panel's sliders fire
   // live on every drag tick, and re-running position/blur/etc for every
-  // non-video asset on each tick would be pure waste.
+  // non-video asset on each tick would be pure waste. Also deliberately
+  // uses applyVolume (not the full syncMediaState) for the same reason
+  // syncGlobalVolume does in browser-source's render.ts: routing a
+  // volume-only change through the play/pause branch meant a volume drag
+  // could re-issue .play() dozens of times a second on a video that was
+  // merely mid-buffer (media.paused momentarily true while asset.paused is
+  // false), each call interrupting the previous one's promise and racing
+  // the forced-mute/restore -- which is what made playback go unresponsive
+  // while someone was just touching the volume slider.
   setVolumeMultipliers(globalVolume: number, localVolume: number): void {
     this.globalVolume = globalVolume;
     this.localVolume = localVolume;
     for (const entry of this.entries.values()) {
       if (entry.asset.type === "video") {
-        syncMediaState(entry.content as HTMLVideoElement, entry.asset, this.effectiveVolume(entry.asset));
+        applyVolume(entry.content as HTMLVideoElement, this.effectiveVolume(entry.asset));
       }
     }
   }
@@ -708,13 +716,19 @@ export class CanvasView {
   }
 }
 
+// See setVolumeMultipliers -- volume-only updates must never touch
+// loop/play/pause/mute, only used from there.
+function applyVolume(media: HTMLVideoElement, effectiveVolume: number): void {
+  if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
+}
+
 // Only touches properties that actually differ from the asset's target
 // state -- re-assigning .loop/.volume unconditionally is harmless, but
 // calling .play()/.pause() when already in that state can cause an
 // audible/visible stutter on some browsers.
 function syncMediaState(media: HTMLVideoElement, asset: Asset, effectiveVolume: number): void {
   if (media.loop !== asset.loop) media.loop = asset.loop;
-  if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
+  applyVolume(media, effectiveVolume);
   if (asset.paused && !media.paused) {
     media.pause();
     media.muted = asset.muted;

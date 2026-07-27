@@ -66,7 +66,9 @@ export class Renderer {
     this.globalVolume = globalVolume;
     for (const entry of this.entries.values()) {
       if (entry.asset.type === "video" || entry.asset.type === "audio") {
-        syncMediaState(entry.el as HTMLMediaElement, entry.asset, this.effectiveVolume(entry.asset));
+        // Only ever touches .volume -- see applyVolume for why this must
+        // NOT go through the full syncMediaState (loop/play/pause/mute).
+        applyVolume(entry.el as HTMLMediaElement, this.effectiveVolume(entry.asset));
       }
     }
   }
@@ -239,13 +241,27 @@ function elementTypeOf(el: HTMLElement): string | undefined {
   return el.dataset.assetType;
 }
 
+// Deliberately does nothing else -- the global-volume slider fires on
+// every drag tick (like the other live sliders), which broadcasts
+// room:globalVolumeChanged to every client on every tick. Routing that
+// through the full syncMediaState below (which also re-runs the
+// play/pause branch) meant a volume drag could re-issue .play() dozens of
+// times a second on an asset that was merely mid-buffer (media.paused
+// momentarily true while asset.paused is false) -- each call interrupts
+// the previous one's promise and races the forced-mute/restore, which is
+// what made playback go unresponsive while someone was just touching the
+// volume slider. A volume-only update must never touch loop/play/pause/mute.
+function applyVolume(media: HTMLMediaElement, effectiveVolume: number): void {
+  if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
+}
+
 // Only touches properties that actually differ from the asset's target
 // state -- re-assigning .loop/.muted/.volume unconditionally is harmless,
 // but calling .play()/.pause() when already in that state can cause an
 // audible/visible stutter on some browsers.
 function syncMediaState(media: HTMLMediaElement, asset: Asset, effectiveVolume: number): void {
   if (media.loop !== asset.loop) media.loop = asset.loop;
-  if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
+  applyVolume(media, effectiveVolume);
   if (asset.paused && !media.paused) {
     media.pause();
     media.muted = asset.muted;
