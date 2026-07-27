@@ -36,22 +36,32 @@
         flex: 1;
         min-height: 0;
       }
-      /* A scrolling stack of cards (objects, properties, sound, connected
-         users, variables) -- with five panels there's no single sensible
-         way to split a fixed height evenly between them the way the old
-         50/50 objects/properties split did, so the sidebar as a whole
-         scrolls and each card just takes the height its content needs. */
+      /* Top/bottom split: two independently-scrolling halves, each taking
+         half the sidebar's height regardless of how much content is in the
+         other -- matches the reference tool's layout, where the top half
+         (sound/objects/connected-users/variables) and the bottom half
+         (the selected asset's controls) scroll separately rather than one
+         long shared column. */
       #sidebar {
         width: 280px;
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
         min-height: 0;
-        overflow-y: auto;
         background: #24252b;
         border-right: 1px solid #333;
       }
-      #objects-panel, #properties-panel, #sound-panel, #connected-users-panel, #variables-panel {
+      #sidebar-top, #sidebar-bottom {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+      }
+      #sidebar-top {
+        border-bottom: 1px solid #333;
+      }
+      #sound-panel, #objects-panel, #connected-users-panel, #variables-panel, #properties-panel {
         flex: 0 0 auto;
         display: flex;
         flex-direction: column;
@@ -61,13 +71,13 @@
         padding: 8px;
         box-sizing: border-box;
       }
-      #variables-panel {
+      #variables-panel, #properties-panel {
         margin-bottom: 8px;
       }
       /* Objects is the one card that still benefits from an internal cap +
          scroll (a room can easily have far more assets than fit on screen)
-         -- a fixed budget here keeps it from pushing every other card
-         below it out of view. */
+         -- a fixed budget here keeps it from pushing every other card in
+         the top half out of view. */
       #objects-panel {
         max-height: 260px;
       }
@@ -394,11 +404,15 @@
       </div>
       <div id="main-area">
         <div id="sidebar">
-          <div id="objects-panel"></div>
-          <div id="properties-panel"></div>
-          <div id="sound-panel"></div>
-          <div id="connected-users-panel"></div>
-          <div id="variables-panel"></div>
+          <div id="sidebar-top">
+            <div id="sound-panel"></div>
+            <div id="objects-panel"></div>
+            <div id="connected-users-panel"></div>
+            <div id="variables-panel"></div>
+          </div>
+          <div id="sidebar-bottom">
+            <div id="properties-panel"></div>
+          </div>
         </div>
         <div id="canvas-container"></div>
       </div>
