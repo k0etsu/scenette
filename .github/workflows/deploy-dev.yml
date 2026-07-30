@@ -9,33 +9,14 @@ on:
   push:
     branches-ignore: [main]
 
-permissions:
-  id-token: write
-  contents: read
-
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    environment: dev
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Configure AWS credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN_DEV }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: cdk deploy Scenette-dev
-        working-directory: infra
-        run: npx cdk deploy Scenette-dev --require-approval never
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: dev
+      stack-name: Scenette-dev
+      role-arn: ${{ vars.AWS_DEPLOY_ROLE_ARN_DEV }}
+      aws-region: ${{ vars.AWS_REGION }}
