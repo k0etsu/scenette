@@ -1,11 +1,13 @@
+# Validates PRs, including from forks, before merge -- deliberately requests
+# no permissions and touches no secrets/OIDC, since it only builds/lints/
+# synths and never deploys. Deliberately NOT triggered on `push`: pushes to
+# a branch also fire deploy-dev.yml, which builds as the first step of its
+# own single job and simply stops (skipping the deploy step) if that build
+# fails -- so a second, separate build-only workflow on every push added no
+# extra safety, just duplicate npm ci/build work on every branch push.
 name: CI
 
-# Runs on every push and PR, including from forks. Deliberately requests no
-# permissions and touches no secrets/OIDC — safe to run untrusted PR code
-# against, since it only builds/lints/synths and never deploys.
 on:
-  push:
-    branches-ignore: [main]
   pull_request:
 
 permissions:
@@ -15,11 +17,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install dependencies
         run: npm ci
