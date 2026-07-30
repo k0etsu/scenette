@@ -25,6 +25,12 @@ on:
 
 jobs:
   deploy:
+    # GitHub labels a called reusable-workflow job as "<caller job id> /
+    # <this name>" -- without this, both the caller's job id and this job's
+    # default name are literally "deploy", rendering as the unhelpful
+    # "deploy / deploy" in the Actions UI. This makes it "deploy / cdk
+    # deploy Scenette-dev" (or -prod) instead.
+    name: cdk deploy ${{ inputs.stack-name }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     # One deploy at a time per environment -- rapid successive pushes to the
