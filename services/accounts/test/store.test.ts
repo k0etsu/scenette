@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, UpdateCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   getAccount,
   createAccount,
@@ -13,6 +13,13 @@ import {
   markEmailVerified,
   putMembership,
   getMembership,
+  listMembers,
+  deleteMembership,
+  createInvite,
+  getInvite,
+  redeemInvite,
+  deleteInvite,
+  listPendingInvites,
 } from "../src/store";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -141,5 +148,69 @@ describe("memberships", () => {
   it("getMembership returns undefined when not found", async () => {
     ddbMock.on(GetCommand).resolves({ Item: undefined });
     await expect(getMembership("alice", "room1")).resolves.toBeUndefined();
+  });
+
+  it("listMembers queries the byRoom index", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { accountId: "alice", roomId: "room1", role: "owner" },
+        { accountId: "bob", roomId: "room1", role: "mod" },
+      ],
+    });
+    const members = await listMembers("room1");
+    expect(members).toHaveLength(2);
+    const call = ddbMock.commandCalls(QueryCommand)[0];
+    expect(call.args[0].input.IndexName).toBe("byRoom");
+  });
+
+  it("deleteMembership does not throw", async () => {
+    ddbMock.on(DeleteCommand).resolves({});
+    await expect(deleteMembership("bob", "room1")).resolves.toBeUndefined();
+  });
+});
+
+describe("invites", () => {
+  it("createInvite generates a token and stores the invite", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    const invite = await createInvite("room1", "alice");
+    expect(invite.roomId).toBe("room1");
+    expect(invite.createdBy).toBe("alice");
+    expect(typeof invite.inviteToken).toBe("string");
+  });
+
+  it("getInvite returns undefined for an unknown token", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    await expect(getInvite("bogus")).resolves.toBeUndefined();
+  });
+
+  it("redeemInvite returns true on first redemption", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await expect(redeemInvite("tok1", "bob")).resolves.toBe(true);
+  });
+
+  it("redeemInvite returns false (not throw) when already redeemed", async () => {
+    ddbMock.on(UpdateCommand).rejects(conditionalCheckFailed);
+    await expect(redeemInvite("tok1", "bob")).resolves.toBe(false);
+  });
+
+  it("redeemInvite rethrows any other error", async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error("network blip"));
+    await expect(redeemInvite("tok1", "bob")).rejects.toThrow("network blip");
+  });
+
+  it("deleteInvite does not throw", async () => {
+    ddbMock.on(DeleteCommand).resolves({});
+    await expect(deleteInvite("tok1")).resolves.toBeUndefined();
+  });
+
+  it("listPendingInvites queries the byRoom index with a not-yet-redeemed filter", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ inviteToken: "tok1", roomId: "room1", createdBy: "alice", createdAt: "t" }],
+    });
+    const invites = await listPendingInvites("room1");
+    expect(invites).toHaveLength(1);
+    const call = ddbMock.commandCalls(QueryCommand)[0];
+    expect(call.args[0].input.IndexName).toBe("byRoom");
+    expect(call.args[0].input.FilterExpression).toContain("redeemedBy");
   });
 });

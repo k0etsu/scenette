@@ -124,13 +124,71 @@ export async function listRooms(httpApiUrl: string): Promise<RoomMembership[]> {
   return data.rooms;
 }
 
-export async function grantRoomAccess(httpApiUrl: string, roomId: string, granteeUsername: string): Promise<void> {
+function authHeaders(): Record<string, string> {
   const token = getStoredToken();
   if (!token) throw new Error("Not logged in");
-  const res = await fetch(`${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/grant`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ username: granteeUsername }),
+  return { Authorization: `Bearer ${token}` };
+}
+
+export interface Member {
+  accountId: string;
+  roomId: string;
+  role: "owner" | "mod";
+}
+
+export async function listMembers(httpApiUrl: string, roomId: string): Promise<Member[]> {
+  const res = await fetch(`${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/members`, {
+    headers: authHeaders(),
   });
+  const data = await parseJsonOrThrow(res);
+  return data.members;
+}
+
+export async function revokeMember(httpApiUrl: string, roomId: string, username: string): Promise<void> {
+  const res = await fetch(
+    `${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(username)}`,
+    { method: "DELETE", headers: authHeaders() }
+  );
   await parseJsonOrThrow(res);
+}
+
+export interface Invite {
+  inviteToken: string;
+  createdAt: string;
+}
+
+export async function createInvite(httpApiUrl: string, roomId: string): Promise<Invite> {
+  const res = await fetch(`${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/invites`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return parseJsonOrThrow(res);
+}
+
+export async function listInvites(httpApiUrl: string, roomId: string): Promise<Invite[]> {
+  const res = await fetch(`${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/invites`, {
+    headers: authHeaders(),
+  });
+  const data = await parseJsonOrThrow(res);
+  return data.invites;
+}
+
+export async function revokeInvite(httpApiUrl: string, roomId: string, inviteToken: string): Promise<void> {
+  const res = await fetch(
+    `${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/invites/${encodeURIComponent(inviteToken)}`,
+    { method: "DELETE", headers: authHeaders() }
+  );
+  await parseJsonOrThrow(res);
+}
+
+// Called after the invitee is already logged in (registering/logging in is
+// a separate step handled by the normal login form) -- attaches their
+// account to the invite's room as a mod. Returns the roomId so the caller
+// can navigate straight there.
+export async function redeemInvite(httpApiUrl: string, inviteToken: string): Promise<{ roomId: string }> {
+  const res = await fetch(`${httpApiUrl}/auth/invites/${encodeURIComponent(inviteToken)}/redeem`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return parseJsonOrThrow(res);
 }

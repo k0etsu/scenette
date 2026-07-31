@@ -11,10 +11,17 @@ import {
   putMembership,
   listMemberships,
   getMembership,
+  listMembers,
+  deleteMembership,
   createVerification,
   getVerificationUsername,
   deleteVerification,
   markEmailVerified,
+  createInvite,
+  getInvite,
+  redeemInvite,
+  deleteInvite,
+  listPendingInvites,
 } from "./store";
 
 const MIN_USERNAME_LENGTH = 3;
@@ -190,27 +197,124 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       return json(200, { rooms: memberships });
     }
 
-    case "POST /auth/rooms/{roomId}/grant": {
-      const grantor = await requireSession(event.headers ?? {});
-      if (!grantor) return json(401, { error: "Invalid or missing session" });
+    case "GET /auth/rooms/{roomId}/members": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
-      const granteeUsername = body.username;
-      if (!roomId || typeof granteeUsername !== "string") {
-        return json(400, { error: "Missing roomId or username" });
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership || membership.role !== "owner") {
+        return json(403, { error: "Only the room owner can view members" });
       }
 
-      // Only the room's owner can grant access to others.
-      const grantorMembership = await getMembership(grantor, roomId);
-      if (!grantorMembership || grantorMembership.role !== "owner") {
-        return json(403, { error: "Only the room owner can grant access" });
+      const members = await listMembers(roomId);
+      return json(200, { members });
+    }
+
+    case "DELETE /auth/rooms/{roomId}/members/{username}": {
+      const requester = await requireSession(event.headers ?? {});
+      if (!requester) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      const targetUsername = event.pathParameters?.username;
+      if (!roomId || !targetUsername) return json(400, { error: "Missing roomId or username" });
+
+      const requesterMembership = await getMembership(requester, roomId);
+      if (!requesterMembership || requesterMembership.role !== "owner") {
+        return json(403, { error: "Only the room owner can revoke access" });
       }
 
-      const granteeAccount = await getAccount(granteeUsername);
-      if (!granteeAccount) return json(404, { error: "No such username" });
+      const targetMembership = await getMembership(targetUsername, roomId);
+      // Revoking is just deleting the membership row (see plan) -- but the
+      // owner's own row is what makes them the owner in the first place, so
+      // this route specifically refuses to ever delete a role: "owner" row,
+      // regardless of who's asking.
+      if (targetMembership?.role === "owner") {
+        return json(400, { error: "Cannot revoke the room owner's own access" });
+      }
 
-      await putMembership({ accountId: granteeUsername, roomId, role: "mod" });
+      await deleteMembership(targetUsername, roomId);
       return json(200, { ok: true });
+    }
+
+    case "POST /auth/rooms/{roomId}/invites": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership || membership.role !== "owner") {
+        return json(403, { error: "Only the room owner can create invites" });
+      }
+
+      const invite = await createInvite(roomId, username);
+      return json(201, { inviteToken: invite.inviteToken });
+    }
+
+    case "GET /auth/rooms/{roomId}/invites": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership || membership.role !== "owner") {
+        return json(403, { error: "Only the room owner can view invites" });
+      }
+
+      const invites = await listPendingInvites(roomId);
+      return json(200, { invites: invites.map((i) => ({ inviteToken: i.inviteToken, createdAt: i.createdAt })) });
+    }
+
+    case "DELETE /auth/rooms/{roomId}/invites/{inviteToken}": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      const inviteToken = event.pathParameters?.inviteToken;
+      if (!roomId || !inviteToken) return json(400, { error: "Missing roomId or inviteToken" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership || membership.role !== "owner") {
+        return json(403, { error: "Only the room owner can revoke invites" });
+      }
+
+      await deleteInvite(inviteToken);
+      return json(200, { ok: true });
+    }
+
+    // Deliberately does NOT require the caller to already know the room --
+    // the invite token itself is the authorization; any logged-in account
+    // (new or existing) that presents a valid, not-yet-redeemed token gets
+    // attached as a mod. "Creating a new account" is just the normal
+    // register+verify+login flow beforehand -- this route only ever does
+    // the room-attachment half.
+    case "POST /auth/invites/{inviteToken}/redeem": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const inviteToken = event.pathParameters?.inviteToken;
+      if (!inviteToken) return json(400, { error: "Missing inviteToken" });
+
+      const invite = await getInvite(inviteToken);
+      if (!invite) return json(404, { error: "Invalid or already-used invite link" });
+
+      const redeemed = await redeemInvite(inviteToken, username);
+      if (!redeemed) return json(409, { error: "This invite has already been used" });
+
+      // Guard against downgrading the room's own owner if they happen to
+      // redeem their own invite link (e.g. testing it, or clicking an old
+      // one by mistake) -- everyone else just gets/reaffirms "mod".
+      const existingMembership = await getMembership(username, invite.roomId);
+      if (existingMembership?.role !== "owner") {
+        await putMembership({ accountId: username, roomId: invite.roomId, role: "mod" });
+      }
+      return json(200, { roomId: invite.roomId });
     }
 
     default:

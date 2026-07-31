@@ -67,12 +67,28 @@ export class ScenetteStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy,
     });
+    // Listing/revoking a room's current mods (see AccountsFn's
+    // GET/DELETE /auth/rooms/{roomId}/members) needs "all memberships for
+    // this room" -- the base table's key schema only supports "all
+    // memberships for this account".
+    membershipsTable.addGlobalSecondaryIndex({
+      indexName: "byRoom",
+      partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
+    });
 
     const invitesTable = new dynamodb.Table(this, "InvitesTable", {
       tableName: `scenette-${envName}-invites`,
       partitionKey: { name: "inviteToken", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy,
+    });
+    // Listing a room's pending invites (see AccountsFn's
+    // GET /auth/rooms/{roomId}/invites) needs "all invites for this room" --
+    // redemption itself still goes straight to the base table by token.
+    invitesTable.addGlobalSecondaryIndex({
+      indexName: "byRoom",
+      partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
     });
 
     // Username/password accounts, gated by email verification (see
@@ -299,6 +315,7 @@ export class ScenetteStack extends cdk.Stack {
         SESSIONS_TABLE: sessionsTable.tableName,
         MEMBERSHIPS_TABLE: membershipsTable.tableName,
         EMAIL_VERIFICATIONS_TABLE: emailVerificationsTable.tableName,
+        INVITES_TABLE: invitesTable.tableName,
         VERIFICATION_FROM_ADDRESS: verificationFromAddress,
         HTTP_API_URL: httpApi.apiEndpoint,
       },
@@ -307,6 +324,7 @@ export class ScenetteStack extends cdk.Stack {
     sessionsTable.grantReadWriteData(accountsFn);
     membershipsTable.grantReadWriteData(accountsFn);
     emailVerificationsTable.grantReadWriteData(accountsFn);
+    invitesTable.grantReadWriteData(accountsFn);
     // Least-privilege: only this one verified identity, never any other
     // address/domain in the account.
     accountsFn.addToRolePolicy(
@@ -358,7 +376,27 @@ export class ScenetteStack extends cdk.Stack {
       integration: accountsIntegration,
     });
     httpApi.addRoutes({
-      path: "/auth/rooms/{roomId}/grant",
+      path: "/auth/rooms/{roomId}/members",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/rooms/{roomId}/members/{username}",
+      methods: [apigwv2.HttpMethod.DELETE],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/rooms/{roomId}/invites",
+      methods: [apigwv2.HttpMethod.POST, apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/rooms/{roomId}/invites/{inviteToken}",
+      methods: [apigwv2.HttpMethod.DELETE],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/invites/{inviteToken}/redeem",
       methods: [apigwv2.HttpMethod.POST],
       integration: accountsIntegration,
     });

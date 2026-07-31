@@ -318,6 +318,54 @@
         overflow: hidden;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
       }
+      #access-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        background: rgba(0, 0, 0, 0.5);
+        align-items: center;
+        justify-content: center;
+      }
+      .access-modal-content {
+        width: 360px;
+        max-height: 80vh;
+        overflow-y: auto;
+        background: #26272e;
+        border: 1px solid #444;
+        border-radius: 8px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+        padding: 12px;
+        box-sizing: border-box;
+      }
+      .access-section {
+        background: #2b2c34;
+        border-radius: 6px;
+        padding: 8px;
+        margin-top: 8px;
+      }
+      .access-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 2px;
+        font-size: 13px;
+      }
+      .access-row-label {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .access-row-sub {
+        color: #999;
+        font-size: 11px;
+      }
+      .access-empty {
+        color: #888;
+        font-size: 12px;
+        padding: 4px 2px;
+      }
       #context-menu .context-menu-header {
         padding: 8px 12px;
         font-size: 12px;
@@ -408,7 +456,7 @@
           Upload
           <input id="upload-input" type="file" accept="image/*,video/*,audio/*" style="display: none" />
         </label>
-        <button id="grant-access-button">Grant room access</button>
+        <button id="manage-access-button">Manage access</button>
         <button id="copy-browser-source-button">Copy browser source URL</button>
         <button id="logout-button">Log out</button>
         <span id="status"></span>
@@ -432,6 +480,7 @@
         <button id="context-menu-text" type="button">Text</button>
         <button id="context-menu-media" type="button">Media</button>
       </div>
+      <div id="access-modal"></div>
     </div>
     <script src="./main.js"></script>
   </body>
