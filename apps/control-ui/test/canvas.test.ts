@@ -56,6 +56,25 @@ function setup(callbackOverrides: Partial<CanvasCallbacks> = {}) {
   return { container, callbacks, canvas };
 }
 
+// jsdom never lays elements out, so clientWidth/clientHeight are always 0
+// unless stubbed -- this simulates the container actually having on-screen
+// size, the way it would in a real browser.
+function stubClientSize(el: HTMLElement, width: number, height: number): void {
+  Object.defineProperty(el, "clientWidth", { value: width, configurable: true });
+  Object.defineProperty(el, "clientHeight", { value: height, configurable: true });
+}
+
+function worldTransform(container: HTMLElement): string {
+  return (container.querySelector('[data-role="world"]') as HTMLElement).style.transform;
+}
+
+// The initial center-on-load is deferred to the next animation frame (see
+// canvas.ts) so the forced clientWidth read doesn't block the page's first
+// paint -- tests need to let that frame run before asserting the result.
+function flushFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
 beforeEach(() => {
   document.body.innerHTML = "";
 });
@@ -310,5 +329,70 @@ describe("variable interpolation in text assets", () => {
     canvas.removeVariable("kills");
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
     expect(div.textContent).toBe("Kills: {kills}");
+  });
+});
+
+describe("setViewport auto-centering", () => {
+  it("centers the viewport rect on first load, leaving ~15% margin on each side", async () => {
+    const { canvas, container } = setup();
+    stubClientSize(container, 2000, 1200);
+
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
+    await flushFrame();
+
+    // Width-constrained: 2000 * 0.7 / 1400 = 1 (vs. height's 1200/1000 =
+    // 1.2), so zoom follows the width margin.
+    expect(worldTransform(container)).toBe("translate(300px, 100px) scale(1)");
+  });
+
+  it("fits within the container's height when the viewport is tall relative to width", async () => {
+    const { canvas, container } = setup();
+    stubClientSize(container, 3000, 500);
+
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
+    await flushFrame();
+
+    // Height-constrained here: 500/1000 = 0.5 vs width's 3000*0.7/1400 =
+    // 1.5 -- zoom must follow the smaller (height) value so the rect never
+    // overflows the container vertically.
+    expect(worldTransform(container)).toBe("translate(1150px, 0px) scale(0.5)");
+  });
+
+  it("does not re-center on a later setViewport call within the same instance (e.g. a manual resync)", async () => {
+    const { canvas, container } = setup();
+    stubClientSize(container, 2000, 1200);
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
+    await flushFrame();
+    const afterFirstLoad = worldTransform(container);
+
+    // Simulate the container being resized and a second snapshot arriving
+    // (e.g. the connected-users panel's refresh button) -- the user's
+    // pan/zoom should be left exactly as it was.
+    stubClientSize(container, 500, 300);
+    canvas.setViewport({ roomId: "room1", x: 100, y: 100, width: 800, height: 600 });
+    await flushFrame();
+
+    expect(worldTransform(container)).toBe(afterFirstLoad);
+  });
+
+  it("leaves the default pan/zoom when the container has no laid-out size yet", async () => {
+    const { canvas, container } = setup();
+    // No stubClientSize call -- jsdom reports 0x0, same as an element that
+    // hasn't been laid out (e.g. behind display:none) at the moment this fires.
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1920, height: 1080 });
+    await flushFrame();
+    expect(worldTransform(container)).toBe("translate(0px, 0px) scale(1)");
+  });
+
+  it("defers the geometry read to the next frame instead of forcing a synchronous layout", () => {
+    const { canvas, container } = setup();
+    stubClientSize(container, 2000, 1200);
+
+    // Regression: this used to run synchronously inside setViewport, right
+    // as the app view was switching from display:none to visible -- a
+    // forced reflow that blocked the initial paint. Immediately after the
+    // call returns, nothing should have been computed yet.
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
+    expect(worldTransform(container)).toBe("translate(0px, 0px) scale(1)");
   });
 });
