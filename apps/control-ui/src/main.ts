@@ -7,12 +7,13 @@ import { ConnectedUsersPanel } from "./connectedUsers";
 import { VariablesPanel } from "./variablesPanel";
 import { uploadFile } from "./upload";
 import { loadConfig } from "./config";
+import { AccessModal } from "./accessModal";
 import {
   register,
   login,
   checkSession,
   logout,
-  grantRoomAccess,
+  redeemInvite,
   getStoredToken,
   resendVerification,
   UnverifiedEmailError,
@@ -38,7 +39,8 @@ const connectedUsersPanelEl = document.getElementById("connected-users-panel");
 const variablesPanelEl = document.getElementById("variables-panel");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
 const addTextButton = document.getElementById("add-text-button");
-const grantAccessButton = document.getElementById("grant-access-button");
+const manageAccessButton = document.getElementById("manage-access-button");
+const accessModalEl = document.getElementById("access-modal");
 const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
 const logoutButton = document.getElementById("logout-button");
 const statusEl = document.getElementById("status");
@@ -51,7 +53,7 @@ if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !registerButton ||
   !loginError || !loginMessage || !resendVerificationButton ||
   !canvasContainer || !objectsPanel || !propertiesPanel || !soundPanelEl || !connectedUsersPanelEl ||
-  !variablesPanelEl || !uploadInput || !addTextButton || !grantAccessButton ||
+  !variablesPanelEl || !uploadInput || !addTextButton || !manageAccessButton || !accessModalEl ||
   !copyBrowserSourceButton || !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton ||
   !contextMenuMediaButton
 ) {
@@ -64,6 +66,26 @@ async function main(): Promise<void> {
   let session = await checkSession(httpApiUrl);
   if (!session) {
     session = await promptLogin(httpApiUrl);
+  }
+
+  // A visit via a shared invite link (?invite=TOKEN) -- redeem it now that
+  // we're definitely logged in (creating an account, if this was a new
+  // user, already happened via the normal register+verify+login flow
+  // above) and land in that room instead of the account's own personal
+  // room. Rewrites the URL to the resolved roomId either way, so
+  // startApp()'s own `params.get("roomId")` read below picks it up without
+  // needing its own invite-awareness.
+  const params = new URLSearchParams(window.location.search);
+  const inviteToken = params.get("invite");
+  if (inviteToken) {
+    try {
+      const { roomId } = await redeemInvite(httpApiUrl, inviteToken);
+      params.set("roomId", roomId);
+    } catch (err) {
+      statusEl!.textContent = `Invite redemption failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    params.delete("invite");
+    window.history.replaceState(null, "", `${window.location.pathname}${params.toString() ? "?" + params.toString() : ""}`);
   }
 
   loginView!.style.display = "none";
@@ -412,15 +434,11 @@ function startApp(
     canvas.selectAsset(asset.assetId);
   }
 
-  grantAccessButton!.addEventListener("click", async () => {
-    const grantee = window.prompt("Grant room access to username:");
-    if (!grantee) return;
-    try {
-      await grantRoomAccess(httpApiUrl, roomId, grantee);
-      statusEl!.textContent = `granted access to ${grantee}`;
-    } catch (err) {
-      statusEl!.textContent = `grant failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
+  const accessModal = new AccessModal(accessModalEl!);
+  manageAccessButton!.addEventListener("click", () => {
+    accessModal.open(httpApiUrl, roomId).catch((err) => {
+      statusEl!.textContent = `Failed to load room access: ${err instanceof Error ? err.message : String(err)}`;
+    });
   });
 
   copyBrowserSourceButton!.addEventListener("click", async () => {
