@@ -29,6 +29,12 @@ export class ResilientConnection {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private retryAttempt = 0;
   private closedByUs = false;
+  // Set once and reused across every reconnect (proactive swap or
+  // drop-and-retry alike) -- without this, each new underlying WebSocket
+  // connection would stamp its own fresh connectedAt server-side, making the
+  // connected-users presence list reset to "just now" on every silent
+  // reconnect instead of reflecting how long the user has actually been here.
+  private readonly sessionStartedAt = new Date().toISOString();
 
   constructor(private readonly options: ConnectionOptions) {}
 
@@ -41,7 +47,7 @@ export class ResilientConnection {
   }
 
   private open(): void {
-    let url = `${this.options.wsUrl}?roomId=${encodeURIComponent(this.options.roomId)}`;
+    let url = `${this.options.wsUrl}?roomId=${encodeURIComponent(this.options.roomId)}&connectedAt=${encodeURIComponent(this.sessionStartedAt)}`;
     if (this.options.token) url += `&token=${encodeURIComponent(this.options.token)}`;
     const next = new WebSocket(url);
 

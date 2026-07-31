@@ -88,8 +88,8 @@ function formatElapsed(ms: number): string {
   const minutes = Math.floor(ms / 60_000);
   if (minutes < 1) return "just now";
   if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  // No days tier -- long-running streams (many hours) just keep counting up
+  // in hours rather than switching units partway through the session.
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"}`;
-  const days = Math.floor(hours / 24);
-  return `${days} day${days === 1 ? "" : "s"}`;
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
 }

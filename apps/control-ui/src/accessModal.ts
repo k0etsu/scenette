@@ -10,8 +10,18 @@ import { ICON_TRASH, ICON_PLUS } from "./icons";
 export class AccessModal {
   private httpApiUrl = "";
   private roomId = "";
+  // Local copies, mutated directly on create/revoke rather than always
+  // re-querying the server afterward -- listMembers/listPendingInvites both
+  // read through a DynamoDB GSI, which is only eventually consistent with
+  // a just-written item. Re-fetching immediately after a create/revoke
+  // occasionally raced that propagation lag and looked like the modal
+  // "not updating" for a moment. The server round-trip already tells us
+  // exactly what changed, so there's nothing to re-derive by re-querying.
+  private members: Member[] = [];
+  private invites: Invite[] = [];
   private readonly membersList: HTMLElement;
   private readonly invitesList: HTMLElement;
+  private readonly statusEl: HTMLElement;
 
   constructor(private readonly root: HTMLElement) {
     root.innerHTML = `
@@ -20,6 +30,7 @@ export class AccessModal {
           <span>Room access</span>
           <button type="button" data-role="close" class="sidebar-icon-button">✕</button>
         </div>
+        <div data-role="status" class="access-status"></div>
         <div class="access-section">
           <div class="sidebar-header"><span>Members</span></div>
           <div data-role="members-list"></div>
@@ -36,6 +47,7 @@ export class AccessModal {
 
     this.membersList = root.querySelector('[data-role="members-list"]')!;
     this.invitesList = root.querySelector('[data-role="invites-list"]')!;
+    this.statusEl = root.querySelector('[data-role="status"]')!;
 
     root.querySelector('[data-role="close"]')!.addEventListener("click", () => this.close());
     // Clicking the dimmed backdrop (not the content box itself) closes too.
@@ -48,30 +60,33 @@ export class AccessModal {
   async open(httpApiUrl: string, roomId: string): Promise<void> {
     this.httpApiUrl = httpApiUrl;
     this.roomId = roomId;
+    this.statusEl.textContent = "";
     this.root.style.display = "flex";
-    await this.refresh();
+    try {
+      const [members, invites] = await Promise.all([
+        listMembers(httpApiUrl, roomId),
+        listInvites(httpApiUrl, roomId),
+      ]);
+      this.members = members;
+      this.invites = invites;
+      this.renderMembers();
+      this.renderInvites();
+    } catch (err) {
+      this.statusEl.textContent = `Failed to load room access: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   close(): void {
     this.root.style.display = "none";
   }
 
-  private async refresh(): Promise<void> {
-    const [members, invites] = await Promise.all([
-      listMembers(this.httpApiUrl, this.roomId).catch(() => []),
-      listInvites(this.httpApiUrl, this.roomId).catch(() => []),
-    ]);
-    this.renderMembers(members);
-    this.renderInvites(invites);
-  }
-
-  private renderMembers(members: Member[]): void {
+  private renderMembers(): void {
     this.membersList.innerHTML = "";
-    if (members.length === 0) {
+    if (this.members.length === 0) {
       this.membersList.innerHTML = '<div class="access-empty">No members yet.</div>';
       return;
     }
-    for (const member of members) {
+    for (const member of this.members) {
       const row = document.createElement("div");
       row.className = "access-row";
 
@@ -89,10 +104,7 @@ export class AccessModal {
         revokeButton.className = "sidebar-icon-button danger";
         revokeButton.innerHTML = ICON_TRASH;
         revokeButton.title = "Revoke access";
-        revokeButton.addEventListener("click", async () => {
-          await revokeMember(this.httpApiUrl, this.roomId, member.accountId).catch(() => {});
-          await this.refresh();
-        });
+        revokeButton.addEventListener("click", () => this.handleRevokeMember(member.accountId));
         row.appendChild(revokeButton);
       }
 
@@ -100,13 +112,13 @@ export class AccessModal {
     }
   }
 
-  private renderInvites(invites: Invite[]): void {
+  private renderInvites(): void {
     this.invitesList.innerHTML = "";
-    if (invites.length === 0) {
+    if (this.invites.length === 0) {
       this.invitesList.innerHTML = '<div class="access-empty">No pending invite links.</div>';
       return;
     }
-    for (const invite of invites) {
+    for (const invite of this.invites) {
       const row = document.createElement("div");
       row.className = "access-row";
 
@@ -128,10 +140,7 @@ export class AccessModal {
       revokeButton.className = "sidebar-icon-button danger";
       revokeButton.innerHTML = ICON_TRASH;
       revokeButton.title = "Revoke this invite";
-      revokeButton.addEventListener("click", async () => {
-        await revokeInvite(this.httpApiUrl, this.roomId, invite.inviteToken).catch(() => {});
-        await this.refresh();
-      });
+      revokeButton.addEventListener("click", () => this.handleRevokeInvite(invite.inviteToken));
       row.appendChild(revokeButton);
 
       this.invitesList.appendChild(row);
@@ -139,10 +148,37 @@ export class AccessModal {
   }
 
   private async handleCreateInvite(): Promise<void> {
-    const invite = await createInvite(this.httpApiUrl, this.roomId).catch(() => undefined);
-    if (!invite) return;
-    await this.refresh();
-    await this.copyInviteLink(invite.inviteToken);
+    this.statusEl.textContent = "";
+    try {
+      const invite = await createInvite(this.httpApiUrl, this.roomId);
+      this.invites = [...this.invites, invite];
+      this.renderInvites();
+      await this.copyInviteLink(invite.inviteToken);
+    } catch (err) {
+      this.statusEl.textContent = `Failed to create invite: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  private async handleRevokeInvite(inviteToken: string): Promise<void> {
+    this.statusEl.textContent = "";
+    try {
+      await revokeInvite(this.httpApiUrl, this.roomId, inviteToken);
+      this.invites = this.invites.filter((i) => i.inviteToken !== inviteToken);
+      this.renderInvites();
+    } catch (err) {
+      this.statusEl.textContent = `Failed to revoke invite: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  private async handleRevokeMember(accountId: string): Promise<void> {
+    this.statusEl.textContent = "";
+    try {
+      await revokeMember(this.httpApiUrl, this.roomId, accountId);
+      this.members = this.members.filter((m) => m.accountId !== accountId);
+      this.renderMembers();
+    } catch (err) {
+      this.statusEl.textContent = `Failed to revoke access: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   private inviteUrl(inviteToken: string): string {
@@ -153,6 +189,7 @@ export class AccessModal {
     const url = this.inviteUrl(inviteToken);
     try {
       await navigator.clipboard.writeText(url);
+      this.statusEl.textContent = "Invite link copied to clipboard.";
     } catch {
       // Clipboard API can be denied (insecure context, permissions) --
       // fall back to a visible prompt so the link is still usable.
