@@ -26,6 +26,9 @@ const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.001;
 const MIN_ASSET_SIZE = 20;
+// Leaves ~20% of the container's width free on each side, so the viewport
+// rect reads as centered rather than edge-to-edge.
+const VIEWPORT_WIDTH_FRACTION = 0.6;
 
 // Caps how often a dragged/resized asset's transform is actually sent over
 // the network — local rendering stays instant every mousemove regardless
@@ -66,6 +69,14 @@ export class CanvasView {
 
   private pan = { x: 0, y: 0 };
   private zoom = 1;
+  // Zoom/pan is local-only view state (never synced -- see the class
+  // comment), so there's no server value to restore on load. Instead, the
+  // very first setViewport() of this CanvasView's lifetime (room entry, or
+  // a full page refresh -- which constructs a brand-new CanvasView) centers
+  // the view on the room's viewport rect. Later setViewport calls within
+  // the same instance (e.g. the connected-users panel's manual resync
+  // button) leave the user's own pan/zoom alone.
+  private hasCenteredViewport = false;
 
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
@@ -117,6 +128,7 @@ export class CanvasView {
     private readonly assetsDomain: string
   ) {
     this.world = document.createElement("div");
+    this.world.dataset.role = "world";
     this.world.style.position = "absolute";
     this.world.style.transformOrigin = "0 0";
     this.container.appendChild(this.world);
@@ -159,6 +171,34 @@ export class CanvasView {
     this.viewportRect.style.top = `${viewport.y}px`;
     this.viewportRect.style.width = `${viewport.width}px`;
     this.viewportRect.style.height = `${viewport.height}px`;
+
+    if (!this.hasCenteredViewport) {
+      this.hasCenteredViewport = true;
+      this.centerOnViewport();
+    }
+  }
+
+  // Picks a zoom that fits the viewport rect within the container -- at
+  // most VIEWPORT_WIDTH_FRACTION of the container's width (the ~20% side
+  // margins), and never taller than the container itself -- then pans so
+  // the rect sits centered both horizontally and vertically.
+  private centerOnViewport(): void {
+    const containerWidth = this.container.clientWidth;
+    const containerHeight = this.container.clientHeight;
+    // Not laid out yet (e.g. hidden by a display:none ancestor) -- nothing
+    // sane to compute against, so leave the default pan/zoom in place.
+    if (containerWidth <= 0 || containerHeight <= 0) return;
+
+    const zoomByWidth = (containerWidth * VIEWPORT_WIDTH_FRACTION) / this.viewport.width;
+    const zoomByHeight = containerHeight / this.viewport.height;
+    this.zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min(zoomByWidth, zoomByHeight)));
+
+    const viewportCenterX = this.viewport.x + this.viewport.width / 2;
+    const viewportCenterY = this.viewport.y + this.viewport.height / 2;
+    this.pan.x = containerWidth / 2 - viewportCenterX * this.zoom;
+    this.pan.y = containerHeight / 2 - viewportCenterY * this.zoom;
+
+    this.applyWorldTransform();
   }
 
   getViewport(): Viewport {
