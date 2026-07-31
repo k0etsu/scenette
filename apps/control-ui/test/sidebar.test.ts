@@ -166,6 +166,29 @@ describe("mid-drag rebuild guard (`interacting`)", () => {
   });
 });
 
+describe("dispose", () => {
+  it("stops clearing `interacting` on window mouseup after dispose (no leaked listener on a room switch)", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ rotation: 0 })]);
+    sidebar.setSelected("a1");
+
+    const rangeBefore = propertiesPanel.querySelector('[data-role="rotation"]') as HTMLElement;
+    rangeBefore.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    sidebar.dispose();
+
+    // Regression: previously this window listener was bound with an inline
+    // closure sidebar.dispose() had no reference to, so it kept firing
+    // after a second Sidebar was constructed on the same containers.
+    window.dispatchEvent(new MouseEvent("mouseup"));
+    sidebar.upsertAsset(makeAsset({ rotation: 45 }));
+
+    // Still mid-drag as far as this (disposed) instance is concerned -- the
+    // panel should not have rebuilt.
+    const rangeAfter = propertiesPanel.querySelector('[data-role="rotation"]') as HTMLElement;
+    expect(rangeAfter).toBe(rangeBefore);
+  });
+});
+
 describe("bindSlider", () => {
   it("live-updates the paired number input and sends a patch on every drag tick", () => {
     const onPatch = vi.fn();

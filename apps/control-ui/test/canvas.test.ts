@@ -79,6 +79,51 @@ beforeEach(() => {
   document.body.innerHTML = "";
 });
 
+describe("dispose", () => {
+  it("stops responding to window mouseup after dispose (no leaked listener on a room switch)", () => {
+    const { canvas, callbacks, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "a1", x: 0, y: 0 }));
+    canvas.selectAsset("a1");
+
+    // Start a drag via a container mousedown, then dispose mid-gesture --
+    // simulates switching rooms while a drag was in flight.
+    container.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 0, clientY: 0 }));
+    canvas.dispose();
+    vi.mocked(callbacks.onAssetMove).mockClear();
+
+    // Regression: previously this window listener was bound with an
+    // inline closure canvas.dispose() had no reference to, so it kept
+    // firing (and, worse, accumulated a second copy) after a second
+    // CanvasView was constructed on the same container.
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: 50, clientY: 50 }));
+    window.dispatchEvent(new MouseEvent("mouseup"));
+    expect(callbacks.onAssetMove).not.toHaveBeenCalled();
+  });
+
+  it("clears the container so a second CanvasView on it starts clean", () => {
+    const { canvas, container } = setup();
+    expect(container.querySelectorAll('[data-role="world"]')).toHaveLength(1);
+    canvas.dispose();
+    expect(container.children).toHaveLength(0);
+  });
+
+  it("a second CanvasView constructed after dispose doesn't double-fire on window events", () => {
+    const { canvas: first, callbacks: firstCallbacks, container } = setup();
+    first.dispose();
+
+    const secondCallbacks = makeCallbacks();
+    new CanvasView(container, secondCallbacks, "assets.example.com");
+
+    container.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 0, clientY: 0, button: 1 }));
+    window.dispatchEvent(new MouseEvent("mousemove", { clientX: 10, clientY: 10 }));
+
+    // Only the second (still-live) instance's callbacks should ever have a
+    // chance to fire -- the first was disposed, so its onContextMenu et al.
+    // must never be invoked again regardless of what happens on `window`.
+    expect(firstCallbacks.onContextMenu).not.toHaveBeenCalled();
+  });
+});
+
 describe("nextSeq", () => {
   it("is strictly increasing across calls", () => {
     const { canvas } = setup();

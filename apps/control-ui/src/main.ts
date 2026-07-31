@@ -64,6 +64,41 @@ if (
   throw new Error("Missing required DOM elements");
 }
 
+// Everything that lives for exactly one room at a time -- torn down and
+// rebuilt on every room switch (Dashboard button, picking a different room,
+// browser back/forward). Kept in one mutable holder rather than scattered
+// module-level `let`s so teardownCurrentRoom() has one thing to null out
+// and the toolbar/context-menu handlers below (bound once, not per room)
+// have one thing to read the *current* room's state from.
+interface RoomSession {
+  roomId: string;
+  connection: ResilientConnection;
+  canvas: CanvasView;
+  sidebar: Sidebar;
+  connectedUsersPanel: ConnectedUsersPanel;
+  // Where the next text/media asset (toolbar button or context-menu "Text"/
+  // "Media") should land -- world coords from a right-click, or undefined
+  // to default to the viewport center.
+  createPosition?: { x: number; y: number };
+}
+
+let current: RoomSession | undefined;
+
+function showContextMenu(screenX: number, screenY: number): void {
+  contextMenu!.style.left = `${screenX}px`;
+  contextMenu!.style.top = `${screenY}px`;
+  contextMenu!.style.display = "block";
+}
+
+document.addEventListener("mousedown", (event) => {
+  if (contextMenu!.style.display !== "none" && !contextMenu!.contains(event.target as Node)) {
+    contextMenu!.style.display = "none";
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") contextMenu!.style.display = "none";
+});
+
 async function main(): Promise<void> {
   const { wsUrl, httpApiUrl, assetsDomain, browserSourceUrl } = await loadConfig();
 
@@ -76,9 +111,7 @@ async function main(): Promise<void> {
   // we're definitely logged in (creating an account, if this was a new
   // user, already happened via the normal register+verify+login flow
   // above) and land in that room instead of the account's own personal
-  // room. Rewrites the URL to the resolved roomId either way, so
-  // startApp()'s own `params.get("roomId")` read below picks it up without
-  // needing its own invite-awareness.
+  // room.
   const params = new URLSearchParams(window.location.search);
   const inviteToken = params.get("invite");
   if (inviteToken) {
@@ -94,29 +127,199 @@ async function main(): Promise<void> {
 
   loginView!.style.display = "none";
 
-  // Set by the in-room "Dashboard" button (a full page reload -- see its
-  // click handler in startApp()) to force the picker to show regardless of
-  // room count, since that's an explicit request to see it. A bare login
-  // only shows it automatically when there's an actual choice to make.
-  const forceDashboard = params.get("dashboard") === "1";
-  params.delete("dashboard");
+  function setUrl(roomId: string | undefined, push: boolean): void {
+    const next = new URLSearchParams();
+    if (roomId) next.set("roomId", roomId);
+    const url = `${window.location.pathname}${next.toString() ? "?" + next.toString() : ""}`;
+    if (push) window.history.pushState(null, "", url);
+    else window.history.replaceState(null, "", url);
+  }
 
-  // No explicit room requested (a bare visit, not a bookmarked/shared link
-  // and not an invite redemption just above) -- previously this always
-  // defaulted straight into the account's own room, which left no way to
-  // reach a room this account only has mod access to except via a link.
-  if (!params.get("roomId")) {
+  function teardownCurrentRoom(): void {
+    if (!current) return;
+    current.connection.stop();
+    current.canvas.dispose();
+    current.sidebar.dispose();
+    current.connectedUsersPanel.dispose();
+    current = undefined;
+  }
+
+  function showRoomView(roomId: string): void {
+    teardownCurrentRoom();
+    roomPickerViewEl!.style.display = "none";
+    appView!.style.display = "flex";
+    current = enterRoom(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session!, roomId);
+  }
+
+  // Always shows the picker, regardless of room count -- the "only show it
+  // automatically when there's an actual choice" threshold only applies to
+  // the very first render below, not to an explicit Dashboard visit.
+  async function showDashboardView(): Promise<void> {
+    teardownCurrentRoom();
+    appView!.style.display = "none";
     const rooms = await listRooms(httpApiUrl);
-    if (forceDashboard || rooms.length > 1) {
-      const roomPicker = new RoomPicker(roomPickerViewEl!);
-      const roomId = await roomPicker.pickRoom(rooms, session.personalRoomId);
-      params.set("roomId", roomId);
+    const roomPicker = new RoomPicker(roomPickerViewEl!);
+    const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId);
+    // The user just made an explicit choice -- push so that a later "back"
+    // returns to the dashboard rather than leaving the app entirely.
+    setUrl(roomId, true);
+    showRoomView(roomId);
+  }
+
+  function goToRoom(roomId: string, push: boolean): void {
+    setUrl(roomId, push);
+    showRoomView(roomId);
+  }
+
+  async function goToDashboard(push: boolean): Promise<void> {
+    setUrl(undefined, push);
+    await showDashboardView();
+  }
+
+  // Browser back/forward: the URL has already changed by the time this
+  // fires, so this only ever reads it and re-renders -- it must never call
+  // pushState/replaceState itself, or it'd fight the navigation that's
+  // already in flight.
+  window.addEventListener("popstate", () => {
+    const roomId = new URLSearchParams(window.location.search).get("roomId");
+    if (roomId) {
+      showRoomView(roomId);
+    } else {
+      void showDashboardView();
+    }
+  });
+
+  // ---- Toolbar / context-menu wiring, bound exactly once for the whole
+  // page's lifetime -- these target static DOM elements that persist across
+  // every room switch. Each reads/writes the *current* room via the mutable
+  // `current` holder above rather than closing over one room's state.
+
+  function createTextAsset(): void {
+    if (!current) return;
+    const text = window.prompt("Text content:");
+    if (!text) return;
+
+    const width = 200;
+    const height = 50;
+    const viewport = current.canvas.getViewport();
+    const pos = current.createPosition ?? {
+      x: viewport.x + viewport.width / 2 - width / 2,
+      y: viewport.y + viewport.height / 2 - height / 2,
+    };
+    current.createPosition = undefined;
+
+    current.connection.send({
+      action: "asset:add",
+      roomId: current.roomId,
+      asset: { assetId: crypto.randomUUID(), type: "text", x: pos.x, y: pos.y, width, height, text },
+    });
+  }
+
+  addTextButton!.addEventListener("click", createTextAsset);
+  contextMenuTextButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    createTextAsset();
+  });
+
+  function triggerMediaUpload(): void {
+    uploadInput!.click();
+  }
+
+  async function handleUpload(file: File): Promise<void> {
+    if (!current) return;
+    const { roomId, canvas, connection } = current;
+    statusEl!.textContent = `uploading ${file.name}...`;
+    try {
+      const result = await uploadFile(httpApiUrl, roomId, file);
+      const viewport = canvas.getViewport();
+      const pos = current.createPosition ?? {
+        x: viewport.x + viewport.width / 2 - result.width / 2,
+        y: viewport.y + viewport.height / 2 - result.height / 2,
+      };
+      current.createPosition = undefined;
+
+      connection.send({
+        action: "asset:add",
+        roomId,
+        asset: {
+          assetId: result.assetId,
+          type: result.type,
+          x: pos.x,
+          y: pos.y,
+          width: result.width,
+          height: result.height,
+          s3Key: result.s3Key,
+        },
+      });
+      statusEl!.textContent = `room: ${roomId} (${session!.username})`;
+    } catch (err) {
+      statusEl!.textContent = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
-  window.history.replaceState(null, "", `${window.location.pathname}${params.toString() ? "?" + params.toString() : ""}`);
 
-  appView!.style.display = "flex";
-  startApp(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session);
+  uploadInput!.addEventListener("change", () => {
+    const file = uploadInput!.files?.[0];
+    if (file) void handleUpload(file);
+    uploadInput!.value = "";
+  });
+
+  window.addEventListener("paste", (event) => {
+    const file = Array.from(event.clipboardData?.items ?? [])
+      .find((item) => item.kind === "file")
+      ?.getAsFile();
+    if (file) void handleUpload(file);
+  });
+
+  contextMenuMediaButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    triggerMediaUpload();
+  });
+
+  const accessModal = new AccessModal(accessModalEl!);
+  manageAccessButton!.addEventListener("click", () => {
+    if (!current) return;
+    accessModal.open(httpApiUrl, current.roomId).catch((err) => {
+      statusEl!.textContent = `Failed to load room access: ${err instanceof Error ? err.message : String(err)}`;
+    });
+  });
+
+  copyBrowserSourceButton!.addEventListener("click", async () => {
+    if (!current) return;
+    const url = `${browserSourceUrl}/?roomId=${encodeURIComponent(current.roomId)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      statusEl!.textContent = "browser source URL copied to clipboard";
+    } catch (err) {
+      // Clipboard API can be denied (e.g. insecure context, permissions) --
+      // fall back to showing the URL directly so it's still usable.
+      statusEl!.textContent = `copy failed, URL: ${url}`;
+    }
+  });
+
+  dashboardButton!.addEventListener("click", () => {
+    void goToDashboard(true);
+  });
+
+  logoutButton!.addEventListener("click", async () => {
+    await logout(httpApiUrl);
+    window.location.href = window.location.pathname;
+  });
+
+  // ---- Initial render: no explicit room requested (a bare visit, not a
+  // bookmarked/shared link and not an invite redemption just above)
+  // defaults straight into the account's own room UNLESS it also has
+  // access to other rooms, in which case there's an actual choice to make.
+  const explicitRoomId = params.get("roomId");
+  if (explicitRoomId) {
+    goToRoom(explicitRoomId, false);
+  } else {
+    const rooms = await listRooms(httpApiUrl);
+    if (rooms.length > 1) {
+      await showDashboardView();
+    } else {
+      goToRoom(session.personalRoomId, false);
+    }
+  }
 }
 
 function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
@@ -167,55 +370,56 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
   });
 }
 
-function startApp(
+// Constructs everything scoped to a single room and wires it together.
+// Callers (showRoomView above) are responsible for tearing down whatever
+// room session preceded this one first.
+function enterRoom(
   wsUrl: string,
   httpApiUrl: string,
   assetsDomain: string,
   browserSourceUrl: string,
-  session: SessionInfo
-): void {
-  const params = new URLSearchParams(window.location.search);
-  const roomId = params.get("roomId") ?? session.personalRoomId;
-
-  if (!params.get("roomId")) {
-    // Landed here with no explicit room (the common case: a bare visit to
-    // the home page) — default to the account's own room and reflect that
-    // in the URL so it's bookmarkable/shareable going forward.
-    params.set("roomId", roomId);
-    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
-  }
-
+  session: SessionInfo,
+  roomId: string
+): RoomSession {
   statusEl!.textContent = `room: ${roomId} (${session.username})`;
 
-  // Where the next text/media asset created via the toolbar (viewport
-  // center) vs. the right-click context menu / sidebar "+" button should land.
-  let createPosition: { x: number; y: number } | undefined;
+  const room: RoomSession = {
+    roomId,
+    // Assigned just below -- declared here so the callbacks that close
+    // over `room` (canvas, sidebar) can reference the connection/canvas
+    // that will exist by the time they're actually invoked.
+    connection: undefined as unknown as ResilientConnection,
+    canvas: undefined as unknown as CanvasView,
+    sidebar: undefined as unknown as Sidebar,
+    connectedUsersPanel: undefined as unknown as ConnectedUsersPanel,
+  };
 
   const canvas = new CanvasView(
     canvasContainer!,
     {
       onAssetMove: (assetId, x, y, seq) => {
-        connection.send({ action: "asset:move", roomId, assetId, x, y, seq });
+        room.connection.send({ action: "asset:move", roomId, assetId, x, y, seq });
       },
       onAssetResize: (assetId, x, y, width, height, seq) => {
-        connection.send({ action: "asset:resize", roomId, assetId, x, y, width, height, seq });
+        room.connection.send({ action: "asset:resize", roomId, assetId, x, y, width, height, seq });
       },
       onAssetPatch: (assetId, patch, seq) => {
-        connection.send({ action: "asset:update", roomId, assetId, patch, seq });
+        room.connection.send({ action: "asset:update", roomId, assetId, patch, seq });
       },
       onAssetDelete: (assetId) => {
-        connection.send({ action: "asset:delete", roomId, assetId });
+        room.connection.send({ action: "asset:delete", roomId, assetId });
       },
       onContextMenu: (worldX, worldY, screenX, screenY) => {
-        createPosition = { x: worldX, y: worldY };
+        room.createPosition = { x: worldX, y: worldY };
         showContextMenu(screenX, screenY);
       },
       onSelectionChange: (assetId) => {
-        sidebar.setSelected(assetId);
+        room.sidebar.setSelected(assetId);
       },
     },
     assetsDomain
   );
+  room.canvas = canvas;
 
   // canvas.patchAsset/setAssetPosition/setAssetSize all apply their change
   // to canvas's own local state immediately (optimistic, same as a mouse
@@ -235,7 +439,7 @@ function startApp(
       canvas.patchAsset(assetId, { locked });
       syncSidebarFromCanvas(assetId);
     },
-    onDelete: (assetId) => connection.send({ action: "asset:delete", roomId, assetId }),
+    onDelete: (assetId) => room.connection.send({ action: "asset:delete", roomId, assetId }),
     onDuplicate: (assetId) => duplicateAsset(assetId),
     onPatch: (assetId, patch) => {
       canvas.patchAsset(assetId, patch);
@@ -251,29 +455,15 @@ function startApp(
     },
     onCreateClick: () => {
       const rect = objectsPanel!.getBoundingClientRect();
-      createPosition = undefined; // sidebar-triggered creates default to viewport center
+      room.createPosition = undefined; // sidebar-triggered creates default to viewport center
       showContextMenu(rect.right + 4, rect.top);
     },
   });
-
-  function showContextMenu(screenX: number, screenY: number): void {
-    contextMenu!.style.left = `${screenX}px`;
-    contextMenu!.style.top = `${screenY}px`;
-    contextMenu!.style.display = "block";
-  }
-
-  document.addEventListener("mousedown", (event) => {
-    if (contextMenu!.style.display !== "none" && !contextMenu!.contains(event.target as Node)) {
-      contextMenu!.style.display = "none";
-    }
-  });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") contextMenu!.style.display = "none";
-  });
+  room.sidebar = sidebar;
 
   const soundPanel = new SoundPanel(soundPanelEl!, {
     onGlobalVolumeChange: (globalVolume, seq) => {
-      connection.send({ action: "room:setGlobalVolume", roomId, globalVolume, seq });
+      room.connection.send({ action: "room:setGlobalVolume", roomId, globalVolume, seq });
     },
     onMultipliersChanged: (globalVolume, localVolume) => {
       canvas.setVolumeMultipliers(globalVolume, localVolume);
@@ -281,12 +471,13 @@ function startApp(
   });
 
   const connectedUsersPanel = new ConnectedUsersPanel(connectedUsersPanelEl!, {
-    onRefresh: () => connection.send({ action: "room:snapshot:request", roomId }),
+    onRefresh: () => room.connection.send({ action: "room:snapshot:request", roomId }),
   });
+  room.connectedUsersPanel = connectedUsersPanel;
 
   const variablesPanel = new VariablesPanel(variablesPanelEl!, {
-    onSet: (key, type, value) => connection.send({ action: "variable:set", roomId, key, type, value }),
-    onDelete: (key) => connection.send({ action: "variable:delete", roomId, key }),
+    onSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
+    onDelete: (key) => room.connection.send({ action: "variable:delete", roomId, key }),
   });
 
   const connection = new ResilientConnection({
@@ -358,6 +549,7 @@ function startApp(
       }
     },
   });
+  room.connection = connection;
 
   // asset:moved/resized/updated broadcasts only carry the changed fields,
   // not the full asset -- read back whatever canvas ended up applying
@@ -368,62 +560,6 @@ function startApp(
   }
 
   connection.start();
-
-  function createTextAsset(): void {
-    const text = window.prompt("Text content:");
-    if (!text) return;
-
-    const width = 200;
-    const height = 50;
-    const viewport = canvas.getViewport();
-    const pos = createPosition ?? {
-      x: viewport.x + viewport.width / 2 - width / 2,
-      y: viewport.y + viewport.height / 2 - height / 2,
-    };
-    createPosition = undefined;
-
-    connection.send({
-      action: "asset:add",
-      roomId,
-      asset: {
-        assetId: crypto.randomUUID(),
-        type: "text",
-        x: pos.x,
-        y: pos.y,
-        width,
-        height,
-        text,
-      },
-    });
-  }
-
-  addTextButton!.addEventListener("click", createTextAsset);
-  contextMenuTextButton!.addEventListener("click", () => {
-    contextMenu!.style.display = "none";
-    createTextAsset();
-  });
-
-  function triggerMediaUpload(): void {
-    uploadInput!.click();
-  }
-
-  uploadInput!.addEventListener("change", () => {
-    const file = uploadInput!.files?.[0];
-    if (file) handleUpload(file);
-    uploadInput!.value = "";
-  });
-
-  window.addEventListener("paste", (event) => {
-    const file = Array.from(event.clipboardData?.items ?? [])
-      .find((item) => item.kind === "file")
-      ?.getAsFile();
-    if (file) handleUpload(file);
-  });
-
-  contextMenuMediaButton!.addEventListener("click", () => {
-    contextMenu!.style.display = "none";
-    triggerMediaUpload();
-  });
 
   function duplicateAsset(assetId: string): void {
     const source = canvas.get(assetId);
@@ -451,7 +587,7 @@ function startApp(
       volume: source.volume,
       paused: source.paused,
     };
-    connection.send({ action: "asset:add", roomId, asset });
+    room.connection.send({ action: "asset:add", roomId, asset });
     // Select the new copy, not the original -- matches standard duplicate
     // behavior (Figma, PowerPoint, etc.) so an immediate follow-up edit or
     // delete applies to the copy. Safe to select before the asset:added
@@ -460,69 +596,7 @@ function startApp(
     canvas.selectAsset(asset.assetId);
   }
 
-  const accessModal = new AccessModal(accessModalEl!);
-  manageAccessButton!.addEventListener("click", () => {
-    accessModal.open(httpApiUrl, roomId).catch((err) => {
-      statusEl!.textContent = `Failed to load room access: ${err instanceof Error ? err.message : String(err)}`;
-    });
-  });
-
-  copyBrowserSourceButton!.addEventListener("click", async () => {
-    const url = `${browserSourceUrl}/?roomId=${encodeURIComponent(roomId)}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      statusEl!.textContent = "browser source URL copied to clipboard";
-    } catch (err) {
-      // Clipboard API can be denied (e.g. insecure context, permissions) --
-      // fall back to showing the URL directly so it's still usable.
-      statusEl!.textContent = `copy failed, URL: ${url}`;
-    }
-  });
-
-  dashboardButton!.addEventListener("click", () => {
-    // A full reload rather than an in-place teardown -- startApp() binds a
-    // long list of listeners straight onto static DOM elements with no
-    // corresponding cleanup, so re-running it in place would double-bind
-    // everything on a second room. Reloading with a fresh session (already
-    // in localStorage) and no roomId, plus dashboard=1 to force the picker
-    // even for a single-room account, gets back to a clean slate safely.
-    window.location.href = `${window.location.pathname}?dashboard=1`;
-  });
-
-  logoutButton!.addEventListener("click", async () => {
-    await logout(httpApiUrl);
-    window.location.href = window.location.pathname;
-  });
-
-  async function handleUpload(file: File): Promise<void> {
-    statusEl!.textContent = `uploading ${file.name}...`;
-    try {
-      const result = await uploadFile(httpApiUrl, roomId, file);
-      const viewport = canvas.getViewport();
-      const pos = createPosition ?? {
-        x: viewport.x + viewport.width / 2 - result.width / 2,
-        y: viewport.y + viewport.height / 2 - result.height / 2,
-      };
-      createPosition = undefined;
-
-      connection.send({
-        action: "asset:add",
-        roomId,
-        asset: {
-          assetId: result.assetId,
-          type: result.type,
-          x: pos.x,
-          y: pos.y,
-          width: result.width,
-          height: result.height,
-          s3Key: result.s3Key,
-        },
-      });
-      statusEl!.textContent = `room: ${roomId} (${session.username})`;
-    } catch (err) {
-      statusEl!.textContent = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
+  return room;
 }
 
 main().catch((err) => {
