@@ -237,11 +237,18 @@ export class ScenetteStack extends cdk.Stack {
         CONNECTIONS_TABLE: connectionsTable.tableName,
         ASSETS_TABLE: assetsTable.tableName,
         ROOMS_TABLE: roomsTable.tableName,
+        ASSETS_BUCKET: assetsBucket.bucketName,
       },
     });
     connectionsTable.grantReadWriteData(messageFn);
     assetsTable.grantReadWriteData(messageFn);
     roomsTable.grantReadWriteData(messageFn);
+    // Read (HeadObject, to server-verify an uploaded asset's byte size for
+    // the storage quota) + delete (asset:delete removes the S3 object once
+    // nothing else still references it) -- never write, this Lambda never
+    // uploads anything itself.
+    assetsBucket.grantRead(messageFn);
+    assetsBucket.grantDelete(messageFn);
 
     const webSocketApi = new apigwv2.WebSocketApi(this, "WebSocketApi", {
       apiName: `scenette-${envName}`,
@@ -295,20 +302,30 @@ export class ScenetteStack extends cdk.Stack {
 
     // ---- Upload URL (HTTP API) ----
 
+    // Adjustable per-room cap on total (deduplicated-by-s3Key) stored bytes
+    // -- same for dev/prod since there's no cost-driven reason to differ.
+    // See upload-url/src/index.ts for why this is enforced coarsely
+    // (already-over-quota blocks further uploads) rather than precisely.
+    const ROOM_STORAGE_QUOTA_BYTES = 500 * 1024 * 1024; // 500 MB
+
     const uploadUrlFn = new lambdaNode.NodejsFunction(this, "UploadUrlFn", {
       entry: path.join(__dirname, "../../services/upload-url/src/index.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
       environment: {
         ASSETS_BUCKET: assetsBucket.bucketName,
+        ASSETS_TABLE: assetsTable.tableName,
         SESSIONS_TABLE: sessionsTable.tableName,
         MEMBERSHIPS_TABLE: membershipsTable.tableName,
+        ROOM_STORAGE_QUOTA_BYTES: String(ROOM_STORAGE_QUOTA_BYTES),
       },
     });
     // Write-only on the bucket — this Lambda only ever needs to mint
     // presigned PUT URLs, never to read or list what's already there.
-    // Read-only on sessions/memberships -- resolves a token to a username
-    // and checks membership before issuing a URL, same as ConnectFn.
+    // Read-only on assets/sessions/memberships -- sums existing usage for
+    // the quota check and resolves+checks the caller's membership, same as
+    // ConnectFn/MessageFn.
     assetsBucket.grantPut(uploadUrlFn);
+    assetsTable.grantReadData(uploadUrlFn);
     sessionsTable.grantReadData(uploadUrlFn);
     membershipsTable.grantReadData(uploadUrlFn);
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   getOrCreateRoom,
   setGlobalVolume,
@@ -10,6 +10,8 @@ import {
   moveAsset,
   resizeAsset,
   updateAsset,
+  sumRoomStorageBytes,
+  isS3KeyReferencedElsewhere,
 } from "../src/roomState";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -272,5 +274,56 @@ describe("updateAsset", () => {
     ddbMock.on(UpdateCommand).rejects(conditionalCheckFailed);
     const result = await updateAsset("r1", "a1", { paused: true }, 20, viewport);
     expect(result).toBe("stale");
+  });
+});
+
+describe("sumRoomStorageBytes", () => {
+  it("sums fileSize across assets", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { roomId: "r1", assetId: "a1", s3Key: "k1", fileSize: 1000 },
+        { roomId: "r1", assetId: "a2", s3Key: "k2", fileSize: 2000 },
+      ],
+    });
+    await expect(sumRoomStorageBytes("r1")).resolves.toBe(3000);
+  });
+
+  it("counts a shared s3Key's bytes only once (a duplicateAsset() doesn't inflate usage)", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { roomId: "r1", assetId: "a1", s3Key: "k1", fileSize: 1000 },
+        { roomId: "r1", assetId: "a1-copy", s3Key: "k1", fileSize: 1000 },
+      ],
+    });
+    await expect(sumRoomStorageBytes("r1")).resolves.toBe(1000);
+  });
+
+  it("ignores text assets (no s3Key) and any asset missing a fileSize", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { roomId: "r1", assetId: "t1", type: "text" },
+        { roomId: "r1", assetId: "a1", s3Key: "k1" }, // predates fileSize tracking
+      ],
+    });
+    await expect(sumRoomStorageBytes("r1")).resolves.toBe(0);
+  });
+});
+
+describe("isS3KeyReferencedElsewhere", () => {
+  it("returns true when another asset in the room shares the s3Key", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { roomId: "r1", assetId: "a1", s3Key: "k1" },
+        { roomId: "r1", assetId: "a1-copy", s3Key: "k1" },
+      ],
+    });
+    await expect(isS3KeyReferencedElsewhere("r1", "k1", "a1")).resolves.toBe(true);
+  });
+
+  it("returns false when the only reference is the asset being excluded", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ roomId: "r1", assetId: "a1", s3Key: "k1" }],
+    });
+    await expect(isS3KeyReferencedElsewhere("r1", "k1", "a1")).resolves.toBe(false);
   });
 });

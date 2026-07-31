@@ -32,6 +32,8 @@ export default defineConfig({
       EMAIL_VERIFICATIONS_TABLE: "test-email-verifications",
       VERIFICATION_FROM_ADDRESS: "noreply@test.example.com",
       HTTP_API_URL: "https://api.test.example.com",
+      ASSETS_BUCKET: "test-assets-bucket",
+      ROOM_STORAGE_QUOTA_BYTES: "1000",
     },
   },
 });

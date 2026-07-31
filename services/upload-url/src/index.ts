@@ -7,10 +7,15 @@ import { AssetType } from "@scenette/protocol";
 // pattern for why (accounts has no build step / compiled entry point for
 // normal module resolution to find; esbuild bundles the TS source directly).
 import { getSessionUsername, getMembership } from "../../accounts/src/store";
+// Same cross-service pattern -- reuses the byte-accounting logic message.ts
+// already needs (server-verified file sizes, deduped by s3Key so a
+// duplicateAsset() doesn't double-count) rather than re-implementing it here.
+import { sumRoomStorageBytes } from "../../websocket-handlers/src/roomState";
 
 const s3 = new S3Client({});
 const ASSETS_BUCKET = process.env.ASSETS_BUCKET!;
 const URL_EXPIRY_SECONDS = 300;
+const ROOM_STORAGE_QUOTA_BYTES = Number(process.env.ROOM_STORAGE_QUOTA_BYTES!);
 
 // image/gif share a content-type prefix but are distinct asset types (gifs
 // need loop/no-controls handling downstream) — keep gif as its own explicit
@@ -27,11 +32,12 @@ const CONTENT_TYPE_MAP: Record<string, AssetType> = {
   "audio/ogg": "audio",
 };
 
-// TODO: the plan calls for a per-room storage quota; nothing enforces one
-// yet — a presigned PUT (unlike a presigned POST) can't carry a
-// content-length condition, so quota enforcement needs to happen as a
-// separate check against a running per-room usage total, not as part of
-// this URL itself.
+// A presigned PUT (unlike a presigned POST) can't carry a content-length
+// condition, so there's no way to reject *this specific* upload up front
+// based on its own size -- it isn't known until the client actually PUTs
+// the file. Enforcement is therefore coarse: once a room's already-stored
+// total is at or over quota, every further upload is refused outright,
+// rather than trying to predict whether one more file would tip it over.
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const params = event.queryStringParameters ?? {};
   const { roomId, fileName, contentType } = params;
@@ -49,6 +55,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const membership = await getMembership(username, roomId);
   if (!membership) {
     return { statusCode: 403, body: "Not a member of this room" };
+  }
+
+  const usedBytes = await sumRoomStorageBytes(roomId);
+  if (usedBytes >= ROOM_STORAGE_QUOTA_BYTES) {
+    return {
+      statusCode: 413,
+      body: `Storage quota exceeded for this room (${usedBytes} / ${ROOM_STORAGE_QUOTA_BYTES} bytes used)`,
+    };
   }
 
   const type = CONTENT_TYPE_MAP[contentType];
