@@ -280,7 +280,12 @@ export class ScenetteStack extends cdk.Stack {
         // TODO: same as the S3 bucket's CORS above — restrict to the deployed
         // control-ui origin once it's hosted somewhere with a known domain.
         allowOrigins: ["*"],
-        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST],
+        // DELETE (revoke invite/member) is a non-"simple" cross-origin
+        // method -- the browser always preflights it first, and without it
+        // listed here that preflight fails, silently blocking every revoke
+        // request client-side with a CORS error before it ever reaches API
+        // Gateway.
+        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.DELETE],
         allowHeaders: ["*"],
       },
     });
