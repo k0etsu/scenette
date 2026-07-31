@@ -26,9 +26,9 @@ const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.001;
 const MIN_ASSET_SIZE = 20;
-// Leaves ~20% of the container's width free on each side, so the viewport
+// Leaves ~15% of the container's width free on each side, so the viewport
 // rect reads as centered rather than edge-to-edge.
-const VIEWPORT_WIDTH_FRACTION = 0.6;
+const VIEWPORT_WIDTH_FRACTION = 0.7;
 
 // Caps how often a dragged/resized asset's transform is actually sent over
 // the network — local rendering stays instant every mousemove regardless
@@ -174,12 +174,23 @@ export class CanvasView {
 
     if (!this.hasCenteredViewport) {
       this.hasCenteredViewport = true;
-      this.centerOnViewport();
+      // Deferred to the next frame rather than run synchronously here:
+      // this is typically the very first geometry read (container.
+      // clientWidth) of the page's lifetime, landing in the same task that
+      // just flipped the app view from display:none to visible and is
+      // about to insert every asset element. Reading layout geometry mid-
+      // task forces the browser to synchronously compute layout for that
+      // whole newly-visible subtree before it can continue -- a forced
+      // reflow that blocked the initial paint and showed up as a
+      // noticeable delay before anything appeared on screen. Waiting a
+      // frame lets that first layout/paint happen on its own schedule; the
+      // repositioning that follows is a single already-cheap read+write.
+      requestAnimationFrame(() => this.centerOnViewport());
     }
   }
 
   // Picks a zoom that fits the viewport rect within the container -- at
-  // most VIEWPORT_WIDTH_FRACTION of the container's width (the ~20% side
+  // most VIEWPORT_WIDTH_FRACTION of the container's width (the ~15% side
   // margins), and never taller than the container itself -- then pans so
   // the rect sits centered both horizontally and vertically.
   private centerOnViewport(): void {
