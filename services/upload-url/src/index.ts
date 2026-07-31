@@ -3,6 +3,10 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { randomUUID } from "crypto";
 import { AssetType } from "@scenette/protocol";
+// Relative cross-service import -- see connect.ts's comment on the same
+// pattern for why (accounts has no build step / compiled entry point for
+// normal module resolution to find; esbuild bundles the TS source directly).
+import { getSessionUsername, getMembership } from "../../accounts/src/store";
 
 const s3 = new S3Client({});
 const ASSETS_BUCKET = process.env.ASSETS_BUCKET!;
@@ -23,19 +27,28 @@ const CONTENT_TYPE_MAP: Record<string, AssetType> = {
   "audio/ogg": "audio",
 };
 
-// TODO(v1): no auth/ownership check yet — anyone who knows a roomId can
-// request an upload URL for it. Once the auth broker lands, require a valid
-// session with membership in `roomId` before issuing a URL. Also TODO: the
-// plan calls for a per-room storage quota; nothing enforces one yet — a
-// presigned PUT (unlike a presigned POST) can't carry a content-length
-// condition, so quota enforcement needs to happen as a separate check
-// against a running per-room usage total, not as part of this URL itself.
+// TODO: the plan calls for a per-room storage quota; nothing enforces one
+// yet — a presigned PUT (unlike a presigned POST) can't carry a
+// content-length condition, so quota enforcement needs to happen as a
+// separate check against a running per-room usage total, not as part of
+// this URL itself.
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const params = event.queryStringParameters ?? {};
   const { roomId, fileName, contentType } = params;
 
   if (!roomId || !fileName || !contentType) {
     return { statusCode: 400, body: "Missing roomId, fileName, or contentType" };
+  }
+
+  const auth = event.headers?.authorization ?? event.headers?.Authorization;
+  const token = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
+  const username = token ? await getSessionUsername(token) : undefined;
+  if (!username) {
+    return { statusCode: 401, body: "Invalid or missing session" };
+  }
+  const membership = await getMembership(username, roomId);
+  if (!membership) {
+    return { statusCode: 403, body: "Not a member of this room" };
   }
 
   const type = CONTENT_TYPE_MAP[contentType];

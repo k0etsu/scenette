@@ -6,9 +6,10 @@ import type { APIGatewayProxyWebsocketEventV2 } from "aws-lambda";
 
 vi.mock("../../accounts/src/store", () => ({
   getSessionUsername: vi.fn(),
+  getMembership: vi.fn(),
 }));
 
-import { getSessionUsername } from "../../accounts/src/store";
+import { getSessionUsername, getMembership } from "../../accounts/src/store";
 import { handler } from "../src/connect";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -48,6 +49,7 @@ describe("connect handler -- connectedAt", () => {
 
   it("preserves the client-supplied connectedAt on a reconnect, instead of resetting it to now", async () => {
     vi.mocked(getSessionUsername).mockResolvedValue("alice");
+    vi.mocked(getMembership).mockResolvedValue({ accountId: "alice", roomId: "r1", role: "mod" });
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     apiGwMock.on(PostToConnectionCommand).resolves({});
@@ -91,5 +93,44 @@ describe("connect handler -- connectedAt", () => {
     const stamped = Date.parse(putConnectedAt()!);
     expect(stamped).toBeGreaterThanOrEqual(before);
     expect(stamped).toBeLessThanOrEqual(after);
+  });
+});
+
+describe("connect handler -- membership enforcement", () => {
+  it("rejects an authenticated connection with no membership in the room", async () => {
+    vi.mocked(getSessionUsername).mockResolvedValue("bob");
+    vi.mocked(getMembership).mockResolvedValue(undefined);
+
+    const res = await handler(event({ roomId: "r1", token: "tok" }), {} as any, {} as any);
+
+    expect(res).toEqual({ statusCode: 403, body: "Not a member of this room" });
+    expect(getMembership).toHaveBeenCalledWith("bob", "r1");
+    // Regression: previously any logged-in account could join and fully
+    // read/write any room just by knowing its roomId -- no row should ever
+    // get written for a rejected connection.
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  it("accepts an authenticated connection that IS a member (owner or mod)", async () => {
+    vi.mocked(getSessionUsername).mockResolvedValue("alice");
+    vi.mocked(getMembership).mockResolvedValue({ accountId: "alice", roomId: "r1", role: "owner" });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    const res = await handler(event({ roomId: "r1", token: "tok" }), {} as any, {} as any);
+
+    expect(res).toEqual({ statusCode: 200, body: "Connected" });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+  });
+
+  it("accepts an anonymous (no-token) connection without checking membership -- the browser-source page", async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    const res = await handler(event({ roomId: "r1" }), {} as any, {} as any);
+
+    expect(res).toEqual({ statusCode: 200, body: "Connected" });
+    expect(getMembership).not.toHaveBeenCalled();
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
   });
 });

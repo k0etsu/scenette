@@ -9,11 +9,21 @@ import { PresenceEntry, ServerMessage } from "@scenette/protocol";
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE!;
 
-export async function roomIdForConnection(connectionId: string): Promise<string | undefined> {
+export interface ConnectionInfo {
+  roomId: string;
+  // Absent for an anonymous browser-source connection -- connect.ts already
+  // verified membership for any connection that DOES have a username, so
+  // message.ts only needs to check for its presence (not re-check
+  // membership itself) to gate write actions to actual members.
+  username?: string;
+}
+
+export async function getConnectionInfo(connectionId: string): Promise<ConnectionInfo | undefined> {
   const { Item } = await ddb.send(
     new GetCommand({ TableName: CONNECTIONS_TABLE, Key: { connectionId } })
   );
-  return Item?.roomId;
+  if (!Item) return undefined;
+  return { roomId: Item.roomId, username: Item.username };
 }
 
 // One row per connected control-ui session -- anonymous browser-source

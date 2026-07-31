@@ -206,14 +206,17 @@ export class ScenetteStack extends cdk.Stack {
       environment: {
         CONNECTIONS_TABLE: connectionsTable.tableName,
         SESSIONS_TABLE: sessionsTable.tableName,
+        MEMBERSHIPS_TABLE: membershipsTable.tableName,
       },
     });
     // Read+write: still writes its own connection row, but also needs read
     // access for broadcastToRoom's Query (announcing presence:joined to
-    // everyone else already in the room). Read-only on sessionsTable -- it
-    // only ever resolves a token to a username, never issues/revokes one.
+    // everyone else already in the room). Read-only on sessionsTable/
+    // membershipsTable -- it only ever resolves a token to a username and
+    // checks (never grants/revokes) membership.
     connectionsTable.grantReadWriteData(connectFn);
     sessionsTable.grantReadData(connectFn);
+    membershipsTable.grantReadData(connectFn);
 
     const disconnectFn = new lambdaNode.NodejsFunction(this, "DisconnectFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/disconnect.ts"),
@@ -295,11 +298,19 @@ export class ScenetteStack extends cdk.Stack {
     const uploadUrlFn = new lambdaNode.NodejsFunction(this, "UploadUrlFn", {
       entry: path.join(__dirname, "../../services/upload-url/src/index.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
-      environment: { ASSETS_BUCKET: assetsBucket.bucketName },
+      environment: {
+        ASSETS_BUCKET: assetsBucket.bucketName,
+        SESSIONS_TABLE: sessionsTable.tableName,
+        MEMBERSHIPS_TABLE: membershipsTable.tableName,
+      },
     });
-    // Write-only — this Lambda only ever needs to mint presigned PUT URLs,
-    // never to read or list what's already in the bucket.
+    // Write-only on the bucket — this Lambda only ever needs to mint
+    // presigned PUT URLs, never to read or list what's already there.
+    // Read-only on sessions/memberships -- resolves a token to a username
+    // and checks membership before issuing a URL, same as ConnectFn.
     assetsBucket.grantPut(uploadUrlFn);
+    sessionsTable.grantReadData(uploadUrlFn);
+    membershipsTable.grantReadData(uploadUrlFn);
 
     httpApi.addRoutes({
       path: "/assets/upload-url",
