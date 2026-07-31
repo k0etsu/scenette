@@ -1,4 +1,5 @@
 import { AssetType } from "@scenette/protocol";
+import { getStoredToken } from "./auth";
 
 export interface UploadResult {
   assetId: string;
@@ -27,9 +28,12 @@ function clampToMaxDimension(width: number, height: number): { width: number; he
 }
 
 export async function uploadFile(httpApiUrl: string, roomId: string, file: File): Promise<UploadResult> {
+  const token = getStoredToken();
+  if (!token) throw new Error("Not logged in");
   const presignRes = await fetch(
     `${httpApiUrl}/assets/upload-url?roomId=${encodeURIComponent(roomId)}` +
-      `&fileName=${encodeURIComponent(file.name)}&contentType=${encodeURIComponent(file.type)}`
+      `&fileName=${encodeURIComponent(file.name)}&contentType=${encodeURIComponent(file.type)}`,
+    { headers: { Authorization: `Bearer ${token}` } }
   );
   if (!presignRes.ok) {
     throw new Error(`Failed to get upload URL: ${presignRes.status} ${await presignRes.text()}`);

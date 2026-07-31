@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { ApiGatewayManagementApiClient, PostToConnectionCommand } from "@aws-sdk/client-apigatewaymanagementapi";
-import { roomIdForConnection, listPresence, sendTo, broadcastToRoom } from "../src/connections";
+import { getConnectionInfo, listPresence, sendTo, broadcastToRoom } from "../src/connections";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const apiGwMock = mockClient(ApiGatewayManagementApiClient);
@@ -15,15 +15,20 @@ beforeEach(() => {
   apiGwMock.reset();
 });
 
-describe("roomIdForConnection", () => {
-  it("returns the connection's roomId", async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { connectionId: "c1", roomId: "r1" } });
-    await expect(roomIdForConnection("c1")).resolves.toBe("r1");
+describe("getConnectionInfo", () => {
+  it("returns the connection's roomId and username", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { connectionId: "c1", roomId: "r1", username: "alice" } });
+    await expect(getConnectionInfo("c1")).resolves.toEqual({ roomId: "r1", username: "alice" });
+  });
+
+  it("returns username: undefined for an anonymous (browser-source) connection", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { connectionId: "c2", roomId: "r1" } });
+    await expect(getConnectionInfo("c2")).resolves.toEqual({ roomId: "r1", username: undefined });
   });
 
   it("returns undefined for an unknown connection", async () => {
     ddbMock.on(GetCommand).resolves({ Item: undefined });
-    await expect(roomIdForConnection("unknown")).resolves.toBeUndefined();
+    await expect(getConnectionInfo("unknown")).resolves.toBeUndefined();
   });
 });
 

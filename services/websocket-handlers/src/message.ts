@@ -1,7 +1,7 @@
 import type { APIGatewayProxyWebsocketHandlerV2 } from "aws-lambda";
 import { ApiGatewayManagementApiClient } from "@aws-sdk/client-apigatewaymanagementapi";
 import { Asset, Variable, intersects, parseClientMessage } from "@scenette/protocol";
-import { roomIdForConnection, sendTo, broadcastToRoom, listPresence } from "./connections";
+import { getConnectionInfo, sendTo, broadcastToRoom, listPresence } from "./connections";
 import {
   getOrCreateRoom,
   listAssets,
@@ -27,9 +27,18 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
     // A connection only ever operates on the room it registered with at
     // $connect — reject anything else rather than trusting the client's
     // claimed roomId for lookups that matter (broadcast fan-out, etc).
-    const connectedRoomId = await roomIdForConnection(connectionId);
-    if (!connectedRoomId || connectedRoomId !== message.roomId) {
+    const connection = await getConnectionInfo(connectionId);
+    if (!connection || connection.roomId !== message.roomId) {
       await sendTo(apiGw, connectionId, { type: "error", message: "Not connected to this room" });
+      return { statusCode: 200, body: "OK" };
+    }
+
+    // connect.ts already verified membership for any connection that has a
+    // username (an anonymous browser-source connection never gets one) --
+    // so a missing username here means this connection is read-only and
+    // must never reach a mutating action, regardless of what it claims.
+    if (!connection.username && message.action !== "room:snapshot:request") {
+      await sendTo(apiGw, connectionId, { type: "error", message: "This connection is read-only" });
       return { statusCode: 200, body: "OK" };
     }
 

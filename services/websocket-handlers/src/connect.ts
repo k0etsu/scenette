@@ -10,7 +10,7 @@ import { ApiGatewayManagementApiClient } from "@aws-sdk/client-apigatewaymanagem
 // which workspace it lives in, so a relative path into the sibling
 // service's src works fine without needing to turn accounts into a real
 // published package.
-import { getSessionUsername } from "../../accounts/src/store";
+import { getSessionUsername, getMembership } from "../../accounts/src/store";
 import { broadcastToRoom } from "./connections";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -34,6 +34,23 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   }
 
   const username = token ? await getSessionUsername(token) : undefined;
+
+  // An authenticated connection must actually be a member (owner or mod)
+  // of the room it's joining -- previously this only proved the token
+  // belonged to *some* logged-in account, so any account (not just invited
+  // members) could join and fully read/write any room just by knowing its
+  // roomId. Anonymous (no-token) connections are still let through: the
+  // browser-source page connects without logging in by design, and is
+  // read-only regardless (see message.ts, which only allows a
+  // username-bearing -- i.e. already-verified-member -- connection to send
+  // a write action).
+  if (username) {
+    const membership = await getMembership(username, roomId);
+    if (!membership) {
+      return { statusCode: 403, body: "Not a member of this room" };
+    }
+  }
+
   // The client sends its logical session-start time (set once and reused
   // across every reconnect -- see ResilientConnection) so a proactive swap
   // or a drop-and-retry doesn't reset the connected-users presence timestamp
