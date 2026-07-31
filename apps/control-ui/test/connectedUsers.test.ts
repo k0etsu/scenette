@@ -118,4 +118,15 @@ describe("elapsed time formatting", () => {
     expect(rows()[0].textContent).toContain("2 hours");
     panel.dispose();
   });
+
+  it("keeps counting in hours past a day, rather than switching to a days unit", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-03T05:00:00.000Z"));
+
+    const panel = new ConnectedUsersPanel(root, makeCallbacks());
+    panel.setPresence([{ username: "alice", connectedAt: "2026-01-01T00:00:00.000Z" }]);
+
+    expect(rows()[0].textContent).toContain("53 hours");
+    panel.dispose();
+  });
 });

@@ -34,7 +34,17 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   }
 
   const username = token ? await getSessionUsername(token) : undefined;
-  const connectedAt = new Date().toISOString();
+  // The client sends its logical session-start time (set once and reused
+  // across every reconnect -- see ResilientConnection) so a proactive swap
+  // or a drop-and-retry doesn't reset the connected-users presence timestamp
+  // back to "just now". Only trusted when it's a real, non-future date --
+  // anything else (missing, malformed, clock-skewed into the future) falls
+  // back to stamping this connection's own actual start time.
+  const requestedConnectedAt = event.queryStringParameters?.connectedAt;
+  const requestedTime = requestedConnectedAt ? Date.parse(requestedConnectedAt) : NaN;
+  const connectedAt = !isNaN(requestedTime) && requestedTime <= Date.now()
+    ? new Date(requestedTime).toISOString()
+    : new Date().toISOString();
 
   await ddb.send(
     new PutCommand({
