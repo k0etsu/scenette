@@ -371,9 +371,17 @@
         font-size: 13px;
         min-height: 16px;
       }
+      #login-message {
+        color: #4da3ff;
+        font-size: 13px;
+        min-height: 16px;
+      }
       #login-hint {
         color: #888;
         font-size: 12px;
+      }
+      #resend-verification-button {
+        width: 100%;
       }
     </style>
   </head>
@@ -381,13 +389,16 @@
     <div id="login-view">
       <form id="login-form">
         <input id="login-username" type="text" placeholder="Username" autocomplete="username" minlength="3" />
+        <input id="login-email" type="email" placeholder="Email (for registration)" autocomplete="email" />
         <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" minlength="8" />
-        <div id="login-hint">Registering requires a username of 3+ characters and a password of 8+ characters.</div>
+        <div id="login-hint">Registering requires a username of 3+ characters, a valid email, and a password of 8+ characters. We'll email you a verification link before you can log in.</div>
         <div id="login-error"></div>
+        <div id="login-message"></div>
         <div class="buttons">
           <button id="login-button" type="submit">Log in</button>
           <button id="register-button" type="button">Register</button>
         </div>
+        <button id="resend-verification-button" type="button" style="display: none">Resend verification email</button>
       </form>
     </div>
     <div id="app-view">

@@ -14,6 +14,7 @@ import * as route53 from "aws-cdk-lib/aws-route53";
 import * as route53Targets from "aws-cdk-lib/aws-route53-targets";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
+import * as ses from "aws-cdk-lib/aws-ses";
 import * as path from "path";
 
 // hanzomon.co's Route 53 hosted zone — pinned by ID rather than looked up via
@@ -74,11 +75,11 @@ export class ScenetteStack extends cdk.Stack {
       removalPolicy,
     });
 
-    // Lightweight username/password accounts — precedes real OAuth account
-    // linking (see AuthBrokerFn below, still stubbed). Session tokens are
-    // opaque (crypto.randomUUID, not signed) and looked up against this
-    // table, so logout/expiry is just a row delete/TTL — no signing secret
-    // to manage for what's meant to be a stopgap auth system.
+    // Username/password accounts, gated by email verification (see
+    // AccountsFn below) -- the one and only auth path, not a stopgap for
+    // something else. Session tokens are opaque (crypto.randomUUID, not
+    // signed) and looked up against this table, so logout/expiry is just a
+    // row delete/TTL — no signing secret to manage.
     const accountsTable = new dynamodb.Table(this, "AccountsTable", {
       tableName: `scenette-${envName}-accounts`,
       partitionKey: { name: "username", type: dynamodb.AttributeType.STRING },
@@ -89,6 +90,17 @@ export class ScenetteStack extends cdk.Stack {
     const sessionsTable = new dynamodb.Table(this, "SessionsTable", {
       tableName: `scenette-${envName}-sessions`,
       partitionKey: { name: "sessionToken", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy,
+    });
+
+    // Opaque email-verification tokens, same shape/rationale as
+    // SessionsTable -- a 24h TTL means a stale/unused link just silently
+    // expires rather than needing explicit cleanup.
+    const emailVerificationsTable = new dynamodb.Table(this, "EmailVerificationsTable", {
+      tableName: `scenette-${envName}-email-verifications`,
+      partitionKey: { name: "token", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: "ttl",
       removalPolicy,
@@ -135,6 +147,33 @@ export class ScenetteStack extends cdk.Stack {
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       },
     });
+
+    const controlUiDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
+    const browserSourceDomain =
+      envName === "prod" ? `obs.${HANZOMON_ZONE_NAME}` : `dev-obs.${HANZOMON_ZONE_NAME}`;
+
+    const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, "HostedZone", {
+      hostedZoneId: HANZOMON_ZONE_ID,
+      zoneName: HANZOMON_ZONE_NAME,
+    });
+
+    // ---- Email (SES) ----
+    //
+    // SES identity verification is account+region scoped, not
+    // CloudFormation-stack scoped -- creating this construct in both
+    // Scenette-dev and Scenette-prod would have both stacks fight over
+    // ownership of the same physical SES identity. Verified once, only when
+    // deploying prod (which already owns the hanzomon.co apex domain for its
+    // own CloudFront distribution); both envs share the one verified domain
+    // and just use a different From-address local-part, since verifying a
+    // domain in SES authorizes sending from any address @ that domain.
+    if (envName === "prod") {
+      new ses.EmailIdentity(this, "MailIdentity", {
+        identity: ses.Identity.publicHostedZone(hostedZone),
+      });
+    }
+    const verificationFromAddress = envName === "prod" ? `noreply@${HANZOMON_ZONE_NAME}` : `dev-noreply@${HANZOMON_ZONE_NAME}`;
+    const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${HANZOMON_ZONE_NAME}`;
 
     // ---- WebSocket API ----
 
@@ -219,25 +258,6 @@ export class ScenetteStack extends cdk.Stack {
     webSocketApi.grantManageConnections(connectFn);
     webSocketApi.grantManageConnections(disconnectFn);
 
-    // ---- Auth broker (HTTP API) ----
-
-    const authBrokerFn = new lambdaNode.NodejsFunction(this, "AuthBrokerFn", {
-      entry: path.join(__dirname, "../../services/auth-broker/src/index.ts"),
-      runtime: lambda.Runtime.NODEJS_22_X,
-      environment: { SCENETTE_ENV: envName },
-    });
-    // Least-privilege: only allow reading this env's own OAuth secrets, never
-    // the other environment's or anything else in Secrets Manager.
-    authBrokerFn.addToRolePolicy(
-      new cdk.aws_iam.PolicyStatement({
-        actions: ["secretsmanager:GetSecretValue"],
-        resources: [
-          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:scenette/${envName}/oauth/*`,
-        ],
-      })
-    );
-    membershipsTable.grantReadWriteData(authBrokerFn);
-
     const httpApi = new apigwv2.HttpApi(this, "HttpApi", {
       apiName: `scenette-${envName}-http`,
       corsPreflight: {
@@ -247,14 +267,6 @@ export class ScenetteStack extends cdk.Stack {
         allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST],
         allowHeaders: ["*"],
       },
-    });
-    httpApi.addRoutes({
-      path: "/auth/{provider}/{step}",
-      methods: [apigwv2.HttpMethod.GET],
-      integration: new apigwv2Integrations.HttpLambdaIntegration(
-        "AuthBrokerIntegration",
-        authBrokerFn
-      ),
     });
 
     // ---- Upload URL (HTTP API) ----
@@ -286,11 +298,23 @@ export class ScenetteStack extends cdk.Stack {
         ACCOUNTS_TABLE: accountsTable.tableName,
         SESSIONS_TABLE: sessionsTable.tableName,
         MEMBERSHIPS_TABLE: membershipsTable.tableName,
+        EMAIL_VERIFICATIONS_TABLE: emailVerificationsTable.tableName,
+        VERIFICATION_FROM_ADDRESS: verificationFromAddress,
+        HTTP_API_URL: httpApi.apiEndpoint,
       },
     });
     accountsTable.grantReadWriteData(accountsFn);
     sessionsTable.grantReadWriteData(accountsFn);
     membershipsTable.grantReadWriteData(accountsFn);
+    emailVerificationsTable.grantReadWriteData(accountsFn);
+    // Least-privilege: only this one verified identity, never any other
+    // address/domain in the account.
+    accountsFn.addToRolePolicy(
+      new cdk.aws_iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [mailIdentityArn],
+      })
+    );
 
     const accountsIntegration = new apigwv2Integrations.HttpLambdaIntegration(
       "AccountsIntegration",
@@ -303,6 +327,18 @@ export class ScenetteStack extends cdk.Stack {
     });
     httpApi.addRoutes({
       path: "/auth/login",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    // Opened directly (a link clicked in the verification email), not
+    // fetched via JS -- returns an HTML confirmation page rather than JSON.
+    httpApi.addRoutes({
+      path: "/auth/verify",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/resend-verification",
       methods: [apigwv2.HttpMethod.POST],
       integration: accountsIntegration,
     });
@@ -352,14 +388,6 @@ export class ScenetteStack extends cdk.Stack {
     // subdomain. Per-room uniqueness is handled entirely by query params on
     // that one browser-source URL (?roomId=...&wsUrl=...) — there's no
     // per-room subdomain/path infra here by design.
-    const controlUiDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
-    const browserSourceDomain =
-      envName === "prod" ? `obs.${HANZOMON_ZONE_NAME}` : `dev-obs.${HANZOMON_ZONE_NAME}`;
-
-    const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, "HostedZone", {
-      hostedZoneId: HANZOMON_ZONE_ID,
-      zoneName: HANZOMON_ZONE_NAME,
-    });
 
     // One SAN certificate per env covering both domains — CloudFront requires
     // the certificate to live in us-east-1, which is where this stack already

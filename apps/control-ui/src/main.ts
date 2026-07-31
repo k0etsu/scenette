@@ -7,15 +7,28 @@ import { ConnectedUsersPanel } from "./connectedUsers";
 import { VariablesPanel } from "./variablesPanel";
 import { uploadFile } from "./upload";
 import { loadConfig } from "./config";
-import { register, login, checkSession, logout, grantRoomAccess, getStoredToken, SessionInfo } from "./auth";
+import {
+  register,
+  login,
+  checkSession,
+  logout,
+  grantRoomAccess,
+  getStoredToken,
+  resendVerification,
+  UnverifiedEmailError,
+  SessionInfo,
+} from "./auth";
 
 const loginView = document.getElementById("login-view");
 const appView = document.getElementById("app-view");
 const loginForm = document.getElementById("login-form") as HTMLFormElement | null;
 const usernameInput = document.getElementById("login-username") as HTMLInputElement | null;
+const emailInput = document.getElementById("login-email") as HTMLInputElement | null;
 const passwordInput = document.getElementById("login-password") as HTMLInputElement | null;
 const registerButton = document.getElementById("register-button");
 const loginError = document.getElementById("login-error");
+const loginMessage = document.getElementById("login-message");
+const resendVerificationButton = document.getElementById("resend-verification-button");
 
 const canvasContainer = document.getElementById("canvas-container");
 const objectsPanel = document.getElementById("objects-panel");
@@ -35,7 +48,8 @@ const contextMenuTextButton = document.getElementById("context-menu-text");
 const contextMenuMediaButton = document.getElementById("context-menu-media");
 
 if (
-  !loginView || !appView || !loginForm || !usernameInput || !passwordInput || !registerButton || !loginError ||
+  !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !registerButton ||
+  !loginError || !loginMessage || !resendVerificationButton ||
   !canvasContainer || !objectsPanel || !propertiesPanel || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !addTextButton || !grantAccessButton ||
   !copyBrowserSourceButton || !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton ||
@@ -63,18 +77,41 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
       event.preventDefault();
       try {
         loginError!.textContent = "";
+        loginMessage!.textContent = "";
+        resendVerificationButton!.style.display = "none";
         const session = await login(httpApiUrl, usernameInput!.value, passwordInput!.value);
         resolve(session);
       } catch (err) {
-        loginError!.textContent = err instanceof Error ? err.message : String(err);
+        if (err instanceof UnverifiedEmailError) {
+          loginError!.textContent = "Check your email and click the verification link before logging in.";
+          resendVerificationButton!.style.display = "block";
+        } else {
+          loginError!.textContent = err instanceof Error ? err.message : String(err);
+        }
       }
     });
 
     registerButton!.addEventListener("click", async () => {
       try {
         loginError!.textContent = "";
-        const session = await register(httpApiUrl, usernameInput!.value, passwordInput!.value);
-        resolve(session);
+        loginMessage!.textContent = "";
+        resendVerificationButton!.style.display = "none";
+        const result = await register(httpApiUrl, usernameInput!.value, emailInput!.value, passwordInput!.value);
+        // Deliberately does NOT resolve() -- registering no longer logs you
+        // in. The account exists but login stays blocked until the
+        // verification email's link is clicked.
+        loginMessage!.textContent = result.message;
+        passwordInput!.value = "";
+      } catch (err) {
+        loginError!.textContent = err instanceof Error ? err.message : String(err);
+      }
+    });
+
+    resendVerificationButton!.addEventListener("click", async () => {
+      try {
+        loginError!.textContent = "";
+        await resendVerification(httpApiUrl, usernameInput!.value);
+        loginMessage!.textContent = "Verification email sent. Check your inbox.";
       } catch (err) {
         loginError!.textContent = err instanceof Error ? err.message : String(err);
       }

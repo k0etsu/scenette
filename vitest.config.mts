@@ -22,6 +22,12 @@ export default defineConfig({
       CONNECTIONS_TABLE: "test-connections",
       ASSETS_TABLE: "test-assets",
       ROOMS_TABLE: "test-rooms",
+      ACCOUNTS_TABLE: "test-accounts",
+      SESSIONS_TABLE: "test-sessions",
+      MEMBERSHIPS_TABLE: "test-memberships",
+      EMAIL_VERIFICATIONS_TABLE: "test-email-verifications",
+      VERIFICATION_FROM_ADDRESS: "noreply@test.example.com",
+      HTTP_API_URL: "https://api.test.example.com",
     },
   },
 });
