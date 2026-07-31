@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach } from "vitest";
-import { RoomPicker } from "../src/roomPicker";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { RoomPicker, RoomPickerCallbacks } from "../src/roomPicker";
 import { RoomMembership } from "../src/auth";
 
 let root: HTMLElement;
@@ -11,13 +11,17 @@ beforeEach(() => {
   document.body.appendChild(root);
 });
 
+function makeCallbacks(overrides: Partial<RoomPickerCallbacks> = {}): RoomPickerCallbacks {
+  return { onLogout: vi.fn(), ...overrides };
+}
+
 function rows(): HTMLElement[] {
   return [...root.querySelectorAll(".room-picker-row")] as HTMLElement[];
 }
 
 describe("RoomPicker", () => {
   it("lists the own room first, labeled 'Your room', regardless of input order", () => {
-    const picker = new RoomPicker(root);
+    const picker = new RoomPicker(root, makeCallbacks());
     const rooms: RoomMembership[] = [
       { roomId: "room2", role: "mod", ownerUsername: "alice" },
       { roomId: "room1", role: "owner", ownerUsername: "bob" },
@@ -29,7 +33,7 @@ describe("RoomPicker", () => {
   });
 
   it("shows the room as visible with the rows rendered", () => {
-    const picker = new RoomPicker(root);
+    const picker = new RoomPicker(root, makeCallbacks());
     picker.pickRoom([{ roomId: "room1", role: "owner", ownerUsername: "alice" }], "room1");
 
     expect(root.style.display).toBe("flex");
@@ -37,7 +41,7 @@ describe("RoomPicker", () => {
   });
 
   it("labels a mod-access room by its owner's username", () => {
-    const picker = new RoomPicker(root);
+    const picker = new RoomPicker(root, makeCallbacks());
     picker.pickRoom(
       [
         { roomId: "room1", role: "owner", ownerUsername: "alice" },
@@ -52,7 +56,7 @@ describe("RoomPicker", () => {
   });
 
   it("falls back to the raw roomId if ownerUsername is somehow missing", () => {
-    const picker = new RoomPicker(root);
+    const picker = new RoomPicker(root, makeCallbacks());
     picker.pickRoom(
       [
         { roomId: "room1", role: "owner", ownerUsername: "alice" },
@@ -65,7 +69,7 @@ describe("RoomPicker", () => {
   });
 
   it("shows a 'Rooms you moderate' divider above mod-access rooms, but not when there are none", () => {
-    const picker = new RoomPicker(root);
+    const picker = new RoomPicker(root, makeCallbacks());
     picker.pickRoom(
       [
         { roomId: "room1", role: "owner", ownerUsername: "alice" },
@@ -78,13 +82,13 @@ describe("RoomPicker", () => {
     document.body.innerHTML = "";
     root = document.createElement("div");
     document.body.appendChild(root);
-    const soloPicker = new RoomPicker(root);
+    const soloPicker = new RoomPicker(root, makeCallbacks());
     soloPicker.pickRoom([{ roomId: "room1", role: "owner", ownerUsername: "alice" }], "room1");
     expect(root.querySelectorAll(".room-picker-section-label")).toHaveLength(0);
   });
 
   it("resolves with the clicked room's id and hides itself", async () => {
-    const picker = new RoomPicker(root);
+    const picker = new RoomPicker(root, makeCallbacks());
     const promise = picker.pickRoom(
       [
         { roomId: "room1", role: "owner", ownerUsername: "alice" },
@@ -98,5 +102,20 @@ describe("RoomPicker", () => {
     await expect(promise).resolves.toBe("room2");
     expect(root.style.display).toBe("none");
     expect(root.innerHTML).toBe("");
+  });
+
+  it("fires onLogout when the log out button is clicked, without resolving pickRoom", async () => {
+    const onLogout = vi.fn();
+    const picker = new RoomPicker(root, makeCallbacks({ onLogout }));
+    const promise = picker.pickRoom([{ roomId: "room1", role: "owner", ownerUsername: "alice" }], "room1");
+
+    (root.querySelector('[data-role="logout"]') as HTMLElement).click();
+
+    expect(onLogout).toHaveBeenCalledTimes(1);
+    // Logging out is a terminal action handled entirely by the callback
+    // (main.ts reloads the page) -- the picker itself has no "cancelled"
+    // state, so the promise is simply left unresolved.
+    const raced = await Promise.race([promise.then(() => "resolved"), Promise.resolve("not resolved")]);
+    expect(raced).toBe("not resolved");
   });
 });

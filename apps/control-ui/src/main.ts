@@ -46,7 +46,6 @@ const manageAccessButton = document.getElementById("manage-access-button");
 const accessModalEl = document.getElementById("access-modal");
 const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
 const dashboardButton = document.getElementById("dashboard-button");
-const logoutButton = document.getElementById("logout-button");
 const statusEl = document.getElementById("status");
 
 const contextMenu = document.getElementById("context-menu");
@@ -58,7 +57,7 @@ if (
   !loginError || !loginMessage || !resendVerificationButton || !roomPickerViewEl ||
   !canvasContainer || !objectsPanel || !propertiesPanel || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !addTextButton || !manageAccessButton || !accessModalEl ||
-  !copyBrowserSourceButton || !dashboardButton || !logoutButton || !statusEl || !contextMenu ||
+  !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
   !contextMenuTextButton || !contextMenuMediaButton
 ) {
   throw new Error("Missing required DOM elements");
@@ -158,7 +157,13 @@ async function main(): Promise<void> {
     teardownCurrentRoom();
     appView!.style.display = "none";
     const rooms = await listRooms(httpApiUrl);
-    const roomPicker = new RoomPicker(roomPickerViewEl!);
+    const roomPicker = new RoomPicker(roomPickerViewEl!, {
+      onLogout: () => {
+        void logout(httpApiUrl).then(() => {
+          window.location.href = window.location.pathname;
+        });
+      },
+    });
     const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId);
     // The user just made an explicit choice -- push so that a later "back"
     // returns to the dashboard rather than leaving the app entirely.
@@ -298,11 +303,6 @@ async function main(): Promise<void> {
 
   dashboardButton!.addEventListener("click", () => {
     void goToDashboard(true);
-  });
-
-  logoutButton!.addEventListener("click", async () => {
-    await logout(httpApiUrl);
-    window.location.href = window.location.pathname;
   });
 
   // ---- Initial render: no explicit room requested (a bare visit, not a

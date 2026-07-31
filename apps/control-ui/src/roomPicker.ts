@@ -7,12 +7,19 @@ import { RoomMembership } from "./auth";
 // bookmarked/shared link. A single-room account never sees this
 // automatically, but can still reach it via the in-room "Dashboard" button
 // (see main.ts's caller for both cases).
+export interface RoomPickerCallbacks {
+  onLogout: () => void;
+}
+
 export class RoomPicker {
-  constructor(private readonly root: HTMLElement) {}
+  constructor(private readonly root: HTMLElement, private readonly callbacks: RoomPickerCallbacks) {}
 
   // Resolves with the chosen roomId once a row is clicked. The own room is
   // always listed first, in its own group, regardless of where it falls in
   // `rooms` -- any mod-access rooms are grouped separately below it.
+  // Logging out is a terminal action (main.ts reloads the page) rather than
+  // something this promise ever resolves with -- callbacks.onLogout() fires
+  // directly instead.
   pickRoom(rooms: RoomMembership[], ownRoomId: string): Promise<string> {
     return new Promise((resolve) => {
       const ownRoom = rooms.find((r) => r.roomId === ownRoomId);
@@ -39,7 +46,10 @@ export class RoomPicker {
 
       this.root.innerHTML = `
         <div id="room-picker">
-          <h2>Choose a room</h2>
+          <div class="room-picker-header">
+            <h2>Choose a room</h2>
+            <button type="button" data-role="logout" class="room-picker-logout">Log out</button>
+          </div>
           <div data-role="room-picker-list">${rowsHtml}</div>
         </div>
       `;
@@ -51,6 +61,10 @@ export class RoomPicker {
           this.close();
           resolve(roomId);
         });
+      });
+
+      this.root.querySelector('[data-role="logout"]')!.addEventListener("click", () => {
+        this.callbacks.onLogout();
       });
     });
   }

@@ -486,9 +486,28 @@
         border-radius: 8px;
         box-sizing: border-box;
       }
+      .room-picker-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
       #room-picker h2 {
-        margin: 0 0 14px;
+        margin: 0;
         font-size: 16px;
+      }
+      .room-picker-logout {
+        background: none;
+        border: none;
+        color: #999;
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        padding: 4px;
+      }
+      .room-picker-logout:hover {
+        color: #eee;
+        text-decoration: underline;
       }
       [data-role="room-picker-list"] {
         display: flex;
@@ -558,7 +577,6 @@
         </label>
         <button id="manage-access-button" class="toolbar-button">Manage access</button>
         <button id="copy-browser-source-button" class="toolbar-button">Copy browser source URL</button>
-        <button id="logout-button" class="toolbar-button">Log out</button>
         <span id="status"></span>
       </div>
       <div id="main-area">
