@@ -23,15 +23,37 @@ async function parseJsonOrThrow(res: Response): Promise<any> {
   return data;
 }
 
-export async function register(httpApiUrl: string, username: string, password: string): Promise<SessionInfo> {
+// Thrown specifically by login() when the account exists and the password
+// is correct, but the email hasn't been verified yet -- distinct from a
+// generic Error so main.ts can offer a "resend verification email" action
+// rather than just showing the message text.
+export class UnverifiedEmailError extends Error {
+  constructor(public readonly username: string) {
+    super("Email not verified");
+  }
+}
+
+export interface RegisterResult {
+  username: string;
+  personalRoomId: string;
+  message: string;
+}
+
+// Deliberately does NOT return a SessionInfo / store a token -- registering
+// no longer logs you in. The account is created but login is blocked until
+// the verification email's link is clicked (see login() below).
+export async function register(
+  httpApiUrl: string,
+  username: string,
+  email: string,
+  password: string
+): Promise<RegisterResult> {
   const res = await fetch(`${httpApiUrl}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, email, password }),
   });
-  const data = await parseJsonOrThrow(res);
-  storeToken(data.sessionToken);
-  return { username: data.username, personalRoomId: data.personalRoomId };
+  return parseJsonOrThrow(res);
 }
 
 export async function login(httpApiUrl: string, username: string, password: string): Promise<SessionInfo> {
@@ -40,9 +62,22 @@ export async function login(httpApiUrl: string, username: string, password: stri
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
   });
-  const data = await parseJsonOrThrow(res);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (data.unverified) throw new UnverifiedEmailError(username);
+    throw new Error(data.error ?? `Request failed: ${res.status}`);
+  }
   storeToken(data.sessionToken);
   return { username: data.username, personalRoomId: data.personalRoomId };
+}
+
+export async function resendVerification(httpApiUrl: string, username: string): Promise<void> {
+  const res = await fetch(`${httpApiUrl}/auth/resend-verification`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username }),
+  });
+  await parseJsonOrThrow(res);
 }
 
 // Returns null (rather than throwing) on any invalid/expired/missing token —
