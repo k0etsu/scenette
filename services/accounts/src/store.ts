@@ -161,6 +161,14 @@ export async function deleteMembership(accountId: string, roomId: string): Promi
   await ddb.send(new DeleteCommand({ TableName: MEMBERSHIPS_TABLE, Key: { accountId, roomId } }));
 }
 
+// A mod's own membership row only has their own accountId/role -- nothing
+// identifying whose room it actually is. Used to label a room list ("<X>'s
+// room") for a mod with access to more than just their own personal room.
+export async function getRoomOwner(roomId: string): Promise<string | undefined> {
+  const members = await listMembers(roomId);
+  return members.find((m) => m.role === "owner")?.accountId;
+}
+
 export interface Invite {
   inviteToken: string;
   roomId: string;

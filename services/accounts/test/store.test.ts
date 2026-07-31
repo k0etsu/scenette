@@ -15,6 +15,7 @@ import {
   getMembership,
   listMembers,
   deleteMembership,
+  getRoomOwner,
   createInvite,
   getInvite,
   redeemInvite,
@@ -166,6 +167,23 @@ describe("memberships", () => {
   it("deleteMembership does not throw", async () => {
     ddbMock.on(DeleteCommand).resolves({});
     await expect(deleteMembership("bob", "room1")).resolves.toBeUndefined();
+  });
+
+  it("getRoomOwner returns the accountId of the owner-role row", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { accountId: "bob", roomId: "room1", role: "mod" },
+        { accountId: "alice", roomId: "room1", role: "owner" },
+      ],
+    });
+    await expect(getRoomOwner("room1")).resolves.toBe("alice");
+  });
+
+  it("getRoomOwner returns undefined if no membership row has role owner", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ accountId: "bob", roomId: "room1", role: "mod" }],
+    });
+    await expect(getRoomOwner("room1")).resolves.toBeUndefined();
   });
 });
 

@@ -8,6 +8,7 @@ import { VariablesPanel } from "./variablesPanel";
 import { uploadFile } from "./upload";
 import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
+import { RoomPicker } from "./roomPicker";
 import {
   register,
   login,
@@ -16,6 +17,7 @@ import {
   redeemInvite,
   getStoredToken,
   resendVerification,
+  listRooms,
   UnverifiedEmailError,
   SessionInfo,
 } from "./auth";
@@ -30,6 +32,7 @@ const registerButton = document.getElementById("register-button");
 const loginError = document.getElementById("login-error");
 const loginMessage = document.getElementById("login-message");
 const resendVerificationButton = document.getElementById("resend-verification-button");
+const roomPickerViewEl = document.getElementById("room-picker-view");
 
 const canvasContainer = document.getElementById("canvas-container");
 const objectsPanel = document.getElementById("objects-panel");
@@ -51,7 +54,7 @@ const contextMenuMediaButton = document.getElementById("context-menu-media");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !registerButton ||
-  !loginError || !loginMessage || !resendVerificationButton ||
+  !loginError || !loginMessage || !resendVerificationButton || !roomPickerViewEl ||
   !canvasContainer || !objectsPanel || !propertiesPanel || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !addTextButton || !manageAccessButton || !accessModalEl ||
   !copyBrowserSourceButton || !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton ||
@@ -89,6 +92,22 @@ async function main(): Promise<void> {
   }
 
   loginView!.style.display = "none";
+
+  // No explicit room requested (a bare visit, not a bookmarked/shared link
+  // and not an invite redemption just above) -- previously this always
+  // defaulted straight into the account's own room, which left no way to
+  // reach a room this account only has mod access to except via a link.
+  // Only bother asking when there's actually a choice to make.
+  if (!params.get("roomId")) {
+    const rooms = await listRooms(httpApiUrl);
+    if (rooms.length > 1) {
+      const roomPicker = new RoomPicker(roomPickerViewEl!);
+      const roomId = await roomPicker.pickRoom(rooms, session.personalRoomId);
+      params.set("roomId", roomId);
+      window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+    }
+  }
+
   appView!.style.display = "flex";
   startApp(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session);
 }
