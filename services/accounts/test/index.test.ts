@@ -401,7 +401,9 @@ describe("POST /auth/rooms/{roomId}/invites", () => {
       undefined as any
     );
     expect(res.statusCode).toBe(201);
-    expect(jsonBody(res).inviteToken).toBe("tok1");
+    // Regression: the response previously omitted createdAt, which made the
+    // client render `new Date(undefined)` as "Invalid Date" in the modal.
+    expect(jsonBody(res)).toEqual({ inviteToken: "tok1", createdAt: "t" });
   });
 });
 

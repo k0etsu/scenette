@@ -11,7 +11,11 @@ export default defineConfig({
       "packages/*/test/**/*.test.ts",
       "services/*/test/**/*.test.ts",
       "apps/*/test/**/*.test.ts",
+      "infra/test/**/*.test.ts",
     ],
+    // CDK synth is slow (assembling the full construct tree, resolving the
+    // hosted zone/cert lookups, etc.) -- well past vitest's 5s default.
+    testTimeout: 30_000,
     environment: "node",
     // Lambda handler modules read these via `process.env.X!` at module
     // top-level (fine in a real deploy, where CDK sets them) -- since ES

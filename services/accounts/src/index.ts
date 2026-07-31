@@ -252,7 +252,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       const invite = await createInvite(roomId, username);
-      return json(201, { inviteToken: invite.inviteToken });
+      return json(201, { inviteToken: invite.inviteToken, createdAt: invite.createdAt });
     }
 
     case "GET /auth/rooms/{roomId}/invites": {
