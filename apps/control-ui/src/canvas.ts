@@ -498,63 +498,87 @@ export class CanvasView {
     return { el, content };
   }
 
-  private bindContainerEvents(): void {
-    this.container.addEventListener("mousedown", (event) => {
-      if (event.button === 1) {
-        // Middle click pans regardless of what's under the cursor (even an
-        // asset) — browsers auto-scroll on middle-click by default, so this
-        // must be prevented or panning fights with that native behavior.
-        event.preventDefault();
-        this.dragging = { panning: true };
-        return;
-      }
-      // Deliberately does NOT deselect on an empty-canvas click -- selection
-      // only ever changes by picking a different asset (or an explicit
-      // delete), so the properties panel stays put while adjusting pan/zoom
-      // or clicking around the canvas.
-    });
-
-    window.addEventListener("mousemove", (event) => this.onMouseMove(event));
-    window.addEventListener("mouseup", () => this.onMouseUp());
-
-    this.container.addEventListener("contextmenu", (event) => {
+  // Bound once as instance fields (not inline closures) so dispose() has a
+  // stable reference to pass to removeEventListener -- container and window
+  // both outlive a single CanvasView instance (the container is a static
+  // DOM element reused across room switches; window obviously always is),
+  // so without this every switch would leave the previous instance's
+  // handlers still firing alongside the new one.
+  private readonly handleContainerMouseDown = (event: MouseEvent): void => {
+    if (event.button === 1) {
+      // Middle click pans regardless of what's under the cursor (even an
+      // asset) — browsers auto-scroll on middle-click by default, so this
+      // must be prevented or panning fights with that native behavior.
       event.preventDefault();
-      const rect = this.container.getBoundingClientRect();
-      const screenX = event.clientX - rect.left;
-      const screenY = event.clientY - rect.top;
-      const world = this.screenToWorld(screenX, screenY);
-      this.callbacks.onContextMenu(world.x, world.y, screenX, screenY);
-    });
+      this.dragging = { panning: true };
+      return;
+    }
+    // Deliberately does NOT deselect on an empty-canvas click -- selection
+    // only ever changes by picking a different asset (or an explicit
+    // delete), so the properties panel stays put while adjusting pan/zoom
+    // or clicking around the canvas.
+  };
 
-    this.container.addEventListener(
-      "wheel",
-      (event) => {
-        event.preventDefault();
-        const rect = this.container.getBoundingClientRect();
-        const screenX = event.clientX - rect.left;
-        const screenY = event.clientY - rect.top;
+  private readonly handleWindowMouseMove = (event: MouseEvent): void => this.onMouseMove(event);
+  private readonly handleWindowMouseUp = (): void => this.onMouseUp();
 
-        // Cursor-centered zoom: find the world point currently under the
-        // cursor, change zoom, then solve for the pan that keeps that same
-        // world point under the same screen position.
-        const worldUnderCursor = this.screenToWorld(screenX, screenY);
-        const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * (1 - event.deltaY * ZOOM_STEP)));
-        this.pan.x = screenX - worldUnderCursor.x * nextZoom;
-        this.pan.y = screenY - worldUnderCursor.y * nextZoom;
-        this.zoom = nextZoom;
-        this.applyWorldTransform();
-        this.positionHandles();
-      },
-      { passive: false }
-    );
+  private readonly handleContainerContextMenu = (event: MouseEvent): void => {
+    event.preventDefault();
+    const rect = this.container.getBoundingClientRect();
+    const screenX = event.clientX - rect.left;
+    const screenY = event.clientY - rect.top;
+    const world = this.screenToWorld(screenX, screenY);
+    this.callbacks.onContextMenu(world.x, world.y, screenX, screenY);
+  };
+
+  private readonly handleContainerWheel = (event: WheelEvent): void => {
+    event.preventDefault();
+    const rect = this.container.getBoundingClientRect();
+    const screenX = event.clientX - rect.left;
+    const screenY = event.clientY - rect.top;
+
+    // Cursor-centered zoom: find the world point currently under the
+    // cursor, change zoom, then solve for the pan that keeps that same
+    // world point under the same screen position.
+    const worldUnderCursor = this.screenToWorld(screenX, screenY);
+    const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, this.zoom * (1 - event.deltaY * ZOOM_STEP)));
+    this.pan.x = screenX - worldUnderCursor.x * nextZoom;
+    this.pan.y = screenY - worldUnderCursor.y * nextZoom;
+    this.zoom = nextZoom;
+    this.applyWorldTransform();
+    this.positionHandles();
+  };
+
+  private readonly handleWindowKeyDown = (event: KeyboardEvent): void => {
+    if ((event.key === "Delete" || event.key === "Backspace") && this.selectedAssetId) {
+      this.callbacks.onAssetDelete(this.selectedAssetId);
+    }
+  };
+
+  private bindContainerEvents(): void {
+    this.container.addEventListener("mousedown", this.handleContainerMouseDown);
+    window.addEventListener("mousemove", this.handleWindowMouseMove);
+    window.addEventListener("mouseup", this.handleWindowMouseUp);
+    this.container.addEventListener("contextmenu", this.handleContainerContextMenu);
+    this.container.addEventListener("wheel", this.handleContainerWheel, { passive: false });
   }
 
   private bindKeyboard(): void {
-    window.addEventListener("keydown", (event) => {
-      if ((event.key === "Delete" || event.key === "Backspace") && this.selectedAssetId) {
-        this.callbacks.onAssetDelete(this.selectedAssetId);
-      }
-    });
+    window.addEventListener("keydown", this.handleWindowKeyDown);
+  }
+
+  // Reverses everything bindContainerEvents()/bindKeyboard() set up, and
+  // wipes the container's DOM so a fresh CanvasView on the same container
+  // (switching rooms) starts from a clean slate rather than stacking a
+  // second `world` div underneath/alongside the old one.
+  dispose(): void {
+    window.removeEventListener("mousemove", this.handleWindowMouseMove);
+    window.removeEventListener("mouseup", this.handleWindowMouseUp);
+    window.removeEventListener("keydown", this.handleWindowKeyDown);
+    this.container.removeEventListener("mousedown", this.handleContainerMouseDown);
+    this.container.removeEventListener("contextmenu", this.handleContainerContextMenu);
+    this.container.removeEventListener("wheel", this.handleContainerWheel);
+    this.container.innerHTML = "";
   }
 
   private onAssetMouseDown(event: MouseEvent, assetId: string): void {

@@ -74,10 +74,20 @@ export class Sidebar {
       const target = event.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") this.interacting = true;
     });
-    window.addEventListener("mouseup", () => {
-      this.interacting = false;
-    });
+    window.addEventListener("mouseup", this.handleWindowMouseUp);
     this.renderProperties();
+  }
+
+  // window outlives a single Sidebar instance (objectsPanelRoot/
+  // propertiesPanelRoot are static containers reused across room switches),
+  // so this needs a stable reference to remove in dispose() -- otherwise
+  // every switch leaves the previous instance's handler still firing.
+  private readonly handleWindowMouseUp = (): void => {
+    this.interacting = false;
+  };
+
+  dispose(): void {
+    window.removeEventListener("mouseup", this.handleWindowMouseUp);
   }
 
   setAssets(assets: Asset[]): void {

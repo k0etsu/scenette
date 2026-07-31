@@ -12,6 +12,7 @@ vi.mock("../src/store", () => ({
   getMembership: vi.fn(),
   listMembers: vi.fn(),
   deleteMembership: vi.fn(),
+  getRoomOwner: vi.fn(),
   createVerification: vi.fn(),
   getVerificationUsername: vi.fn(),
   deleteVerification: vi.fn(),
@@ -291,6 +292,44 @@ describe("POST /auth/resend-verification", () => {
     );
     expect(email.sendVerificationEmail).toHaveBeenCalledWith("alice@example.com", "alice", "newtoken");
     expect(res.statusCode).toBe(200);
+  });
+});
+
+describe("GET /auth/rooms", () => {
+  it("requires a session", async () => {
+    const res: any = await handler(event("GET /auth/rooms"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("labels the caller's own room with their own username, without a lookup", async () => {
+    vi.mocked(store.listMemberships).mockResolvedValue([{ accountId: "alice", roomId: "room1", role: "owner" }]);
+
+    const res: any = await handler(authedEvent("GET /auth/rooms", "alice"), {} as any, undefined as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res)).toEqual({ rooms: [{ roomId: "room1", role: "owner", ownerUsername: "alice" }] });
+    // Regression: an owner row is self-evidently the caller's own room --
+    // spending a getRoomOwner scan on it would be pure waste.
+    expect(store.getRoomOwner).not.toHaveBeenCalled();
+  });
+
+  it("looks up the owner's username for a mod-access room", async () => {
+    vi.mocked(store.listMemberships).mockResolvedValue([
+      { accountId: "bob", roomId: "room1", role: "owner" },
+      { accountId: "bob", roomId: "room2", role: "mod" },
+    ]);
+    vi.mocked(store.getRoomOwner).mockResolvedValue("alice");
+
+    const res: any = await handler(authedEvent("GET /auth/rooms", "bob"), {} as any, undefined as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res)).toEqual({
+      rooms: [
+        { roomId: "room1", role: "owner", ownerUsername: "bob" },
+        { roomId: "room2", role: "mod", ownerUsername: "alice" },
+      ],
+    });
+    expect(store.getRoomOwner).toHaveBeenCalledWith("room2");
   });
 });
 

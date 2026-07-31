@@ -112,6 +112,7 @@ export async function logout(httpApiUrl: string): Promise<void> {
 export interface RoomMembership {
   roomId: string;
   role: "owner" | "mod";
+  ownerUsername?: string;
 }
 
 export async function listRooms(httpApiUrl: string): Promise<RoomMembership[]> {

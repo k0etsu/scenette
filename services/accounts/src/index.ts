@@ -13,6 +13,7 @@ import {
   getMembership,
   listMembers,
   deleteMembership,
+  getRoomOwner,
   createVerification,
   getVerificationUsername,
   deleteVerification,
@@ -194,7 +195,18 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const memberships = await listMemberships(username);
-      return json(200, { rooms: memberships });
+      // Own membership rows never need a lookup -- the session's own
+      // username already is the owner. Only a "mod" row (access to someone
+      // else's room) needs listMembers()'s owner scan, since that's the
+      // only case where the room isn't self-evidently "yours".
+      const rooms = await Promise.all(
+        memberships.map(async (m) => ({
+          roomId: m.roomId,
+          role: m.role,
+          ownerUsername: m.role === "owner" ? username : await getRoomOwner(m.roomId),
+        }))
+      );
+      return json(200, { rooms });
     }
 
     case "GET /auth/rooms/{roomId}/members": {

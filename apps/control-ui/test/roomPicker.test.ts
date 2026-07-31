@@ -1,0 +1,121 @@
+// @vitest-environment jsdom
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { RoomPicker, RoomPickerCallbacks } from "../src/roomPicker";
+import { RoomMembership } from "../src/auth";
+
+let root: HTMLElement;
+
+beforeEach(() => {
+  document.body.innerHTML = "";
+  root = document.createElement("div");
+  document.body.appendChild(root);
+});
+
+function makeCallbacks(overrides: Partial<RoomPickerCallbacks> = {}): RoomPickerCallbacks {
+  return { onLogout: vi.fn(), ...overrides };
+}
+
+function rows(): HTMLElement[] {
+  return [...root.querySelectorAll(".room-picker-row")] as HTMLElement[];
+}
+
+describe("RoomPicker", () => {
+  it("lists the own room first, labeled 'Your room', regardless of input order", () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    const rooms: RoomMembership[] = [
+      { roomId: "room2", role: "mod", ownerUsername: "alice" },
+      { roomId: "room1", role: "owner", ownerUsername: "bob" },
+    ];
+    picker.pickRoom(rooms, "room1");
+
+    const titles = rows().map((r) => r.querySelector(".room-picker-row-title")?.textContent);
+    expect(titles).toEqual(["Your room", "alice's room"]);
+  });
+
+  it("shows the room as visible with the rows rendered", () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    picker.pickRoom([{ roomId: "room1", role: "owner", ownerUsername: "alice" }], "room1");
+
+    expect(root.style.display).toBe("flex");
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("labels a mod-access room by its owner's username", () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    picker.pickRoom(
+      [
+        { roomId: "room1", role: "owner", ownerUsername: "alice" },
+        { roomId: "room2", role: "mod", ownerUsername: "carol" },
+      ],
+      "room1"
+    );
+
+    const subRows = rows();
+    expect(subRows[1].querySelector(".room-picker-row-title")?.textContent).toBe("carol's room");
+    expect(subRows[1].querySelector(".room-picker-row-sub")?.textContent).toBe("mod access");
+  });
+
+  it("falls back to the raw roomId if ownerUsername is somehow missing", () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    picker.pickRoom(
+      [
+        { roomId: "room1", role: "owner", ownerUsername: "alice" },
+        { roomId: "room2", role: "mod" },
+      ],
+      "room1"
+    );
+
+    expect(rows()[1].querySelector(".room-picker-row-title")?.textContent).toBe("room2's room");
+  });
+
+  it("shows a 'Rooms you moderate' divider above mod-access rooms, but not when there are none", () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    picker.pickRoom(
+      [
+        { roomId: "room1", role: "owner", ownerUsername: "alice" },
+        { roomId: "room2", role: "mod", ownerUsername: "bob" },
+      ],
+      "room1"
+    );
+    expect(root.querySelectorAll(".room-picker-section-label")).toHaveLength(1);
+
+    document.body.innerHTML = "";
+    root = document.createElement("div");
+    document.body.appendChild(root);
+    const soloPicker = new RoomPicker(root, makeCallbacks());
+    soloPicker.pickRoom([{ roomId: "room1", role: "owner", ownerUsername: "alice" }], "room1");
+    expect(root.querySelectorAll(".room-picker-section-label")).toHaveLength(0);
+  });
+
+  it("resolves with the clicked room's id and hides itself", async () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    const promise = picker.pickRoom(
+      [
+        { roomId: "room1", role: "owner", ownerUsername: "alice" },
+        { roomId: "room2", role: "mod", ownerUsername: "bob" },
+      ],
+      "room1"
+    );
+
+    rows()[1].click();
+
+    await expect(promise).resolves.toBe("room2");
+    expect(root.style.display).toBe("none");
+    expect(root.innerHTML).toBe("");
+  });
+
+  it("fires onLogout when the log out button is clicked, without resolving pickRoom", async () => {
+    const onLogout = vi.fn();
+    const picker = new RoomPicker(root, makeCallbacks({ onLogout }));
+    const promise = picker.pickRoom([{ roomId: "room1", role: "owner", ownerUsername: "alice" }], "room1");
+
+    (root.querySelector('[data-role="logout"]') as HTMLElement).click();
+
+    expect(onLogout).toHaveBeenCalledTimes(1);
+    // Logging out is a terminal action handled entirely by the callback
+    // (main.ts reloads the page) -- the picker itself has no "cancelled"
+    // state, so the promise is simply left unresolved.
+    const raced = await Promise.race([promise.then(() => "resolved"), Promise.resolve("not resolved")]);
+    expect(raced).toBe("not resolved");
+  });
+});
