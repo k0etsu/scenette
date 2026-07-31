@@ -31,6 +31,38 @@
         font-size: 13px;
         color: #9aa;
       }
+      .toolbar-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        background: #34353e;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        padding: 6px 10px;
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        box-sizing: border-box;
+      }
+      .toolbar-button:hover {
+        background: #3a3b44;
+        border-color: #4da3ff;
+      }
+      #dashboard-button {
+        display: inline-flex;
+        align-items: center;
+        background: none;
+        border: none;
+        color: #4da3ff;
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        padding: 6px 4px;
+      }
+      #dashboard-button:hover {
+        text-decoration: underline;
+      }
       #main-area {
         display: flex;
         flex: 1;
@@ -446,8 +478,7 @@
       #room-picker {
         display: flex;
         flex-direction: column;
-        gap: 10px;
-        width: 320px;
+        width: 400px;
         max-height: 80vh;
         overflow-y: auto;
         padding: 24px;
@@ -456,14 +487,21 @@
         box-sizing: border-box;
       }
       #room-picker h2 {
-        margin: 0 0 4px;
+        margin: 0 0 14px;
         font-size: 16px;
+      }
+      [data-role="room-picker-list"] {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
       }
       .room-picker-row {
         display: flex;
         flex-direction: column;
         gap: 2px;
-        padding: 10px 12px;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px 14px;
         border-radius: 6px;
         background: #2b2c34;
         border: 1px solid #383838;
@@ -483,6 +521,13 @@
       .room-picker-row-sub {
         font-size: 12px;
         color: #999;
+      }
+      .room-picker-section-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #888;
+        margin-top: 12px;
       }
     </style>
   </head>
@@ -505,14 +550,15 @@
     <div id="room-picker-view"></div>
     <div id="app-view">
       <div id="toolbar">
-        <button id="add-text-button">Add text</button>
-        <label style="cursor: pointer">
+        <button id="dashboard-button" type="button">&laquo; Dashboard</button>
+        <button id="add-text-button" class="toolbar-button">Add text</button>
+        <label class="toolbar-button">
           Upload
           <input id="upload-input" type="file" accept="image/*,video/*,audio/*" style="display: none" />
         </label>
-        <button id="manage-access-button">Manage access</button>
-        <button id="copy-browser-source-button">Copy browser source URL</button>
-        <button id="logout-button">Log out</button>
+        <button id="manage-access-button" class="toolbar-button">Manage access</button>
+        <button id="copy-browser-source-button" class="toolbar-button">Copy browser source URL</button>
+        <button id="logout-button" class="toolbar-button">Log out</button>
         <span id="status"></span>
       </div>
       <div id="main-area">

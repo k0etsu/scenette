@@ -64,6 +64,25 @@ describe("RoomPicker", () => {
     expect(rows()[1].querySelector(".room-picker-row-title")?.textContent).toBe("room2's room");
   });
 
+  it("shows a 'Rooms you moderate' divider above mod-access rooms, but not when there are none", () => {
+    const picker = new RoomPicker(root);
+    picker.pickRoom(
+      [
+        { roomId: "room1", role: "owner", ownerUsername: "alice" },
+        { roomId: "room2", role: "mod", ownerUsername: "bob" },
+      ],
+      "room1"
+    );
+    expect(root.querySelectorAll(".room-picker-section-label")).toHaveLength(1);
+
+    document.body.innerHTML = "";
+    root = document.createElement("div");
+    document.body.appendChild(root);
+    const soloPicker = new RoomPicker(root);
+    soloPicker.pickRoom([{ roomId: "room1", role: "owner", ownerUsername: "alice" }], "room1");
+    expect(root.querySelectorAll(".room-picker-section-label")).toHaveLength(0);
+  });
+
   it("resolves with the clicked room's id and hides itself", async () => {
     const picker = new RoomPicker(root);
     const promise = picker.pickRoom(

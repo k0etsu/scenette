@@ -45,6 +45,7 @@ const addTextButton = document.getElementById("add-text-button");
 const manageAccessButton = document.getElementById("manage-access-button");
 const accessModalEl = document.getElementById("access-modal");
 const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
+const dashboardButton = document.getElementById("dashboard-button");
 const logoutButton = document.getElementById("logout-button");
 const statusEl = document.getElementById("status");
 
@@ -57,8 +58,8 @@ if (
   !loginError || !loginMessage || !resendVerificationButton || !roomPickerViewEl ||
   !canvasContainer || !objectsPanel || !propertiesPanel || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !addTextButton || !manageAccessButton || !accessModalEl ||
-  !copyBrowserSourceButton || !logoutButton || !statusEl || !contextMenu || !contextMenuTextButton ||
-  !contextMenuMediaButton
+  !copyBrowserSourceButton || !dashboardButton || !logoutButton || !statusEl || !contextMenu ||
+  !contextMenuTextButton || !contextMenuMediaButton
 ) {
   throw new Error("Missing required DOM elements");
 }
@@ -93,20 +94,26 @@ async function main(): Promise<void> {
 
   loginView!.style.display = "none";
 
+  // Set by the in-room "Dashboard" button (a full page reload -- see its
+  // click handler in startApp()) to force the picker to show regardless of
+  // room count, since that's an explicit request to see it. A bare login
+  // only shows it automatically when there's an actual choice to make.
+  const forceDashboard = params.get("dashboard") === "1";
+  params.delete("dashboard");
+
   // No explicit room requested (a bare visit, not a bookmarked/shared link
   // and not an invite redemption just above) -- previously this always
   // defaulted straight into the account's own room, which left no way to
   // reach a room this account only has mod access to except via a link.
-  // Only bother asking when there's actually a choice to make.
   if (!params.get("roomId")) {
     const rooms = await listRooms(httpApiUrl);
-    if (rooms.length > 1) {
+    if (forceDashboard || rooms.length > 1) {
       const roomPicker = new RoomPicker(roomPickerViewEl!);
       const roomId = await roomPicker.pickRoom(rooms, session.personalRoomId);
       params.set("roomId", roomId);
-      window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
     }
   }
+  window.history.replaceState(null, "", `${window.location.pathname}${params.toString() ? "?" + params.toString() : ""}`);
 
   appView!.style.display = "flex";
   startApp(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session);
@@ -470,6 +477,16 @@ function startApp(
       // fall back to showing the URL directly so it's still usable.
       statusEl!.textContent = `copy failed, URL: ${url}`;
     }
+  });
+
+  dashboardButton!.addEventListener("click", () => {
+    // A full reload rather than an in-place teardown -- startApp() binds a
+    // long list of listeners straight onto static DOM elements with no
+    // corresponding cleanup, so re-running it in place would double-bind
+    // everything on a second room. Reloading with a fresh session (already
+    // in localStorage) and no roomId, plus dashboard=1 to force the picker
+    // even for a single-room account, gets back to a clean slate safely.
+    window.location.href = `${window.location.pathname}?dashboard=1`;
   });
 
   logoutButton!.addEventListener("click", async () => {
