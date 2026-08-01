@@ -285,3 +285,29 @@ export async function updateAsset(
 export async function deleteAsset(roomId: string, assetId: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: ASSETS_TABLE, Key: { roomId, assetId } }));
 }
+
+// Sums each *distinct* S3 object's size once, not once per asset row --
+// duplicateAsset() (see control-ui) creates a second row that reuses the
+// original's s3Key rather than a fresh S3 upload, so counting both rows
+// would overstate how many bytes this room is actually costing to store.
+export async function sumRoomStorageBytes(roomId: string): Promise<number> {
+  const assets = await listAssets(roomId);
+  const bytesByS3Key = new Map<string, number>();
+  for (const asset of assets) {
+    if (asset.s3Key && asset.fileSize) bytesByS3Key.set(asset.s3Key, asset.fileSize);
+  }
+  return [...bytesByS3Key.values()].reduce((sum, bytes) => sum + bytes, 0);
+}
+
+// Whether any OTHER asset in the room still points at this S3 object --
+// used before physically deleting it, since two assets can share one
+// s3Key (see duplicateAsset()) and deleting the object out from under a
+// still-live duplicate would break its playback with no warning.
+export async function isS3KeyReferencedElsewhere(
+  roomId: string,
+  s3Key: string,
+  excludeAssetId: string
+): Promise<boolean> {
+  const assets = await listAssets(roomId);
+  return assets.some((a) => a.assetId !== excludeAssetId && a.s3Key === s3Key);
+}

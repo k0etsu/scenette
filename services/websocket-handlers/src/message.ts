@@ -1,19 +1,40 @@
 import type { APIGatewayProxyWebsocketHandlerV2 } from "aws-lambda";
 import { ApiGatewayManagementApiClient } from "@aws-sdk/client-apigatewaymanagementapi";
+import { S3Client, HeadObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { Asset, Variable, intersects, parseClientMessage } from "@scenette/protocol";
 import { getConnectionInfo, sendTo, broadcastToRoom, listPresence } from "./connections";
 import {
   getOrCreateRoom,
   listAssets,
+  getAsset,
   putAsset,
   moveAsset,
   resizeAsset,
   updateAsset,
   deleteAsset,
+  isS3KeyReferencedElsewhere,
   setGlobalVolume,
   setVariable,
   deleteVariable,
 } from "./roomState";
+
+const s3 = new S3Client({});
+const ASSETS_BUCKET = process.env.ASSETS_BUCKET!;
+
+// Server-verified rather than trusting whatever the client claims -- the
+// client already awaited its own PUT to this exact key before sending
+// asset:add, so this HeadObject should always hit. Best-effort: a failure
+// here (S3 hiccup) shouldn't block placing the asset, it just means this
+// one asset doesn't count toward the room's storage quota until corrected
+// some other way.
+async function fetchFileSize(s3Key: string): Promise<number | undefined> {
+  try {
+    const { ContentLength } = await s3.send(new HeadObjectCommand({ Bucket: ASSETS_BUCKET, Key: s3Key }));
+    return ContentLength;
+  } catch {
+    return undefined;
+  }
+}
 
 export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   const connectionId = event.requestContext.connectionId;
@@ -63,6 +84,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
       case "asset:add": {
         const now = new Date().toISOString();
         const hidden = message.asset.hidden ?? false;
+        const fileSize = message.asset.s3Key ? await fetchFileSize(message.asset.s3Key) : undefined;
         const asset: Asset = {
           roomId: message.roomId,
           assetId: message.asset.assetId,
@@ -86,6 +108,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           paused: message.asset.paused ?? false,
           s3Key: message.asset.s3Key,
           text: message.asset.text,
+          fileSize,
           uploadedAt: now,
           lastUsedAt: now,
           keep: false,
@@ -173,7 +196,20 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
       }
 
       case "asset:delete": {
+        const existing = await getAsset(message.roomId, message.assetId);
         await deleteAsset(message.roomId, message.assetId);
+        // Only physically delete the S3 object once nothing else still
+        // points at it -- duplicateAsset() (control-ui) can leave a second
+        // asset row referencing the same s3Key, and deleting the object out
+        // from under that still-live duplicate would silently break it.
+        if (existing?.s3Key && !(await isS3KeyReferencedElsewhere(message.roomId, existing.s3Key, message.assetId))) {
+          await s3.send(new DeleteObjectCommand({ Bucket: ASSETS_BUCKET, Key: existing.s3Key })).catch((err) => {
+            // Best-effort -- the asset is already gone from the room either
+            // way; a stray S3 object left behind is a retention-job cleanup
+            // problem, not a reason to fail this delete for the user.
+            console.error("Failed to delete S3 object on asset delete", err);
+          });
+        }
         await broadcastToRoom(apiGw, message.roomId, {
           type: "asset:deleted",
           assetId: message.assetId,

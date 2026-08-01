@@ -43,6 +43,11 @@ export interface Asset {
   // Media assets reference their S3 object; text assets carry inline content instead.
   s3Key?: string;
   text?: string;
+  // Bytes, server-verified via an S3 HeadObject right after asset:add (see
+  // message.ts) rather than trusted from the client -- used to enforce the
+  // per-room storage quota (see upload-url). Absent for text assets and for
+  // any asset added before this field existed.
+  fileSize?: number;
   uploadedAt: string;
   lastUsedAt?: string;
   keep: boolean;

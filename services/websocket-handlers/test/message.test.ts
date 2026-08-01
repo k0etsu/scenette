@@ -1,16 +1,19 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { ApiGatewayManagementApiClient, PostToConnectionCommand } from "@aws-sdk/client-apigatewaymanagementapi";
+import { S3Client, HeadObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import type { APIGatewayProxyWebsocketEventV2 } from "aws-lambda";
 import { handler } from "../src/message";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const apiGwMock = mockClient(ApiGatewayManagementApiClient);
+const s3Mock = mockClient(S3Client);
 
 beforeEach(() => {
   ddbMock.reset();
   apiGwMock.reset();
+  s3Mock.reset();
 });
 
 function event(body: unknown): APIGatewayProxyWebsocketEventV2 {
@@ -92,5 +95,133 @@ describe("message handler -- write-action gate", () => {
     const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
     const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
     expect(payload).toEqual({ type: "error", message: "Not connected to this room" });
+  });
+});
+
+describe("message handler -- asset:add server-verifies fileSize", () => {
+  it("HeadObjects the uploaded s3Key and stores the real ContentLength as fileSize", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(PutCommand).resolves({});
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+    s3Mock.on(HeadObjectCommand).resolves({ ContentLength: 123456 });
+
+    await handler(event({ ...assetAddMessage, asset: { ...assetAddMessage.asset, s3Key: "r1/a1/photo.png" } }), {} as any, undefined as any);
+
+    const headCall = s3Mock.commandCalls(HeadObjectCommand)[0];
+    expect(headCall.args[0].input).toMatchObject({ Key: "r1/a1/photo.png" });
+    const putCall = ddbMock.commandCalls(PutCommand)[0];
+    expect(putCall.args[0].input.Item?.fileSize).toBe(123456);
+  });
+
+  it("leaves fileSize undefined (doesn't fail the add) if the HeadObject call errors", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(PutCommand).resolves({});
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+    s3Mock.on(HeadObjectCommand).rejects(new Error("NotFound"));
+
+    const res: any = await handler(
+      event({ ...assetAddMessage, asset: { ...assetAddMessage.asset, s3Key: "r1/a1/photo.png" } }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(res.statusCode).toBe(200);
+    const putCall = ddbMock.commandCalls(PutCommand)[0];
+    expect(putCall.args[0].input.Item?.fileSize).toBeUndefined();
+  });
+
+  it("skips the HeadObject entirely for a text asset (no s3Key)", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(PutCommand).resolves({});
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(
+      event({
+        action: "asset:add",
+        roomId: "r1",
+        asset: { assetId: "t1", type: "text", x: 0, y: 0, width: 100, height: 50, text: "hi" },
+      }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(s3Mock.commandCalls(HeadObjectCommand)).toHaveLength(0);
+  });
+});
+
+describe("message handler -- asset:delete cleans up S3", () => {
+  it("deletes the S3 object when no other asset in the room shares its s3Key", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock
+      .on(GetCommand, { Key: { roomId: "r1", assetId: "a1" } })
+      .resolves({ Item: { roomId: "r1", assetId: "a1", s3Key: "r1/a1/photo.png" } });
+    ddbMock.on(DeleteCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({ Items: [] }); // no other asset references this s3Key
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+    s3Mock.on(DeleteObjectCommand).resolves({});
+
+    await handler(
+      event({ action: "asset:delete", roomId: "r1", assetId: "a1" }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(s3Mock.commandCalls(DeleteObjectCommand)).toHaveLength(1);
+    expect(s3Mock.commandCalls(DeleteObjectCommand)[0].args[0].input.Key).toBe("r1/a1/photo.png");
+  });
+
+  it("does NOT delete the S3 object when a duplicate asset still references the same s3Key", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock
+      .on(GetCommand, { Key: { roomId: "r1", assetId: "a1" } })
+      .resolves({ Item: { roomId: "r1", assetId: "a1", s3Key: "r1/a1/photo.png" } });
+    ddbMock.on(DeleteCommand).resolves({});
+    // The duplicate ("a1-copy") still references the same s3Key.
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { roomId: "r1", assetId: "a1", s3Key: "r1/a1/photo.png" },
+        { roomId: "r1", assetId: "a1-copy", s3Key: "r1/a1/photo.png" },
+      ],
+    });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(
+      event({ action: "asset:delete", roomId: "r1", assetId: "a1" }),
+      {} as any,
+      undefined as any
+    );
+
+    // Regression: the room's DDB row for "a1" is gone either way, but the
+    // physical S3 object must survive since "a1-copy" still points at it --
+    // deleting it here would silently break that still-live duplicate.
+    expect(s3Mock.commandCalls(DeleteObjectCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(1);
+  });
+
+  it("does not touch S3 at all when deleting a text asset (no s3Key)", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock
+      .on(GetCommand, { Key: { roomId: "r1", assetId: "t1" } })
+      .resolves({ Item: { roomId: "r1", assetId: "t1", text: "hi" } });
+    ddbMock.on(DeleteCommand).resolves({});
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(
+      event({ action: "asset:delete", roomId: "r1", assetId: "t1" }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(s3Mock.commandCalls(DeleteObjectCommand)).toHaveLength(0);
+    // The only Query here is broadcastToRoom's connections-table fan-out --
+    // no s3Key means isS3KeyReferencedElsewhere (an assets-table Query) is
+    // never even called.
+    expect(ddbMock.commandCalls(QueryCommand).every((c) => c.args[0].input.TableName === "test-connections")).toBe(true);
   });
 });
