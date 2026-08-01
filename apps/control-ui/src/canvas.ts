@@ -138,6 +138,15 @@ export class CanvasView {
     this.world.dataset.role = "world";
     this.world.style.position = "absolute";
     this.world.style.transformOrigin = "0 0";
+    // Hidden until the first real centerOnViewport() runs (see setViewport()
+    // below) -- otherwise this paints for a frame at the default pan:0/
+    // zoom:1 transform (viewport rect pinned to the world's top-left
+    // origin) before the deferred centering pass repositions it, which
+    // showed up as a visible top-left-then-jump-to-center flash on every
+    // page load/refresh. visibility (unlike display) doesn't affect layout,
+    // so this doesn't interfere with the container-size read centering
+    // depends on.
+    this.world.style.visibility = "hidden";
     this.container.appendChild(this.world);
 
     this.viewportRect = document.createElement("div");
@@ -211,7 +220,10 @@ export class CanvasView {
     const containerHeight = this.container.clientHeight;
     // Not laid out yet (e.g. hidden by a display:none ancestor) -- nothing
     // sane to compute against, so leave the default pan/zoom in place.
-    if (containerWidth <= 0 || containerHeight <= 0) return;
+    if (containerWidth <= 0 || containerHeight <= 0) {
+      this.world.style.visibility = "visible";
+      return;
+    }
 
     const zoomByWidth = (containerWidth * VIEWPORT_WIDTH_FRACTION) / this.viewport.width;
     const zoomByHeight = containerHeight / this.viewport.height;
@@ -223,6 +235,9 @@ export class CanvasView {
     this.pan.y = containerHeight / 2 - viewportCenterY * this.zoom;
 
     this.applyWorldTransform();
+    // Reveal only now that the transform reflects the centered position --
+    // this is the frame the user should actually see first.
+    this.world.style.visibility = "visible";
   }
 
   getViewport(): Viewport {

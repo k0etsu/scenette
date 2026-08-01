@@ -12,6 +12,19 @@
         color: #eee;
         font-family: system-ui, sans-serif;
         overflow: hidden;
+        /* A fast mouse drag over asset labels/panel text (dragging an
+           asset, panning, or just moving quickly across the sidebar)
+           otherwise starts a native text selection, which paints every
+           text node the cursor crosses with the browser's blue selection
+           highlight -- distracting and not an actual feature here, since
+           there's no text in this app worth copy-selecting outside of
+           form fields. Re-enabled explicitly on inputs/textareas below. */
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      input, textarea {
+        user-select: text;
+        -webkit-user-select: text;
       }
       #app-view {
         display: none;
