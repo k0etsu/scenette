@@ -27,6 +27,19 @@ describe("StreamPreviewPanel -- visibility and positioning", () => {
     expect(overlay.style.display).toBe("none");
   });
 
+  it("draws a border on the overlay itself, box-sizing: border-box, so it's a self-consistent boundary", () => {
+    new StreamPreviewPanel(root, overlay, settingsModal);
+    // Regression: previously relied on canvas.ts's own dashed viewport-rect
+    // line (a *different* element) to visually confirm the overlay's
+    // bounds -- any mismatch between that element's border-box math and
+    // this one's made the preview look like it didn't fill (or overflowed
+    // past) the "real" boundary. Drawing the border directly on this same
+    // element, with border-box so the border doesn't add extra size beyond
+    // the rect, removes that cross-element alignment risk entirely.
+    expect(overlay.style.boxSizing).toBe("border-box");
+    expect(overlay.style.border).not.toBe("");
+  });
+
   it("shows the overlay once embed is checked", () => {
     new StreamPreviewPanel(root, overlay, settingsModal);
     checkbox("embed").checked = true;
@@ -110,7 +123,6 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
   });
 });
 
-const OVERSCAN = 1.08; // must match streamPreview.ts's own OVERSCAN constant
 const NATIVE_WIDTH = 1920; // must match streamPreview.ts's own NATIVE_WIDTH/HEIGHT
 const NATIVE_HEIGHT = 1080;
 
@@ -147,14 +159,14 @@ describe("StreamPreviewPanel -- fills the rect via transform scale, not by resiz
     }
   });
 
-  it("scales to exactly OVERSCAN when the rect is already native-sized (16:9, 1920x1080)", () => {
+  it("scales to exactly 1 when the rect is already native-sized (16:9, 1920x1080)", () => {
     const panel = new StreamPreviewPanel(root, overlay, settingsModal);
     checkbox("embed").checked = true;
     checkbox("embed").dispatchEvent(new Event("change"));
 
     panel.setScreenRect({ left: 0, top: 0, width: 1920, height: 1080 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    expect(scaleOf(iframe)).toBeCloseTo(OVERSCAN, 5);
+    expect(scaleOf(iframe)).toBeCloseTo(1, 5);
   });
 
   it("scales down proportionally when zoomed out to a small on-screen rect", () => {
@@ -165,21 +177,24 @@ describe("StreamPreviewPanel -- fills the rect via transform scale, not by resiz
     // Half native size, still exactly 16:9.
     panel.setScreenRect({ left: 0, top: 0, width: 960, height: 540 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    expect(scaleOf(iframe)).toBeCloseTo(0.5 * OVERSCAN, 5);
+    expect(scaleOf(iframe)).toBeCloseTo(0.5, 5);
   });
 
-  it("uses the larger of the two axis ratios (cover, not contain) when the rect's aspect differs from 16:9", () => {
+  it("uses the smaller of the two axis ratios (contain, not cover) when the rect's aspect differs from 16:9", () => {
     const panel = new StreamPreviewPanel(root, overlay, settingsModal);
     checkbox("embed").checked = true;
     checkbox("embed").dispatchEvent(new Event("change"));
 
     // Square rect: height ratio (1000/1080 ≈ 0.926) is larger than width
-    // ratio (1000/1920 ≈ 0.521) -- height is the binding constraint, so
-    // the scale must be large enough to cover it, or the video would fall
-    // short vertically even though width alone would already be covered.
+    // ratio (1000/1920 ≈ 0.521) -- width is the binding constraint here,
+    // since using the larger (height) ratio would make the video's
+    // native-16:9 width exceed the rect's own width, overlapping past its
+    // left/right edges. Landing at most slightly short (a thin letterbox
+    // on the vertical axis) rather than overlapping is the deliberate
+    // choice -- see applyRect()'s comment.
     panel.setScreenRect({ left: 0, top: 0, width: 1000, height: 1000 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    const expectedScale = Math.max(1000 / NATIVE_WIDTH, 1000 / NATIVE_HEIGHT) * OVERSCAN;
+    const expectedScale = Math.min(1000 / NATIVE_WIDTH, 1000 / NATIVE_HEIGHT);
     expect(scaleOf(iframe)).toBeCloseTo(expectedScale, 5);
   });
 

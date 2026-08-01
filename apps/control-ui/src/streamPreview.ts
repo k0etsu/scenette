@@ -31,16 +31,6 @@ const DEFAULT_SETTINGS: StreamPreviewSettings = { platform: "twitch", twitchChan
 const NATIVE_WIDTH = 1920;
 const NATIVE_HEIGHT = 1080;
 
-// A real broadcast's encoded aspect ratio isn't always *exactly* 16:9 (and
-// Twitch's own player page reserves a sliver of its own layout/padding
-// around the video canvas that isn't part of the video itself), so scaling
-// purely to cover the rect still left a visible sliver of the dashed
-// viewport border showing on one edge. This adds a fixed overscan margin
-// on top of the computed cover scale so the video always bleeds slightly
-// past every edge instead of landing exactly (or slightly short of) flush
-// -- trading an imperceptible extra crop for a guaranteed full fill.
-const OVERSCAN = 1.08;
-
 function loadSettings(): StreamPreviewSettings {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -149,6 +139,15 @@ export class StreamPreviewPanel {
     this.overlay.style.position = "absolute";
     this.overlay.style.overflow = "hidden";
     this.overlay.style.display = "none";
+    this.overlay.style.boxSizing = "border-box";
+    // A crisp, self-consistent boundary drawn on the exact same element
+    // that's positioned to the viewport rect -- matches the reference
+    // tool's solid outline. Deliberately not relying on canvas.ts's own
+    // dashed viewport-rect line to visually confirm the overlay's bounds:
+    // that's a *different* element with its own border-box math, and any
+    // small mismatch between the two was exactly what made the preview
+    // look like it didn't fill (or overflowed past) the "right" boundary.
+    this.overlay.style.border = "2px solid rgba(245, 240, 225, 0.9)";
     this.iframe = document.createElement("iframe");
     // Fixed native size, never resized directly -- see NATIVE_WIDTH's
     // comment for why. applyRect() only ever adjusts the CSS *transform*
@@ -183,14 +182,21 @@ export class StreamPreviewPanel {
     this.overlay.style.width = `${rect.width}px`;
     this.overlay.style.height = `${rect.height}px`;
 
-    // Standard "cover" scale: the larger of the two ratios, so the
-    // native-sized iframe (after scaling) covers *both* dimensions of
-    // `rect`, not just one -- then the fixed OVERSCAN margin on top
-    // guarantees it fully covers every edge rather than landing exactly
-    // (or slightly short of) flush. transform (not width/height) is what
-    // actually resizes the iframe on screen -- see NATIVE_WIDTH's comment
-    // for why that distinction is the whole point of this rewrite.
-    const scale = Math.max(rect.width / NATIVE_WIDTH, rect.height / NATIVE_HEIGHT) * OVERSCAN;
+    // "contain" scale: the *smaller* of the two ratios, so the native-sized
+    // iframe (after scaling) never exceeds either dimension of `rect`.
+    // Previously used the larger ratio ("cover", deliberately overscanned
+    // to guarantee no gap) -- but a real broadcast's encoded aspect isn't
+    // always exactly 16:9, so the crop math could still land a hair
+    // off on one edge depending on rounding, which read as the embed
+    // overlapping the boundary on one side while falling short on
+    // another. Landing at most slightly short (a thin, symmetric letterbox
+    // bar on one axis) is a far less confusing failure mode than an
+    // asymmetric overlap/gap combination -- and the border above always
+    // marks the *true* rect regardless of how the video itself fits inside
+    // it. transform (not width/height) is what actually resizes the iframe
+    // on screen -- see NATIVE_WIDTH's comment for why that distinction is
+    // the whole point of this rewrite.
+    const scale = Math.min(rect.width / NATIVE_WIDTH, rect.height / NATIVE_HEIGHT);
     this.iframe.style.transform = `translate(-50%, -50%) scale(${scale})`;
   }
 

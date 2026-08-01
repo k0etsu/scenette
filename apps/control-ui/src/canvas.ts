@@ -144,6 +144,15 @@ export class CanvasView {
     this.viewportRect.dataset.role = "viewport-rect";
     this.viewportRect.style.position = "absolute";
     this.viewportRect.style.border = "2px dashed rgba(255,255,255,0.6)";
+    // content-box (the default) draws the border *outside* width/height,
+    // so this rect's true on-screen footprint was 2px-per-side larger than
+    // (viewport.x/y/width/height) -- a mismatch the stream-preview overlay
+    // (sized from getViewportScreenRect(), which has no border to account
+    // for) had no way to know about, leaving it consistently short of this
+    // rect's actual dashed-line edge. border-box makes the border draw
+    // *inside* width/height instead, so this element's box exactly matches
+    // the viewport's own coordinates with no hidden offset.
+    this.viewportRect.style.boxSizing = "border-box";
     this.viewportRect.style.pointerEvents = "none";
     this.world.appendChild(this.viewportRect);
 
