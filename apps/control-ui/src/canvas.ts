@@ -182,7 +182,18 @@ export class CanvasView {
       this.handles[corner] = handle;
     }
 
-    this.applyWorldTransform();
+    // Suppressed here: this fires at the default pan:0/zoom:1 transform,
+    // before the deferred first centerOnViewport() pass (see setViewport()
+    // below) has had a chance to run. Firing onViewportTransformChanged with
+    // that rect anyway made the stream-preview panel's always-on-top
+    // boundary -- a *separate* element from this.world, so hiding the world
+    // alone (see setViewport()'s comment) didn't cover it -- position itself
+    // at the top-left corner for a frame before jumping to center, matching
+    // the reported flash exactly. The callback fires normally from every
+    // subsequent applyWorldTransform() call, including the one inside
+    // centerOnViewport() itself, so real consumers still get their first
+    // rect -- just the already-centered one, never this transient one.
+    this.applyWorldTransform(true);
     this.bindContainerEvents();
     this.bindKeyboard();
   }
@@ -808,8 +819,9 @@ export class CanvasView {
     }
   }
 
-  private applyWorldTransform(): void {
+  private applyWorldTransform(suppressCallback = false): void {
     this.world.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.zoom})`;
+    if (suppressCallback) return;
     // Passes the rect directly rather than letting the callback call back
     // into this CanvasView instance -- this fires from within the
     // constructor itself (the initial applyWorldTransform() call), before

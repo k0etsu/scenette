@@ -167,9 +167,15 @@ export class StreamPreviewPanel {
     });
 
     this.overlay.style.position = "absolute";
-    // Always visible -- see the class doc. Only the iframe-vs-placeholder
-    // choice inside it (see render()) responds to the "embed" checkbox.
+    // Always visible once positioned -- see the class doc. Only the
+    // iframe-vs-placeholder choice inside it (see render()) responds to the
+    // "embed" checkbox. Hidden (visibility, not display -- see borderEl's
+    // comment below) until the first setScreenRect() call so this never
+    // paints at whatever default top:0/left:0 static position it'd
+    // otherwise fall back to before CanvasView's first real (already-
+    // centered) rect arrives.
     this.overlay.style.display = "block";
+    this.overlay.style.visibility = "hidden";
 
     // A single fixed-native-size wrapper holds the placeholder and the
     // iframe as plain 100%-filling children; only the wrapper itself is
@@ -236,6 +242,17 @@ export class StreamPreviewPanel {
     // overlay's own wrapper, so the two always land in perfect agreement.
     this.borderEl.style.position = "absolute";
     this.borderEl.style.display = "block";
+    // Regression: CanvasView used to fire onViewportTransformChanged
+    // synchronously during construction with the *uncentered* default
+    // rect (pan:0/zoom:1), before its own deferred first-centering pass
+    // completed -- setScreenRect() applied that rect immediately, so this
+    // boundary (and the overlay above) rendered pinned to the top-left
+    // corner for a frame before jumping to center. CanvasView no longer
+    // fires that premature callback, but hiding here too (rather than
+    // relying solely on the caller) means this element is correct by
+    // construction even if some other caller ever calls setScreenRect
+    // before a real rect is known. Revealed in applyRect() below.
+    this.borderEl.style.visibility = "hidden";
     this.borderWrapper = document.createElement("div");
     this.borderWrapper.style.position = "absolute";
     this.borderWrapper.style.top = "0";
@@ -272,10 +289,12 @@ export class StreamPreviewPanel {
     this.overlay.style.left = `${rect.left}px`;
     this.overlay.style.top = `${rect.top}px`;
     this.wrapper.style.transform = `scale(${scale})`;
+    this.overlay.style.visibility = "visible";
 
     this.borderEl.style.left = `${rect.left}px`;
     this.borderEl.style.top = `${rect.top}px`;
     this.borderWrapper.style.transform = `scale(${scale})`;
+    this.borderEl.style.visibility = "visible";
   }
 
   private render(): void {
