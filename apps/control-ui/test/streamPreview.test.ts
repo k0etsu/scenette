@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { StreamPreviewPanel } from "../src/streamPreview";
 
 let root: HTMLElement;
@@ -82,6 +82,75 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
     slider.value = "40";
     slider.dispatchEvent(new Event("input"));
     expect(overlay.style.opacity).toBe("0.4");
+  });
+
+  it("does not reassign iframe.src on a later render (e.g. an opacity change), which would reload and pause the embed", () => {
+    const srcSetterSpy = vi.spyOn(window.HTMLIFrameElement.prototype, "src", "set");
+    new StreamPreviewPanel(root, overlay, settingsModal);
+    root.querySelector('[data-role="settings"]')!.dispatchEvent(new Event("click"));
+    (settingsModal.querySelector('[data-role="twitch-channel"]') as HTMLInputElement).value = "shroud";
+    settingsModal.querySelector('[data-role="save"]')!.dispatchEvent(new Event("click"));
+
+    checkbox("embed").checked = true;
+    checkbox("embed").dispatchEvent(new Event("change"));
+    const assignCountAfterFirstLoad = srcSetterSpy.mock.calls.length;
+    expect(assignCountAfterFirstLoad).toBeGreaterThan(0);
+
+    const slider = root.querySelector('[data-role="opacity"]') as HTMLInputElement;
+    slider.value = "50";
+    slider.dispatchEvent(new Event("input"));
+
+    // Regression: previously compared the freshly-computed URL against
+    // `iframe.src` read back from the DOM -- a real embed page rewrites
+    // that after load (session params, redirects), so the comparison
+    // always looked like a "new" URL and reassigned src on every render,
+    // reloading (and pausing) the embed on every single opacity tick.
+    expect(srcSetterSpy.mock.calls.length).toBe(assignCountAfterFirstLoad);
+    srcSetterSpy.mockRestore();
+  });
+});
+
+describe("StreamPreviewPanel -- fills the rect despite the video's fixed 16:9 aspect", () => {
+  it("leaves the iframe at 100%/100% when the rect is already exactly 16:9", () => {
+    const panel = new StreamPreviewPanel(root, overlay, settingsModal);
+    checkbox("embed").checked = true;
+    checkbox("embed").dispatchEvent(new Event("change"));
+
+    panel.setScreenRect({ left: 0, top: 0, width: 1920, height: 1080 });
+    const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe.style.width).toBe("100%");
+    expect(iframe.style.height).toBe("100%");
+  });
+
+  it("oversizes height (not width) when the rect is wider than 16:9, so no horizontal gap is left", () => {
+    const panel = new StreamPreviewPanel(root, overlay, settingsModal);
+    checkbox("embed").checked = true;
+    checkbox("embed").dispatchEvent(new Event("change"));
+
+    // 32:9 rect -- twice as wide as the video's own aspect.
+    panel.setScreenRect({ left: 0, top: 0, width: 1600, height: 450 });
+    const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe.style.width).toBe("100%");
+    expect(iframe.style.height).toBe("200%");
+  });
+
+  it("oversizes width (not height) when the rect is taller/narrower than 16:9 (e.g. a square viewport)", () => {
+    const panel = new StreamPreviewPanel(root, overlay, settingsModal);
+    checkbox("embed").checked = true;
+    checkbox("embed").dispatchEvent(new Event("change"));
+
+    panel.setScreenRect({ left: 0, top: 0, width: 1000, height: 1000 });
+    const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe.style.height).toBe("100%");
+    expect(parseFloat(iframe.style.width)).toBeCloseTo((16 / 9) * 100, 1);
+  });
+
+  it("keeps the iframe centered via a translate transform, independent of rect size", () => {
+    new StreamPreviewPanel(root, overlay, settingsModal);
+    const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe.style.top).toBe("50%");
+    expect(iframe.style.left).toBe("50%");
+    expect(iframe.style.transform).toBe("translate(-50%, -50%)");
   });
 });
 

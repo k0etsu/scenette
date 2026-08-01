@@ -12,6 +12,13 @@ interface StreamPreviewSettings {
 
 const DEFAULT_SETTINGS: StreamPreviewSettings = { platform: "twitch", twitchChannel: "", youtubeChannelId: "" };
 
+// Twitch/YouTube's embedded player always preserves its own ~16:9 aspect
+// ratio internally (letterboxing to fit whatever size iframe it's given,
+// the same way a plain <video> would) -- there's no way to tell it to
+// stretch or crop instead. Assumed here so the iframe can be deliberately
+// oversized in applyRect() to compensate.
+const VIDEO_ASPECT = 16 / 9;
+
 function loadSettings(): StreamPreviewSettings {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -45,6 +52,14 @@ function embedUrl(settings: StreamPreviewSettings): string | undefined {
 export class StreamPreviewPanel {
   private settings: StreamPreviewSettings;
   private lastScreenRect?: { left: number; top: number; width: number; height: number };
+  // Tracked separately from iframe.src -- both Twitch's and YouTube's
+  // embed pages rewrite the URL after load (session params, redirects),
+  // so reading iframe.src back and comparing against a freshly-computed
+  // url is never equal after the first load. That made every render()
+  // (including one fired by every opacity-slider "input" event) look like
+  // a genuinely new URL and reassign iframe.src, reloading -- and pausing
+  // -- the embed on every single drag tick.
+  private lastAssignedSrc?: string;
 
   private readonly embedCheckbox: HTMLInputElement;
   private readonly interactiveCheckbox: HTMLInputElement;
@@ -113,8 +128,14 @@ export class StreamPreviewPanel {
     this.overlay.style.overflow = "hidden";
     this.overlay.style.display = "none";
     this.iframe = document.createElement("iframe");
-    this.iframe.style.width = "100%";
-    this.iframe.style.height = "100%";
+    // Sized precisely by applyRect() on every rect update, not left at a
+    // flat 100%/100% -- see applyRect() for why (filling an arbitrary-
+    // aspect-ratio rect with a fixed-16:9 video needs deliberate
+    // oversizing, not a plain 100% fit, or a gap is left on one axis).
+    this.iframe.style.position = "absolute";
+    this.iframe.style.top = "50%";
+    this.iframe.style.left = "50%";
+    this.iframe.style.transform = "translate(-50%, -50%)";
     this.iframe.style.border = "none";
     this.iframe.allow = "autoplay";
     this.overlay.appendChild(this.iframe);
@@ -136,6 +157,25 @@ export class StreamPreviewPanel {
     this.overlay.style.top = `${rect.top}px`;
     this.overlay.style.width = `${rect.width}px`;
     this.overlay.style.height = `${rect.height}px`;
+
+    // The video itself always keeps VIDEO_ASPECT regardless of the iframe
+    // box's own shape (see VIDEO_ASPECT's comment) -- to make it actually
+    // fill `rect` (an object-fit: cover effect, which doesn't exist for
+    // iframes since we don't control the document inside one) rather than
+    // letterboxing with a visible gap, the iframe is deliberately made
+    // larger than the rect on whichever axis wouldn't otherwise be
+    // covered, then centered and clipped by the overlay's overflow:hidden.
+    const rectAspect = rect.width / rect.height;
+    if (rectAspect > VIDEO_ASPECT) {
+      // rect is wider than the video -- height is the binding constraint,
+      // so stretch height until the video's own 16:9 width covers rect's
+      // full width too.
+      this.iframe.style.width = "100%";
+      this.iframe.style.height = `${(rectAspect / VIDEO_ASPECT) * 100}%`;
+    } else {
+      this.iframe.style.height = "100%";
+      this.iframe.style.width = `${(VIDEO_ASPECT / rectAspect) * 100}%`;
+    }
   }
 
   private render(): void {
@@ -151,7 +191,10 @@ export class StreamPreviewPanel {
     if (this.lastScreenRect) this.applyRect(this.lastScreenRect);
 
     const url = embedUrl(this.settings);
-    if (url && this.iframe.src !== url) this.iframe.src = url;
+    if (url && this.lastAssignedSrc !== url) {
+      this.iframe.src = url;
+      this.lastAssignedSrc = url;
+    }
   }
 
   private saveSettings(): void {
