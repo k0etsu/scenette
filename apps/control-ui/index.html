@@ -93,7 +93,7 @@
       #sidebar-top {
         border-bottom: 1px solid #333;
       }
-      #sound-panel, #objects-panel, #connected-users-panel, #variables-panel, #properties-panel {
+      #stream-preview-panel, #sound-panel, #objects-panel, #connected-users-panel, #variables-panel, #properties-panel {
         flex: 0 0 auto;
         display: flex;
         flex-direction: column;
@@ -324,6 +324,97 @@
         overflow: hidden;
         background: #14151a;
         cursor: default;
+      }
+      #canvas-inner {
+        position: absolute;
+        inset: 0;
+        /* Must outrank #stream-preview-overlay's z-index (both are
+           position:absolute siblings under #canvas-container) so canvas
+           assets render *in front of* the stream preview, not behind it --
+           the whole point of the preview is to see assets composited over
+           the real stream, not have it cover them. */
+        z-index: 10;
+      }
+      /* Sibling of #canvas-inner (not a child of it) so CanvasView's own
+         dispose()-on-room-switch (which wipes #canvas-inner's contents
+         entirely) never touches this -- see streamPreview.ts. Below
+         #canvas-inner's z-index so assets/embed cover the placeholder
+         shown here when no channel is configured. */
+      #stream-preview-overlay {
+        display: none;
+        pointer-events: none;
+        z-index: 1;
+      }
+      /* A separate element (not nested inside #stream-preview-overlay,
+         which sits *below* canvas assets) so its always-on-top boundary
+         line can render *above* assets too -- the whole point is staying
+         visible even when an asset is dragged across the boundary. */
+      #stream-preview-border {
+        display: none;
+        pointer-events: none;
+        z-index: 20;
+      }
+      .stream-preview-border-strip {
+        position: absolute;
+        backdrop-filter: invert(1);
+        -webkit-backdrop-filter: invert(1);
+      }
+      .stream-preview-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+        color: #ccc;
+        margin-bottom: 6px;
+      }
+      .stream-preview-row label {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+      }
+      .stream-preview-row select {
+        margin-left: auto;
+        background: #1e1f24;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        font-size: 12px;
+        padding: 2px 4px;
+      }
+      #stream-settings-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 210;
+        background: rgba(0, 0, 0, 0.5);
+        align-items: center;
+        justify-content: center;
+      }
+      .stream-settings-content {
+        width: 320px;
+        background: #26272e;
+        border: 1px solid #444;
+        border-radius: 8px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+        padding: 12px;
+        box-sizing: border-box;
+      }
+      .stream-settings-content input[type="text"] {
+        width: 100%;
+        box-sizing: border-box;
+        background: #1e1f24;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 13px;
+        margin-bottom: 4px;
+      }
+      .stream-settings-content .toolbar-button {
+        width: 100%;
+        margin-top: 8px;
+        justify-content: center;
       }
       #canvas-container img,
       #canvas-container video {
@@ -582,6 +673,7 @@
       <div id="main-area">
         <div id="sidebar">
           <div id="sidebar-top">
+            <div id="stream-preview-panel"></div>
             <div id="sound-panel"></div>
             <div id="objects-panel"></div>
             <div id="connected-users-panel"></div>
@@ -591,7 +683,11 @@
             <div id="properties-panel"></div>
           </div>
         </div>
-        <div id="canvas-container"></div>
+        <div id="canvas-container">
+          <div id="canvas-inner"></div>
+          <div id="stream-preview-overlay"></div>
+          <div id="stream-preview-border"></div>
+        </div>
       </div>
       <div id="context-menu">
         <div class="context-menu-header">Create</div>
@@ -599,6 +695,7 @@
         <button id="context-menu-media" type="button">Media</button>
       </div>
       <div id="access-modal"></div>
+      <div id="stream-settings-modal"></div>
     </div>
     <script src="./main.js"></script>
   </body>

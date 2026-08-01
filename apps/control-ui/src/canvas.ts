@@ -49,6 +49,13 @@ export interface CanvasCallbacks {
   // programmatic selection via selectAsset() -- lets the sidebar's
   // properties panel track whatever's selected on the canvas, and vice versa.
   onSelectionChange: (assetId: string | undefined) => void;
+  // Fires whenever pan/zoom/the viewport rect itself changes (including
+  // once synchronously during construction) -- lets a caller (the
+  // stream-preview overlay) keep something positioned exactly over the
+  // viewport rect on screen without polling every frame. Passes the rect
+  // directly rather than expecting the callback to call back into the
+  // CanvasView instance, which wouldn't exist yet on that first call.
+  onViewportTransformChanged?: (rect: { left: number; top: number; width: number; height: number }) => void;
 }
 
 // The editing surface: a world-space plane containing the (fixed, per the
@@ -136,8 +143,14 @@ export class CanvasView {
     this.viewportRect = document.createElement("div");
     this.viewportRect.dataset.role = "viewport-rect";
     this.viewportRect.style.position = "absolute";
-    this.viewportRect.style.border = "2px dashed rgba(255,255,255,0.6)";
+    this.viewportRect.style.boxSizing = "border-box";
     this.viewportRect.style.pointerEvents = "none";
+    // No visible border -- the stream-preview panel's own always-on-top
+    // boundary (see streamPreview.ts's #stream-preview-border) is now the
+    // one visual indicator of the viewport rect, superseding this
+    // element's old dashed line. This div is kept (rather than removed
+    // entirely) purely to track the rect's position/size in the DOM in
+    // case something else needs it later; it paints nothing itself.
     this.world.appendChild(this.viewportRect);
 
     this.handles = {} as Record<Corner, HTMLElement>;
@@ -782,6 +795,26 @@ export class CanvasView {
 
   private applyWorldTransform(): void {
     this.world.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.zoom})`;
+    // Passes the rect directly rather than letting the callback call back
+    // into this CanvasView instance -- this fires from within the
+    // constructor itself (the initial applyWorldTransform() call), before
+    // the caller's own `const canvas = new CanvasView(...)` has finished
+    // assigning, so a callback that tried to reference that outer `canvas`
+    // binding would hit its temporal dead zone.
+    this.callbacks.onViewportTransformChanged?.(this.getViewportScreenRect());
+  }
+
+  // The viewport rect's on-screen bounding box, in the same coordinate
+  // space as the container itself (i.e. suitable for positioning an
+  // absolutely-positioned sibling of the container with plain left/top/
+  // width/height) -- world-space rect run through the current pan/zoom.
+  getViewportScreenRect(): { left: number; top: number; width: number; height: number } {
+    return {
+      left: this.viewport.x * this.zoom + this.pan.x,
+      top: this.viewport.y * this.zoom + this.pan.y,
+      width: this.viewport.width * this.zoom,
+      height: this.viewport.height * this.zoom,
+    };
   }
 
   // Media lives in the assets bucket/distribution, a completely separate
