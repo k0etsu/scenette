@@ -564,10 +564,18 @@ export class CanvasView {
   private readonly handleContainerContextMenu = (event: MouseEvent): void => {
     event.preventDefault();
     const rect = this.container.getBoundingClientRect();
+    // Container-relative -- correct input for screenToWorld's pan/zoom math,
+    // which is defined in the container's own local coordinate space.
     const screenX = event.clientX - rect.left;
     const screenY = event.clientY - rect.top;
     const world = this.screenToWorld(screenX, screenY);
-    this.callbacks.onContextMenu(world.x, world.y, screenX, screenY);
+    // event.clientX/clientY (viewport-relative), not the container-relative
+    // screenX/screenY above -- #context-menu is position: fixed, which
+    // positions against the viewport, not this container. Passing the
+    // container-relative values here made the menu render offset from the
+    // actual click by exactly the container's own on-page position (the
+    // sidebar's width, the toolbar's height).
+    this.callbacks.onContextMenu(world.x, world.y, event.clientX, event.clientY);
   };
 
   private readonly handleContainerWheel = (event: WheelEvent): void => {

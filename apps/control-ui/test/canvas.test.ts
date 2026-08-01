@@ -72,6 +72,14 @@ function worldVisibility(container: HTMLElement): string {
   return (container.querySelector('[data-role="world"]') as HTMLElement).style.visibility;
 }
 
+// jsdom's getBoundingClientRect always returns all-zero -- this simulates
+// the container actually being offset on the page (e.g. behind a sidebar
+// and toolbar), the way it would be in a real browser.
+function stubBoundingRect(el: HTMLElement, left: number, top: number): void {
+  el.getBoundingClientRect = () =>
+    ({ left, top, right: left, bottom: top, width: 0, height: 0, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+}
+
 // The initial center-on-load is deferred to the next animation frame (see
 // canvas.ts) so the forced clientWidth read doesn't block the page's first
 // paint -- tests need to let that frame run before asserting the result.
@@ -465,6 +473,28 @@ describe("setViewport auto-centering", () => {
     canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1920, height: 1080 });
     await flushFrame();
     expect(worldVisibility(container)).toBe("visible");
+  });
+});
+
+describe("right-click context menu", () => {
+  it("reports the click in viewport (page) coordinates, not container-relative ones, for #context-menu's own position:fixed CSS", () => {
+    // Regression: the container-relative screenX/screenY computed for the
+    // world-space math (screenToWorld, defined in the container's own
+    // local coordinate space) were also passed straight through as the
+    // menu's on-page position -- but #context-menu is position: fixed,
+    // which is positioned against the viewport, not this container. That
+    // made the menu render offset from the actual click by exactly the
+    // container's own on-page position (the sidebar's width, the
+    // toolbar's height).
+    const onContextMenu = vi.fn();
+    const { container } = setup({ onContextMenu });
+    stubBoundingRect(container, 280, 48);
+
+    container.dispatchEvent(
+      new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 500, clientY: 400 })
+    );
+
+    expect(onContextMenu).toHaveBeenCalledWith(220, 352, 500, 400);
   });
 });
 
