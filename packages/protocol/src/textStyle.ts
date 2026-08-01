@@ -5,6 +5,18 @@ import { Asset } from "./asset";
 // styling through resolveTextStyle() rather than falling back to its own
 // hardcoded defaults, which is what caused the two to visibly diverge before
 // this field set existed (browser-source had no text-specific CSS at all).
+//
+// Every entry here must actually be loadable -- either a real font Google
+// hosts (browse/search at https://fonts.google.com, then add BOTH the
+// family name here AND a matching family=...&weight entry to the <link
+// href="https://fonts.googleapis.com/css2?..."> in *both*
+// apps/control-ui/index.html and apps/browser-source/index.html -- they
+// must stay identical, or a text asset will render with this font in one
+// app but not the other), or a font already present on essentially every
+// OS by default (only "Comic Sans MS" qualifies here, hence no matching
+// Google Fonts <link> entry for it). Don't add a name here that isn't
+// backed by one of those two -- it'll silently render as the browser's
+// default sans-serif instead of actually looking like anything distinct.
 export const TEXT_FONT_FAMILIES = [
   "Roboto",
   "Roboto Mono",
@@ -12,12 +24,7 @@ export const TEXT_FONT_FAMILIES = [
   "Comic Neue",
   "Comic Sans MS",
   "Redressed",
-  "RuneScape",
-  "Mantinia",
-  "VCR Mono",
-  "Bloody",
-  "AveriaSerifLibre",
-  "Andy Bold",
+  "Averia Serif Libre",
 ] as const;
 
 export const TEXT_FONT_WEIGHTS = ["100", "200", "300", "400", "500", "600", "700", "800", "900"] as const;
@@ -40,7 +47,29 @@ export interface ResolvedTextStyle {
   outlineWidth: number;
 }
 
-export function resolveTextStyle(asset: Asset): ResolvedTextStyle {
+// Only the text-styling fields, not a full Asset -- lets callers (e.g. a
+// brand-new asset that doesn't exist as a real Asset yet) resolve the
+// all-defaults style without needing to fabricate one.
+type TextStyleSource = Pick<
+  Asset,
+  | "fontFamily"
+  | "fontSize"
+  | "fontWeight"
+  | "textAlign"
+  | "textColor"
+  | "backgroundColor"
+  | "backgroundAlpha"
+  | "shadowEnabled"
+  | "shadowX"
+  | "shadowY"
+  | "shadowBlur"
+  | "shadowColor"
+  | "outlineEnabled"
+  | "outlineColor"
+  | "outlineWidth"
+>;
+
+export function resolveTextStyle(asset: TextStyleSource): ResolvedTextStyle {
   return {
     fontFamily: asset.fontFamily ?? "Roboto",
     fontSize: asset.fontSize ?? 24,
@@ -59,6 +88,11 @@ export function resolveTextStyle(asset: Asset): ResolvedTextStyle {
     outlineWidth: asset.outlineWidth ?? 0,
   };
 }
+
+// A brand-new text asset (before any per-asset override exists) uses
+// exactly these values -- e.g. for measuring its initial auto-fit size
+// before the asset:add round-trip even happens.
+export const DEFAULT_TEXT_STYLE: ResolvedTextStyle = resolveTextStyle({});
 
 function hexToRgba(hex: string, alpha: number): string {
   const clean = hex.replace("#", "");

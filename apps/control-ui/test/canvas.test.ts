@@ -363,6 +363,66 @@ describe("selection handles rotate with the asset", () => {
     const handle = container.querySelector('[data-role="resize-handle"][data-corner="nw"]') as HTMLElement;
     expect(handle.style.display).toBe("none");
   });
+
+  it("hides the handles entirely for a text asset -- it sizes itself to fit its own content instead", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    canvas.selectAsset("t1");
+    const handle = container.querySelector('[data-role="resize-handle"][data-corner="nw"]') as HTMLElement;
+    expect(handle.style.display).toBe("none");
+  });
+});
+
+describe("text assets size themselves to fit their content", () => {
+  it("does not force an explicit width/height on the text element -- it shrink-wraps instead", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello", width: 200, height: 50 }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    expect(div.style.width).toBe("");
+    expect(div.style.height).toBe("");
+  });
+
+  it("does not force an explicit width/height on the outer (positioned/draggable) element either", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello", width: 200, height: 50 }));
+    const el = container.querySelector('[data-asset-id="t1"]') as HTMLElement;
+    expect(el.style.width).toBe("");
+    expect(el.style.height).toBe("");
+  });
+
+  it("still applies an explicit width/height for every other asset type", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "i1", type: "image", width: 200, height: 50 }));
+    const div = document.querySelector('[data-asset-type="image"]') as HTMLElement;
+    expect(div.style.width).toBe("100%"); // fills `el`, which carries the actual px size
+  });
+
+  it("syncs the stored width/height to the measured content size once its natural size differs, via the normal resize path", () => {
+    const { canvas, callbacks } = setup();
+    // Starts with a stored size that's very unlikely to match jsdom's
+    // actual (stubbed) layout box for "hi" -- see below.
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 999, height: 999 }));
+    const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    Object.defineProperty(content, "offsetWidth", { value: 40, configurable: true });
+    Object.defineProperty(content, "offsetHeight", { value: 30, configurable: true });
+
+    canvas.patchAsset("t1", { fontSize: 32 });
+
+    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 40, 30, expect.any(Number));
+    expect(canvas.get("t1")).toMatchObject({ width: 40, height: 30 });
+  });
+
+  it("does not re-trigger a resize when the measured size hasn't actually changed", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    Object.defineProperty(content, "offsetWidth", { value: 40, configurable: true });
+    Object.defineProperty(content, "offsetHeight", { value: 30, configurable: true });
+
+    canvas.patchAsset("t1", { fontSize: 32 });
+
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+  });
 });
 
 describe("volume multipliers", () => {
@@ -404,41 +464,64 @@ describe("double-click to edit text inline", () => {
     expect(div.contentEditable).toBe("true");
   });
 
-  it("commits the edited text as a patch on blur", () => {
+  it("patches text live on every input event, not just on blur", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
     div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     div.textContent = "edited";
-    div.dispatchEvent(new FocusEvent("blur"));
+    div.dispatchEvent(new Event("input"));
 
     expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { text: "edited" }, expect.any(Number));
-    expect(div.contentEditable).not.toBe("true");
+    // Still mid-edit -- blur (not this input event) is what ends editing.
+    expect(div.contentEditable).toBe("true");
   });
 
-  it("does not send a patch on blur if the text didn't actually change", () => {
+  it("does not send a patch on an input event where the text didn't actually change", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
     div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-    div.dispatchEvent(new FocusEvent("blur"));
+    div.dispatchEvent(new Event("input"));
     expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
   });
 
-  it("reverts to the original text on Escape without sending a patch", () => {
+  it("blur ends editing without sending an additional patch (the text is already saved from the input listener)", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
     div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     div.textContent = "edited";
-    div.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    div.dispatchEvent(new Event("input"));
+    vi.mocked(callbacks.onAssetPatch).mockClear();
 
-    expect(div.textContent).toBe("hello");
+    div.dispatchEvent(new FocusEvent("blur"));
     expect(div.contentEditable).not.toBe("true");
     expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
   });
 
-  it("Enter (without Shift) blurs to commit rather than inserting a newline", () => {
+  it("Escape blurs to end editing without reverting the (already-saved) text or sending a further patch", () => {
+    // Regression: previously reverted to the pre-edit text on Escape, back
+    // when edits only committed on blur/Enter -- now that every keystroke
+    // already patches in real time, there's nothing to revert to; Escape
+    // just ends the editing session.
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    div.textContent = "edited";
+    div.dispatchEvent(new Event("input"));
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    const blurSpy = vi.spyOn(div, "blur");
+    div.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(blurSpy).toHaveBeenCalled();
+    expect(div.textContent).toBe("edited");
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+  });
+
+  it("Enter is left to its default contentEditable behavior (inserts a line break) instead of committing/blurring", () => {
     const { canvas } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
@@ -447,8 +530,9 @@ describe("double-click to edit text inline", () => {
     const blurSpy = vi.spyOn(div, "blur");
     const event = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
     div.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(true);
-    expect(blurSpy).toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
+    expect(blurSpy).not.toHaveBeenCalled();
+    expect(div.contentEditable).toBe("true");
   });
 
   it("does not start a canvas drag from a mousedown while the text is being edited", () => {

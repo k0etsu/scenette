@@ -1,6 +1,6 @@
-import { AssetAddMessage, ServerMessage } from "@scenette/protocol";
+import { AssetAddMessage, ServerMessage, DEFAULT_TEXT_STYLE } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
-import { CanvasView } from "./canvas";
+import { CanvasView, MIN_ASSET_SIZE } from "./canvas";
 import { Sidebar } from "./sidebar";
 import { SoundPanel } from "./sound";
 import { ConnectedUsersPanel } from "./connectedUsers";
@@ -10,6 +10,7 @@ import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
 import { RoomPicker } from "./roomPicker";
 import { StreamPreviewPanel } from "./streamPreview";
+import { measureTextBoxSize } from "./textMeasure";
 import {
   register,
   login,
@@ -209,8 +210,11 @@ async function main(): Promise<void> {
     if (!current) return;
     const text = "New Text";
 
-    const width = 200;
-    const height = 50;
+    // Measured up front (rather than a fixed placeholder size that only
+    // self-corrects once the user first edits it) so the box already fits
+    // "New Text" the instant it appears -- matches DEFAULT_TEXT_STYLE since
+    // no per-asset style overrides exist yet for a brand-new asset.
+    const { width, height } = measureTextBoxSize(text, DEFAULT_TEXT_STYLE, MIN_ASSET_SIZE);
     const viewport = current.canvas.getViewport();
     const pos = current.createPosition ?? {
       x: viewport.x + viewport.width / 2 - width / 2,

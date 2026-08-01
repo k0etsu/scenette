@@ -97,10 +97,11 @@ describe("textStyleToCss", () => {
 });
 
 describe("TEXT_FONT_FAMILIES / TEXT_FONT_WEIGHTS", () => {
-  it("lists the full set of selectable fonts", () => {
+  it("lists only fonts that are actually loadable -- a real Google Font, or a near-universal OS default", () => {
     expect(TEXT_FONT_FAMILIES).toContain("Roboto");
     expect(TEXT_FONT_FAMILIES).toContain("Comic Sans MS");
-    expect(TEXT_FONT_FAMILIES).toHaveLength(12);
+    expect(TEXT_FONT_FAMILIES).toContain("Averia Serif Libre");
+    expect(TEXT_FONT_FAMILIES).toHaveLength(7);
   });
 
   it("lists weights 100-900 in steps of 100", () => {

@@ -42,12 +42,18 @@ export class Sidebar {
   private assets = new Map<string, Asset>();
   private selectedAssetId?: string;
 
-  // Explicitly tracked rather than relying on document.activeElement:
-  // clicking/dragging a range input doesn't reliably focus it in every
-  // browser (mouse-driven form-control focus behavior differs across
-  // engines), so activeElement-based detection silently failed to guard
-  // the rebuild below in some browsers -- see upsertAsset.
-  private interacting = false;
+  // Two independent reasons a rebuild must be deferred (see upsertAsset):
+  // a slider mid-drag (mousedown without mouseup yet -- explicitly tracked
+  // rather than relying on document.activeElement, since clicking/dragging
+  // a range input doesn't reliably focus it in every browser), and a text
+  // field with real focus (typing in the name/text inputs, which now patch
+  // live on every keystroke -- see item 4's realtime requirement -- so the
+  // remote echo of that same keystroke arrives while still typing).
+  private draggingControl = false;
+  private focusedField = false;
+  private get interacting(): boolean {
+    return this.draggingControl || this.focusedField;
+  }
 
   private readonly objectsList: HTMLElement;
   private readonly propertiesPanel: HTMLElement;
@@ -72,9 +78,21 @@ export class Sidebar {
     this.propertiesPanel = this.propertiesPanelRoot;
     this.propertiesPanel.addEventListener("mousedown", (event) => {
       const target = event.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") this.interacting = true;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") this.draggingControl = true;
     });
     window.addEventListener("mouseup", this.handleWindowMouseUp);
+    // "focusin"/"focusout" (not "focus"/"blur", which don't bubble) so one
+    // listener on the panel covers every field rebuilt into it across
+    // renders, rather than needing to rebind per-render like the field-
+    // specific listeners in renderProperties().
+    this.propertiesPanel.addEventListener("focusin", (event) => {
+      const target = event.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") this.focusedField = true;
+    });
+    this.propertiesPanel.addEventListener("focusout", (event) => {
+      const target = event.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") this.focusedField = false;
+    });
     this.renderProperties();
   }
 
@@ -83,7 +101,7 @@ export class Sidebar {
   // so this needs a stable reference to remove in dispose() -- otherwise
   // every switch leaves the previous instance's handler still firing.
   private readonly handleWindowMouseUp = (): void => {
-    this.interacting = false;
+    this.draggingControl = false;
   };
 
   dispose(): void {
@@ -299,8 +317,11 @@ export class Sidebar {
     el<HTMLButtonElement>("duplicate").addEventListener("click", () => this.callbacks.onDuplicate(assetId));
 
     if (asset.type === "text") {
+      // "input" (not "change") so edits made here also show up live for
+      // every other view (canvas, browser-source) as the user types,
+      // matching the canvas's own inline double-click editor.
       const textArea = el<HTMLTextAreaElement>("text-content");
-      textArea.addEventListener("change", () => patch({ text: textArea.value }));
+      textArea.addEventListener("input", () => patch({ text: textArea.value }));
 
       el<HTMLInputElement>("font-size").addEventListener("change", (e) =>
         patch({ fontSize: Number((e.target as HTMLInputElement).value) })
@@ -343,9 +364,10 @@ export class Sidebar {
       });
 
       // No paired number field for this one (unlike bindSlider's usual
-      // range+number pair) -- plain input/change wiring instead.
+      // range+number pair) -- "input" (not "change") so it patches live on
+      // every drag tick, same as every other slider in the app.
       const bgAlpha = el<HTMLInputElement>("bg-alpha");
-      bgAlpha.addEventListener("change", () => patch({ backgroundAlpha: Number(bgAlpha.value) / 100 }));
+      bgAlpha.addEventListener("input", () => patch({ backgroundAlpha: Number(bgAlpha.value) / 100 }));
 
       el<HTMLInputElement>("shadow-enabled").addEventListener("change", (e) =>
         patch({ shadowEnabled: (e.target as HTMLInputElement).checked })
@@ -369,7 +391,9 @@ export class Sidebar {
       el<HTMLInputElement>("outline-color").addEventListener("change", (e) =>
         patch({ outlineColor: (e.target as HTMLInputElement).value })
       );
-      el<HTMLInputElement>("outline-width").addEventListener("change", (e) =>
+      // "input" (not "change") so it patches live on every drag tick, same
+      // as every other slider in the app.
+      el<HTMLInputElement>("outline-width").addEventListener("input", (e) =>
         patch({ outlineWidth: Number((e.target as HTMLInputElement).value) })
       );
     }
