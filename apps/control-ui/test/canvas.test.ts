@@ -441,3 +441,34 @@ describe("setViewport auto-centering", () => {
     expect(worldTransform(container)).toBe("translate(0px, 0px) scale(1)");
   });
 });
+
+describe("onViewportTransformChanged / getViewportScreenRect", () => {
+  it("fires once synchronously during construction, before any setViewport call", () => {
+    const onViewportTransformChanged = vi.fn();
+    setup({ onViewportTransformChanged });
+    // Default pan (0,0) / zoom 1 / default 1920x1080 viewport.
+    expect(onViewportTransformChanged).toHaveBeenCalledWith({ left: 0, top: 0, width: 1920, height: 1080 });
+  });
+
+  it("getViewportScreenRect reflects the current pan/zoom applied to the viewport rect", async () => {
+    const { canvas, container } = setup();
+    stubClientSize(container, 2000, 1200);
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
+    await flushFrame();
+
+    // From the auto-centering test: zoom 1, pan (300, 100).
+    expect(canvas.getViewportScreenRect()).toEqual({ left: 300, top: 100, width: 1400, height: 1000 });
+  });
+
+  it("fires again with the updated rect after auto-centering completes", async () => {
+    const onViewportTransformChanged = vi.fn();
+    const { canvas, container } = setup({ onViewportTransformChanged });
+    stubClientSize(container, 2000, 1200);
+    onViewportTransformChanged.mockClear();
+
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
+    await flushFrame();
+
+    expect(onViewportTransformChanged).toHaveBeenCalledWith({ left: 300, top: 100, width: 1400, height: 1000 });
+  });
+});

@@ -9,6 +9,7 @@ import { uploadFile } from "./upload";
 import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
 import { RoomPicker } from "./roomPicker";
+import { StreamPreviewPanel } from "./streamPreview";
 import {
   register,
   login,
@@ -35,8 +36,12 @@ const resendVerificationButton = document.getElementById("resend-verification-bu
 const roomPickerViewEl = document.getElementById("room-picker-view");
 
 const canvasContainer = document.getElementById("canvas-container");
+const canvasInner = document.getElementById("canvas-inner");
 const objectsPanel = document.getElementById("objects-panel");
 const propertiesPanel = document.getElementById("properties-panel");
+const streamPreviewPanelEl = document.getElementById("stream-preview-panel");
+const streamPreviewOverlayEl = document.getElementById("stream-preview-overlay");
+const streamSettingsModalEl = document.getElementById("stream-settings-modal");
 const soundPanelEl = document.getElementById("sound-panel");
 const connectedUsersPanelEl = document.getElementById("connected-users-panel");
 const variablesPanelEl = document.getElementById("variables-panel");
@@ -55,7 +60,8 @@ const contextMenuMediaButton = document.getElementById("context-menu-media");
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !registerButton ||
   !loginError || !loginMessage || !resendVerificationButton || !roomPickerViewEl ||
-  !canvasContainer || !objectsPanel || !propertiesPanel || !soundPanelEl || !connectedUsersPanelEl ||
+  !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
+  !streamPreviewOverlayEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !addTextButton || !manageAccessButton || !accessModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
   !contextMenuTextButton || !contextMenuMediaButton
@@ -147,7 +153,7 @@ async function main(): Promise<void> {
     teardownCurrentRoom();
     roomPickerViewEl!.style.display = "none";
     appView!.style.display = "flex";
-    current = enterRoom(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session!, roomId);
+    current = enterRoom(wsUrl, httpApiUrl, assetsDomain, browserSourceUrl, session!, roomId, streamPreviewPanel);
   }
 
   // Always shows the picker, regardless of room count -- the "only show it
@@ -280,6 +286,8 @@ async function main(): Promise<void> {
     triggerMediaUpload();
   });
 
+  const streamPreviewPanel = new StreamPreviewPanel(streamPreviewPanelEl!, streamPreviewOverlayEl!, streamSettingsModalEl!);
+
   const accessModal = new AccessModal(accessModalEl!);
   manageAccessButton!.addEventListener("click", () => {
     if (!current) return;
@@ -379,7 +387,8 @@ function enterRoom(
   assetsDomain: string,
   browserSourceUrl: string,
   session: SessionInfo,
-  roomId: string
+  roomId: string,
+  streamPreviewPanel: StreamPreviewPanel
 ): RoomSession {
   statusEl!.textContent = `room: ${roomId} (${session.username})`;
 
@@ -395,7 +404,7 @@ function enterRoom(
   };
 
   const canvas = new CanvasView(
-    canvasContainer!,
+    canvasInner!,
     {
       onAssetMove: (assetId, x, y, seq) => {
         room.connection.send({ action: "asset:move", roomId, assetId, x, y, seq });
@@ -416,6 +425,11 @@ function enterRoom(
       onSelectionChange: (assetId) => {
         room.sidebar.setSelected(assetId);
       },
+      // The stream-preview overlay is a sibling of #canvas-inner, not a
+      // child of it, so it survives room switches (CanvasView.dispose()
+      // wipes #canvas-inner's contents, not its own container) -- see
+      // streamPreview.ts and index.html.
+      onViewportTransformChanged: (rect) => streamPreviewPanel.setScreenRect(rect),
     },
     assetsDomain
   );
