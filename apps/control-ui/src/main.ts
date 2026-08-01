@@ -291,7 +291,8 @@ async function main(): Promise<void> {
     streamPreviewPanelEl!,
     streamPreviewOverlayEl!,
     streamPreviewBorderEl!,
-    streamSettingsModalEl!
+    streamSettingsModalEl!,
+    canvasInner!
   );
 
   const accessModal = new AccessModal(accessModalEl!);

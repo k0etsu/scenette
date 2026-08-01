@@ -111,7 +111,8 @@ export class StreamPreviewPanel {
     private readonly root: HTMLElement,
     private readonly overlay: HTMLElement,
     private readonly borderEl: HTMLElement,
-    private readonly settingsModal: HTMLElement
+    private readonly settingsModal: HTMLElement,
+    private readonly canvasInner: HTMLElement
   ) {
     this.settings = loadSettings();
 
@@ -286,7 +287,19 @@ export class StreamPreviewPanel {
     // Unchecked ("interactive" off) lets clicks/drags fall through to the
     // canvas underneath, which is the default -- otherwise the overlay
     // would block every mouse interaction with the actual editing surface.
-    this.overlay.style.pointerEvents = this.interactiveCheckbox.checked ? "auto" : "none";
+    const interactive = this.interactiveCheckbox.checked;
+    this.overlay.style.pointerEvents = interactive ? "auto" : "none";
+    // #canvas-inner sits *above* the overlay in stacking order (z-index 10
+    // vs. 1, so canvas assets visually cover the embed -- see index.html),
+    // which means it's also the topmost element hit-tested for clicks
+    // across the *entire* canvas area, not just where assets actually are.
+    // With interactive checked, setting the overlay's own pointer-events to
+    // auto alone did nothing: canvas-inner still received every click first
+    // and swallowed it before it could reach the iframe underneath. Toggling
+    // canvas-inner's pointer-events to none lets clicks pass through it to
+    // the overlay/iframe below while interactive mode is on, without
+    // touching z-index (so assets still visually cover the embed as before).
+    this.canvasInner.style.pointerEvents = interactive ? "none" : "";
 
     if (this.lastScreenRect) this.applyRect(this.lastScreenRect);
 
