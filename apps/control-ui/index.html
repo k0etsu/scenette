@@ -337,11 +337,27 @@
       }
       /* Sibling of #canvas-inner (not a child of it) so CanvasView's own
          dispose()-on-room-switch (which wipes #canvas-inner's contents
-         entirely) never touches this -- see streamPreview.ts. */
+         entirely) never touches this -- see streamPreview.ts. Below
+         #canvas-inner's z-index so assets/embed cover the placeholder
+         shown here when no channel is configured. */
       #stream-preview-overlay {
         display: none;
         pointer-events: none;
         z-index: 1;
+      }
+      /* A separate element (not nested inside #stream-preview-overlay,
+         which sits *below* canvas assets) so its always-on-top boundary
+         line can render *above* assets too -- the whole point is staying
+         visible even when an asset is dragged across the boundary. */
+      #stream-preview-border {
+        display: none;
+        pointer-events: none;
+        z-index: 20;
+      }
+      .stream-preview-border-strip {
+        position: absolute;
+        backdrop-filter: invert(1);
+        -webkit-backdrop-filter: invert(1);
       }
       .stream-preview-row {
         display: flex;
@@ -670,6 +686,7 @@
         <div id="canvas-container">
           <div id="canvas-inner"></div>
           <div id="stream-preview-overlay"></div>
+          <div id="stream-preview-border"></div>
         </div>
       </div>
       <div id="context-menu">

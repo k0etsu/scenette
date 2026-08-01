@@ -12,24 +12,20 @@ interface StreamPreviewSettings {
 
 const DEFAULT_SETTINGS: StreamPreviewSettings = { platform: "twitch", twitchChannel: "", youtubeChannelId: "" };
 
-// The iframe's own CSS box is held at this fixed "native" size at all
-// times, regardless of the actual on-screen rect -- see applyRect(). Sized
-// directly (via CSS width/height) rather than always this fixed native
-// size, Twitch's page treats the iframe's own box as its real viewport and
-// re-flows its own responsive CSS at that size; its chrome (the "channel
-// is offline" card, control bar icons, etc) doesn't shrink below some
-// minimum, so at a small on-screen size that chrome visually dominates a
-// now-tiny video instead of shrinking proportionally with it -- confirmed
-// by comparing a zoomed-out screenshot of this against the reference tool,
-// where the offline card and controls visibly shrink right along with the
-// video. Keeping the iframe's box at a constant native size means Twitch
-// always renders its normal, fully-proportioned desktop UI; a CSS
-// `transform: scale()` (a paint-time-only operation that never triggers
-// Twitch's own internal re-layout) then uniformly shrinks the *entire*
-// already-rendered result -- video and chrome together -- to fit the
-// actual on-screen rect.
+// The reference tool hardcodes its embed area at exactly 1920x1080 rather
+// than fitting/cropping to whatever aspect ratio the room's own viewport
+// happens to be -- rooms are always created at this same 1920x1080 (see
+// roomState.ts's DEFAULT_VIEWPORT), so a single uniform scale factor
+// (rect.width / NATIVE_WIDTH) gives an exact 1:1 correspondence between
+// screen pixels and the video/placeholder/border's own native pixels, with
+// no aspect-ratio-mismatch cases to reconcile at all.
 const NATIVE_WIDTH = 1920;
 const NATIVE_HEIGHT = 1080;
+
+// Native-space thickness of the always-on-top boundary line (scales down
+// with everything else via the wrapper's transform, same as the reference
+// tool's own fixed-px strips inside its identically-scaled wrapper).
+const BORDER_STRIP_THICKNESS = 3;
 
 function loadSettings(): StreamPreviewSettings {
   try {
@@ -55,12 +51,30 @@ function embedUrl(settings: StreamPreviewSettings): string | undefined {
   return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(settings.youtubeChannelId)}`;
 }
 
+function makeBorderStrip(edge: "top" | "bottom" | "left" | "right"): HTMLElement {
+  const strip = document.createElement("div");
+  strip.className = "stream-preview-border-strip";
+  if (edge === "top" || edge === "bottom") {
+    strip.style.left = "0";
+    strip.style.right = "0";
+    strip.style[edge] = "0";
+    strip.style.height = `${BORDER_STRIP_THICKNESS}px`;
+  } else {
+    strip.style.top = "0";
+    strip.style.bottom = "0";
+    strip.style[edge] = "0";
+    strip.style.width = `${BORDER_STRIP_THICKNESS}px`;
+  }
+  return strip;
+}
+
 // A purely local alignment aid, never synced to collaborators or broadcast
 // to browser-source (only asset transforms are shared room state -- see
-// plan). Renders the actual live Twitch/YouTube page as a translucent
-// overlay positioned exactly over the room's viewport rect, tracking
-// pan/zoom, so placing an asset can be judged against real on-screen
-// stream content instead of guessing blindly.
+// plan). Composites the actual live Twitch/YouTube page (or, absent a
+// configured channel, a plain placeholder) into the room's viewport rect,
+// tracking pan/zoom, plus an always-on-top boundary line -- so placing an
+// asset can be judged against real on-screen stream content instead of
+// guessing blindly.
 export class StreamPreviewPanel {
   private settings: StreamPreviewSettings;
   private lastScreenRect?: { left: number; top: number; width: number; height: number };
@@ -77,11 +91,15 @@ export class StreamPreviewPanel {
   private readonly interactiveCheckbox: HTMLInputElement;
   private readonly opacitySlider: HTMLInputElement;
   private readonly platformSelect: HTMLSelectElement;
+  private readonly wrapper: HTMLElement;
+  private readonly placeholder: HTMLElement;
   private readonly iframe: HTMLIFrameElement;
+  private readonly borderWrapper: HTMLElement;
 
   constructor(
     private readonly root: HTMLElement,
     private readonly overlay: HTMLElement,
+    private readonly borderEl: HTMLElement,
     private readonly settingsModal: HTMLElement
   ) {
     this.settings = loadSettings();
@@ -137,67 +155,108 @@ export class StreamPreviewPanel {
     });
 
     this.overlay.style.position = "absolute";
-    this.overlay.style.overflow = "hidden";
     this.overlay.style.display = "none";
-    this.overlay.style.boxSizing = "border-box";
-    // A crisp, self-consistent boundary drawn on the exact same element
-    // that's positioned to the viewport rect -- matches the reference
-    // tool's solid outline. Deliberately not relying on canvas.ts's own
-    // dashed viewport-rect line to visually confirm the overlay's bounds:
-    // that's a *different* element with its own border-box math, and any
-    // small mismatch between the two was exactly what made the preview
-    // look like it didn't fill (or overflowed past) the "right" boundary.
-    this.overlay.style.border = "2px solid rgba(245, 240, 225, 0.9)";
+
+    // A single fixed-native-size wrapper holds the placeholder and the
+    // iframe as plain 100%-filling children; only the wrapper itself is
+    // ever transformed (scaled), so there's exactly one place doing any
+    // size math instead of separately fitting each child.
+    this.wrapper = document.createElement("div");
+    this.wrapper.style.position = "absolute";
+    this.wrapper.style.top = "0";
+    this.wrapper.style.left = "0";
+    this.wrapper.style.width = `${NATIVE_WIDTH}px`;
+    this.wrapper.style.height = `${NATIVE_HEIGHT}px`;
+    this.wrapper.style.transformOrigin = "0 0";
+    this.overlay.appendChild(this.wrapper);
+
+    // Shown whenever "embed" is on but no channel is configured for the
+    // current platform -- sits *below* the iframe in DOM order (plain
+    // stacking, no z-index needed) so a configured embed always covers it,
+    // and #stream-preview-overlay's own z-index (below #canvas-inner's)
+    // means canvas assets already cover it too.
+    this.placeholder = document.createElement("div");
+    this.placeholder.style.position = "absolute";
+    this.placeholder.style.inset = "0";
+    this.placeholder.style.boxSizing = "border-box";
+    this.placeholder.style.background = "#1a1b20";
+    this.placeholder.style.border = "2px solid rgba(245, 240, 225, 0.6)";
+    this.placeholder.style.display = "flex";
+    this.placeholder.style.alignItems = "center";
+    this.placeholder.style.justifyContent = "center";
+    this.placeholder.style.color = "rgba(245, 240, 225, 0.6)";
+    this.placeholder.style.font = "600 48px system-ui, sans-serif";
+    this.placeholder.textContent = "No stream configured";
+    this.wrapper.appendChild(this.placeholder);
+
     this.iframe = document.createElement("iframe");
-    // Fixed native size, never resized directly -- see NATIVE_WIDTH's
-    // comment for why. applyRect() only ever adjusts the CSS *transform*
-    // scale on top of this constant box.
+    // Fixed native size, never resized directly -- Twitch's page treats
+    // the iframe's own box as its real viewport and re-flows its own
+    // responsive CSS at that size; its chrome (the "channel is offline"
+    // card, control bar icons) doesn't shrink below some minimum, so at a
+    // small on-screen size that chrome would visually dominate a now-tiny
+    // video instead of shrinking proportionally with it. Keeping the
+    // iframe's own box at a constant native size means Twitch always
+    // renders its normal, fully-proportioned desktop UI; the wrapper's
+    // transform (a paint-time-only operation that never triggers Twitch's
+    // own internal re-layout) uniformly shrinks the *entire* already-
+    // rendered result -- video and chrome together -- to fit the screen.
     this.iframe.style.position = "absolute";
-    this.iframe.style.top = "50%";
-    this.iframe.style.left = "50%";
-    this.iframe.style.width = `${NATIVE_WIDTH}px`;
-    this.iframe.style.height = `${NATIVE_HEIGHT}px`;
-    // Real scale is set by applyRect() once a rect is known -- this is
-    // just a sane default so the transform is never left unset.
-    this.iframe.style.transform = "translate(-50%, -50%) scale(1)";
+    this.iframe.style.inset = "0";
+    this.iframe.style.width = "100%";
+    this.iframe.style.height = "100%";
     this.iframe.style.border = "none";
+    this.iframe.style.display = "none";
     this.iframe.allow = "autoplay";
-    this.overlay.appendChild(this.iframe);
+    this.wrapper.appendChild(this.iframe);
+
+    // The always-on-top boundary line -- a separate element (not nested
+    // under #stream-preview-overlay, which sits below canvas assets) so it
+    // can render *above* assets too, matching the reference tool's
+    // backdrop-invert strips at the top of the whole stacking order. Mirrors
+    // the same fixed-native-size + single-scale-transform approach as the
+    // overlay's own wrapper, so the two always land in perfect agreement.
+    this.borderEl.style.position = "absolute";
+    this.borderEl.style.display = "none";
+    this.borderWrapper = document.createElement("div");
+    this.borderWrapper.style.position = "absolute";
+    this.borderWrapper.style.top = "0";
+    this.borderWrapper.style.left = "0";
+    this.borderWrapper.style.width = `${NATIVE_WIDTH}px`;
+    this.borderWrapper.style.height = `${NATIVE_HEIGHT}px`;
+    this.borderWrapper.style.transformOrigin = "0 0";
+    this.borderEl.appendChild(this.borderWrapper);
+    for (const edge of ["top", "bottom", "left", "right"] as const) {
+      this.borderWrapper.appendChild(makeBorderStrip(edge));
+    }
 
     this.render();
   }
 
   // Called from CanvasView's onViewportTransformChanged callback -- pan,
   // zoom, and viewport-rect changes all funnel through the same hook, so
-  // this is the one place the overlay's position/size needs to be kept in
-  // sync from.
+  // this is the one place the overlay/border's position/scale need to be
+  // kept in sync from.
   setScreenRect(rect: { left: number; top: number; width: number; height: number }): void {
     this.lastScreenRect = rect;
     if (this.embedCheckbox.checked) this.applyRect(rect);
   }
 
   private applyRect(rect: { left: number; top: number; width: number; height: number }): void {
+    // A single scalar, not separately fitting width and height -- see
+    // NATIVE_WIDTH's comment for why that's deliberate (rooms are always
+    // created at exactly this same 1920x1080, so there's no aspect-ratio
+    // mismatch to reconcile with a "cover"/"contain" scale in the first
+    // place, just a uniform zoom factor).
+    const scale = rect.width / NATIVE_WIDTH;
+
     this.overlay.style.left = `${rect.left}px`;
     this.overlay.style.top = `${rect.top}px`;
-    this.overlay.style.width = `${rect.width}px`;
-    this.overlay.style.height = `${rect.height}px`;
+    this.wrapper.style.transform = `scale(${scale})`;
 
-    // "contain" scale: the *smaller* of the two ratios, so the native-sized
-    // iframe (after scaling) never exceeds either dimension of `rect`.
-    // Previously used the larger ratio ("cover", deliberately overscanned
-    // to guarantee no gap) -- but a real broadcast's encoded aspect isn't
-    // always exactly 16:9, so the crop math could still land a hair
-    // off on one edge depending on rounding, which read as the embed
-    // overlapping the boundary on one side while falling short on
-    // another. Landing at most slightly short (a thin, symmetric letterbox
-    // bar on one axis) is a far less confusing failure mode than an
-    // asymmetric overlap/gap combination -- and the border above always
-    // marks the *true* rect regardless of how the video itself fits inside
-    // it. transform (not width/height) is what actually resizes the iframe
-    // on screen -- see NATIVE_WIDTH's comment for why that distinction is
-    // the whole point of this rewrite.
-    const scale = Math.min(rect.width / NATIVE_WIDTH, rect.height / NATIVE_HEIGHT);
-    this.iframe.style.transform = `translate(-50%, -50%) scale(${scale})`;
+    this.borderEl.style.left = `${rect.left}px`;
+    this.borderEl.style.top = `${rect.top}px`;
+    this.borderWrapper.style.transform = `scale(${scale})`;
   }
 
   private render(): void {
@@ -208,14 +267,25 @@ export class StreamPreviewPanel {
     // canvas underneath, which is the default -- otherwise the overlay
     // would block every mouse interaction with the actual editing surface.
     this.overlay.style.pointerEvents = this.interactiveCheckbox.checked ? "auto" : "none";
+    // The boundary line's own visibility follows "embed" too, but is
+    // otherwise independent of opacity/interactive -- it's a fixed
+    // alignment aid, never dimmable and never a click target.
+    this.borderEl.style.display = on ? "block" : "none";
 
     if (!on) return;
     if (this.lastScreenRect) this.applyRect(this.lastScreenRect);
 
     const url = embedUrl(this.settings);
-    if (url && this.lastAssignedSrc !== url) {
-      this.iframe.src = url;
-      this.lastAssignedSrc = url;
+    if (url) {
+      this.iframe.style.display = "block";
+      this.placeholder.style.display = "none";
+      if (this.lastAssignedSrc !== url) {
+        this.iframe.src = url;
+        this.lastAssignedSrc = url;
+      }
+    } else {
+      this.iframe.style.display = "none";
+      this.placeholder.style.display = "flex";
     }
   }
 

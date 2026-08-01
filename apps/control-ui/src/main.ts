@@ -41,6 +41,7 @@ const objectsPanel = document.getElementById("objects-panel");
 const propertiesPanel = document.getElementById("properties-panel");
 const streamPreviewPanelEl = document.getElementById("stream-preview-panel");
 const streamPreviewOverlayEl = document.getElementById("stream-preview-overlay");
+const streamPreviewBorderEl = document.getElementById("stream-preview-border");
 const streamSettingsModalEl = document.getElementById("stream-settings-modal");
 const soundPanelEl = document.getElementById("sound-panel");
 const connectedUsersPanelEl = document.getElementById("connected-users-panel");
@@ -61,7 +62,7 @@ if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !registerButton ||
   !loginError || !loginMessage || !resendVerificationButton || !roomPickerViewEl ||
   !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
-  !streamPreviewOverlayEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
+  !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !addTextButton || !manageAccessButton || !accessModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
   !contextMenuTextButton || !contextMenuMediaButton
@@ -286,7 +287,12 @@ async function main(): Promise<void> {
     triggerMediaUpload();
   });
 
-  const streamPreviewPanel = new StreamPreviewPanel(streamPreviewPanelEl!, streamPreviewOverlayEl!, streamSettingsModalEl!);
+  const streamPreviewPanel = new StreamPreviewPanel(
+    streamPreviewPanelEl!,
+    streamPreviewOverlayEl!,
+    streamPreviewBorderEl!,
+    streamSettingsModalEl!
+  );
 
   const accessModal = new AccessModal(accessModalEl!);
   manageAccessButton!.addEventListener("click", () => {
