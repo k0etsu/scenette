@@ -1,4 +1,4 @@
-import { ICON_EXPAND, ICON_SETTINGS } from "./icons";
+import { ICON_EXPAND, ICON_SETTINGS, ICON_VIDEO } from "./icons";
 
 const STORAGE_KEY = "scenette.streamPreview";
 
@@ -56,12 +56,18 @@ function embedUrl(settings: StreamPreviewSettings): string | undefined {
 // only the strip's innermost edge ever touches the boundary line -- the
 // rest of its width/height extends outward into the space beyond the
 // viewport, never covering any of the actual placeholder/embed content.
+//
+// Top/bottom strips additionally extend left/right past both corners (by
+// the same thickness) so they meet the left/right strips' outer edges with
+// no gap; left/right strips are left un-extended (top/bottom flush at 0) so
+// the two pairs never overlap each other -- an overlap would double up the
+// backdrop-filter: invert() and cancel back out to no visible effect there.
 function makeBorderStrip(edge: "top" | "bottom" | "left" | "right"): HTMLElement {
   const strip = document.createElement("div");
   strip.className = "stream-preview-border-strip";
   if (edge === "top" || edge === "bottom") {
-    strip.style.left = "0";
-    strip.style.right = "0";
+    strip.style.left = `-${BORDER_STRIP_THICKNESS}px`;
+    strip.style.right = `-${BORDER_STRIP_THICKNESS}px`;
     strip.style[edge] = `-${BORDER_STRIP_THICKNESS}px`;
     strip.style.height = `${BORDER_STRIP_THICKNESS}px`;
   } else {
@@ -193,8 +199,11 @@ export class StreamPreviewPanel {
     this.placeholder.style.alignItems = "center";
     this.placeholder.style.justifyContent = "center";
     this.placeholder.style.color = "rgba(245, 240, 225, 0.6)";
-    this.placeholder.style.font = "600 48px system-ui, sans-serif";
-    this.placeholder.textContent = "No stream configured";
+    // Reuses the same outline used for video assets elsewhere in the app
+    // (icons.ts's ICON_VIDEO) rather than inventing a new graphic, just
+    // scaled way up -- it doesn't need to represent this specific tool,
+    // only read as "a video will go here" at a glance.
+    this.placeholder.innerHTML = ICON_VIDEO.replace(/width="14"/, 'width="140"').replace(/height="14"/, 'height="140"');
     this.wrapper.appendChild(this.placeholder);
 
     this.iframe = document.createElement("iframe");

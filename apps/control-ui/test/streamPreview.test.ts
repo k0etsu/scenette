@@ -68,7 +68,7 @@ describe("StreamPreviewPanel -- placeholder vs iframe", () => {
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
     expect(placeholderEl().style.display).toBe("flex");
     expect(iframeEl().style.display).toBe("none");
-    expect(placeholderEl().textContent).toContain("No stream configured");
+    expect(placeholderEl().querySelector("svg")).not.toBeNull();
   });
 
   it("still shows the placeholder when embed is checked but no channel is configured", () => {
@@ -226,31 +226,48 @@ describe("StreamPreviewPanel -- always-on-top border strips", () => {
     expect(strips).toHaveLength(4);
   });
 
-  it("each strip spans the full opposite axis (e.g. top/bottom strips span left:0 to right:0)", () => {
+  it("top/bottom strips extend past both corners (left/right offset outward by the strip thickness)", () => {
+    // Regression: top/bottom strips previously spanned flush left:0/right:0,
+    // leaving a THICKNESSxTHICKNESS gap at each corner where no strip
+    // covered the boundary. They now extend past the corners by the same
+    // negative offset as their own edge.
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
     const strips = [...borderEl.querySelectorAll<HTMLElement>(".stream-preview-border-strip")];
     const topOrBottom = strips.filter((s) => s.style.height === `${THICKNESS}px`);
     expect(topOrBottom).toHaveLength(2);
     for (const strip of topOrBottom) {
-      expect(strip.style.left).toBe("0px");
-      expect(strip.style.right).toBe("0px");
+      expect(strip.style.left).toBe(`-${THICKNESS}px`);
+      expect(strip.style.right).toBe(`-${THICKNESS}px`);
     }
   });
 
-  it("positions every strip entirely outside its edge (negative offset), so only its inner edge touches the boundary", () => {
+  it("left/right strips stay flush (top:0 / bottom:0), so the two strip pairs never overlap at the corners", () => {
+    // Overlap would double up backdrop-filter: invert() on that patch,
+    // which cancels back out to no visible effect -- only one pair may
+    // extend into the corner, and it's top/bottom (see the test above).
+    new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
+    const strips = [...borderEl.querySelectorAll<HTMLElement>(".stream-preview-border-strip")];
+    const leftOrRight = strips.filter((s) => s.style.width === `${THICKNESS}px`);
+    expect(leftOrRight).toHaveLength(2);
+    for (const strip of leftOrRight) {
+      expect(strip.style.top).toBe("0px");
+      expect(strip.style.bottom).toBe("0px");
+    }
+  });
+
+  it("positions every strip entirely outside its own edge (negative offset), so only its inner edge touches the boundary", () => {
     // Regression: strips were previously inset flush with the edge (0, not
     // negative), meaning their own width/height ate into the visible
     // placeholder/embed area instead of only marking the boundary from
     // outside it.
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
     const strips = [...borderEl.querySelectorAll<HTMLElement>(".stream-preview-border-strip")];
-    // Exactly one of the four inset properties is the strip's own edge
-    // (the negative offset); the perpendicular pair are always "0px"
-    // (spanning the full opposite axis), so a plain OR-chain can't
-    // distinguish them -- collect whichever property equals -THICKNESSpx.
-    const edgeOffsets = strips.map((s) =>
-      [s.style.top, s.style.bottom, s.style.left, s.style.right].find((v) => v === `-${THICKNESS}px`)
-    );
+    const edgeOffsets = strips.map((s) => {
+      const isTopOrBottom = s.style.height === `${THICKNESS}px`;
+      return isTopOrBottom
+        ? [s.style.top, s.style.bottom].find((v) => v === `-${THICKNESS}px`)
+        : [s.style.left, s.style.right].find((v) => v === `-${THICKNESS}px`);
+    });
     expect(edgeOffsets).toEqual([`-${THICKNESS}px`, `-${THICKNESS}px`, `-${THICKNESS}px`, `-${THICKNESS}px`]);
   });
 });
