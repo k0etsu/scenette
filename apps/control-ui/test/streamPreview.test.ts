@@ -43,44 +43,57 @@ function configureTwitchChannel(channel: string): void {
 const rect = { left: 10, top: 20, width: 960, height: 540 };
 
 describe("StreamPreviewPanel -- visibility", () => {
-  it("starts with both the overlay and the border hidden", () => {
+  it("shows both the overlay and the border immediately on construction, before embed is ever touched", () => {
+    // Regression: confirmed against a recording of the reference tool --
+    // the placeholder + boundary are visible with "embed" unchecked too,
+    // not only once it's checked. Only the iframe-vs-placeholder choice
+    // inside the (always-visible) area responds to that checkbox.
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
-    expect(overlay.style.display).toBe("none");
-    expect(borderEl.style.display).toBe("none");
-  });
-
-  it("shows both the overlay and the border once embed is checked", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
-    enableEmbed();
     expect(overlay.style.display).toBe("block");
     expect(borderEl.style.display).toBe("block");
   });
 
-  it("hides both again when embed is unchecked", () => {
+  it("stays visible after embed is checked and then unchecked again", () => {
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
     enableEmbed();
     checkbox("embed").checked = false;
     checkbox("embed").dispatchEvent(new Event("change"));
-    expect(overlay.style.display).toBe("none");
-    expect(borderEl.style.display).toBe("none");
+    expect(overlay.style.display).toBe("block");
+    expect(borderEl.style.display).toBe("block");
   });
 });
 
 describe("StreamPreviewPanel -- placeholder vs iframe", () => {
-  it("shows the placeholder (not the iframe) when embed is on but no channel is configured", () => {
+  it("shows the placeholder (not the iframe) by default, with embed unchecked", () => {
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
-    enableEmbed();
     expect(placeholderEl().style.display).toBe("flex");
     expect(iframeEl().style.display).toBe("none");
     expect(placeholderEl().textContent).toContain("No stream configured");
   });
 
-  it("switches to the iframe (hiding the placeholder) once a channel is configured", () => {
+  it("still shows the placeholder when embed is checked but no channel is configured", () => {
+    new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
+    enableEmbed();
+    expect(placeholderEl().style.display).toBe("flex");
+    expect(iframeEl().style.display).toBe("none");
+  });
+
+  it("switches to the iframe (hiding the placeholder) once a channel is configured AND embed is checked", () => {
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
     configureTwitchChannel("shroud");
     enableEmbed();
     expect(iframeEl().style.display).toBe("block");
     expect(placeholderEl().style.display).toBe("none");
+  });
+
+  it("goes back to the placeholder if embed is unchecked again, even with a channel configured", () => {
+    new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
+    configureTwitchChannel("shroud");
+    enableEmbed();
+    checkbox("embed").checked = false;
+    checkbox("embed").dispatchEvent(new Event("change"));
+    expect(placeholderEl().style.display).toBe("flex");
+    expect(iframeEl().style.display).toBe("none");
   });
 
   it("the placeholder sits before the iframe in DOM order, so a configured embed naturally covers it", () => {
@@ -102,15 +115,9 @@ describe("StreamPreviewPanel -- positioning (single uniform scale, 1920x1080 nat
     return (borderEl.children[0] as HTMLElement).style.transform;
   }
 
-  it("positions the overlay and border at the same left/top from setScreenRect, only while embed is on", () => {
+  it("positions the overlay and border at the same left/top from setScreenRect, regardless of embed state", () => {
     const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
 
-    panel.setScreenRect(rect);
-    // Not shown yet -- position updates are tracked internally but don't
-    // apply to the DOM until the overlay is actually visible.
-    expect(overlay.style.left).toBe("");
-
-    enableEmbed();
     panel.setScreenRect(rect);
 
     expect(overlay.style.left).toBe("10px");
@@ -119,16 +126,8 @@ describe("StreamPreviewPanel -- positioning (single uniform scale, 1920x1080 nat
     expect(borderEl.style.top).toBe("20px");
   });
 
-  it("applies whatever rect was last set the moment embed is turned on", () => {
-    const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
-    panel.setScreenRect(rect);
-    enableEmbed();
-    expect(overlay.style.left).toBe("10px");
-  });
-
   it("scales both the overlay wrapper and the border wrapper by the same factor: rect.width / 1920", () => {
     const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
-    enableEmbed();
     panel.setScreenRect({ left: 0, top: 0, width: 960, height: 540 });
 
     expect(wrapperTransform()).toBe("scale(0.5)");
@@ -137,7 +136,6 @@ describe("StreamPreviewPanel -- positioning (single uniform scale, 1920x1080 nat
 
   it("scales to exactly 1 when the rect is already native-sized (1920x1080)", () => {
     const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
-    enableEmbed();
     panel.setScreenRect({ left: 0, top: 0, width: NATIVE_WIDTH, height: 1080 });
     expect(wrapperTransform()).toBe("scale(1)");
   });
@@ -220,6 +218,8 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
 });
 
 describe("StreamPreviewPanel -- always-on-top border strips", () => {
+  const THICKNESS = 6; // must match streamPreview.ts's own BORDER_STRIP_THICKNESS
+
   it("renders exactly four border strips (top/bottom/left/right)", () => {
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
     const strips = borderEl.querySelectorAll(".stream-preview-border-strip");
@@ -229,11 +229,29 @@ describe("StreamPreviewPanel -- always-on-top border strips", () => {
   it("each strip spans the full opposite axis (e.g. top/bottom strips span left:0 to right:0)", () => {
     new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
     const strips = [...borderEl.querySelectorAll<HTMLElement>(".stream-preview-border-strip")];
-    const topOrBottom = strips.filter((s) => s.style.top === "0" || s.style.bottom === "0");
+    const topOrBottom = strips.filter((s) => s.style.height === `${THICKNESS}px`);
+    expect(topOrBottom).toHaveLength(2);
     for (const strip of topOrBottom) {
-      expect(strip.style.left).toBe("0");
-      expect(strip.style.right).toBe("0");
+      expect(strip.style.left).toBe("0px");
+      expect(strip.style.right).toBe("0px");
     }
+  });
+
+  it("positions every strip entirely outside its edge (negative offset), so only its inner edge touches the boundary", () => {
+    // Regression: strips were previously inset flush with the edge (0, not
+    // negative), meaning their own width/height ate into the visible
+    // placeholder/embed area instead of only marking the boundary from
+    // outside it.
+    new StreamPreviewPanel(root, overlay, borderEl, settingsModal);
+    const strips = [...borderEl.querySelectorAll<HTMLElement>(".stream-preview-border-strip")];
+    // Exactly one of the four inset properties is the strip's own edge
+    // (the negative offset); the perpendicular pair are always "0px"
+    // (spanning the full opposite axis), so a plain OR-chain can't
+    // distinguish them -- collect whichever property equals -THICKNESSpx.
+    const edgeOffsets = strips.map((s) =>
+      [s.style.top, s.style.bottom, s.style.left, s.style.right].find((v) => v === `-${THICKNESS}px`)
+    );
+    expect(edgeOffsets).toEqual([`-${THICKNESS}px`, `-${THICKNESS}px`, `-${THICKNESS}px`, `-${THICKNESS}px`]);
   });
 });
 

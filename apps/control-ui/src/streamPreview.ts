@@ -25,7 +25,7 @@ const NATIVE_HEIGHT = 1080;
 // Native-space thickness of the always-on-top boundary line (scales down
 // with everything else via the wrapper's transform, same as the reference
 // tool's own fixed-px strips inside its identically-scaled wrapper).
-const BORDER_STRIP_THICKNESS = 3;
+const BORDER_STRIP_THICKNESS = 6;
 
 function loadSettings(): StreamPreviewSettings {
   try {
@@ -51,18 +51,23 @@ function embedUrl(settings: StreamPreviewSettings): string | undefined {
   return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(settings.youtubeChannelId)}`;
 }
 
+// Positioned entirely *outside* the wrapper's own edge (a negative offset
+// equal to the strip's own thickness) rather than inset flush with it, so
+// only the strip's innermost edge ever touches the boundary line -- the
+// rest of its width/height extends outward into the space beyond the
+// viewport, never covering any of the actual placeholder/embed content.
 function makeBorderStrip(edge: "top" | "bottom" | "left" | "right"): HTMLElement {
   const strip = document.createElement("div");
   strip.className = "stream-preview-border-strip";
   if (edge === "top" || edge === "bottom") {
     strip.style.left = "0";
     strip.style.right = "0";
-    strip.style[edge] = "0";
+    strip.style[edge] = `-${BORDER_STRIP_THICKNESS}px`;
     strip.style.height = `${BORDER_STRIP_THICKNESS}px`;
   } else {
     strip.style.top = "0";
     strip.style.bottom = "0";
-    strip.style[edge] = "0";
+    strip.style[edge] = `-${BORDER_STRIP_THICKNESS}px`;
     strip.style.width = `${BORDER_STRIP_THICKNESS}px`;
   }
   return strip;
@@ -70,11 +75,11 @@ function makeBorderStrip(edge: "top" | "bottom" | "left" | "right"): HTMLElement
 
 // A purely local alignment aid, never synced to collaborators or broadcast
 // to browser-source (only asset transforms are shared room state -- see
-// plan). Composites the actual live Twitch/YouTube page (or, absent a
-// configured channel, a plain placeholder) into the room's viewport rect,
-// tracking pan/zoom, plus an always-on-top boundary line -- so placing an
-// asset can be judged against real on-screen stream content instead of
-// guessing blindly.
+// plan). The viewport-rect placeholder + boundary line are *always*
+// visible (confirmed against the reference tool -- both show regardless
+// of the "embed" checkbox's state), tracking pan/zoom continuously; the
+// "embed" checkbox only chooses what's composited into that area: the
+// generic placeholder icon, or the actual live Twitch/YouTube page.
 export class StreamPreviewPanel {
   private settings: StreamPreviewSettings;
   private lastScreenRect?: { left: number; top: number; width: number; height: number };
@@ -155,7 +160,9 @@ export class StreamPreviewPanel {
     });
 
     this.overlay.style.position = "absolute";
-    this.overlay.style.display = "none";
+    // Always visible -- see the class doc. Only the iframe-vs-placeholder
+    // choice inside it (see render()) responds to the "embed" checkbox.
+    this.overlay.style.display = "block";
 
     // A single fixed-native-size wrapper holds the placeholder and the
     // iframe as plain 100%-filling children; only the wrapper itself is
@@ -170,17 +177,18 @@ export class StreamPreviewPanel {
     this.wrapper.style.transformOrigin = "0 0";
     this.overlay.appendChild(this.wrapper);
 
-    // Shown whenever "embed" is on but no channel is configured for the
-    // current platform -- sits *below* the iframe in DOM order (plain
-    // stacking, no z-index needed) so a configured embed always covers it,
-    // and #stream-preview-overlay's own z-index (below #canvas-inner's)
-    // means canvas assets already cover it too.
+    // Shown whenever "embed" is unchecked, or checked with no channel
+    // configured for the current platform -- sits *below* the iframe in
+    // DOM order (plain stacking, no z-index needed) so a configured embed
+    // always covers it, and #stream-preview-overlay's own z-index (below
+    // #canvas-inner's) means canvas assets already cover it too. No border
+    // of its own -- #stream-preview-border's always-on-top strips are the
+    // one and only boundary indicator, so it doesn't visually double up.
     this.placeholder = document.createElement("div");
     this.placeholder.style.position = "absolute";
     this.placeholder.style.inset = "0";
     this.placeholder.style.boxSizing = "border-box";
     this.placeholder.style.background = "#1a1b20";
-    this.placeholder.style.border = "2px solid rgba(245, 240, 225, 0.6)";
     this.placeholder.style.display = "flex";
     this.placeholder.style.alignItems = "center";
     this.placeholder.style.justifyContent = "center";
@@ -217,7 +225,7 @@ export class StreamPreviewPanel {
     // the same fixed-native-size + single-scale-transform approach as the
     // overlay's own wrapper, so the two always land in perfect agreement.
     this.borderEl.style.position = "absolute";
-    this.borderEl.style.display = "none";
+    this.borderEl.style.display = "block";
     this.borderWrapper = document.createElement("div");
     this.borderWrapper.style.position = "absolute";
     this.borderWrapper.style.top = "0";
@@ -236,10 +244,11 @@ export class StreamPreviewPanel {
   // Called from CanvasView's onViewportTransformChanged callback -- pan,
   // zoom, and viewport-rect changes all funnel through the same hook, so
   // this is the one place the overlay/border's position/scale need to be
-  // kept in sync from.
+  // kept in sync from. Always applied -- the placeholder + boundary are
+  // visible regardless of the "embed" checkbox (see the class doc).
   setScreenRect(rect: { left: number; top: number; width: number; height: number }): void {
     this.lastScreenRect = rect;
-    if (this.embedCheckbox.checked) this.applyRect(rect);
+    this.applyRect(rect);
   }
 
   private applyRect(rect: { left: number; top: number; width: number; height: number }): void {
@@ -260,22 +269,19 @@ export class StreamPreviewPanel {
   }
 
   private render(): void {
-    const on = this.embedCheckbox.checked;
-    this.overlay.style.display = on ? "block" : "none";
+    // Overlay and border are always visible (see class doc) -- only their
+    // opacity/pointer-events (overlay only; the border is never dimmable
+    // or clickable) and the iframe-vs-placeholder choice below respond to
+    // the controls.
     this.overlay.style.opacity = String(Number(this.opacitySlider.value) / 100);
     // Unchecked ("interactive" off) lets clicks/drags fall through to the
     // canvas underneath, which is the default -- otherwise the overlay
     // would block every mouse interaction with the actual editing surface.
     this.overlay.style.pointerEvents = this.interactiveCheckbox.checked ? "auto" : "none";
-    // The boundary line's own visibility follows "embed" too, but is
-    // otherwise independent of opacity/interactive -- it's a fixed
-    // alignment aid, never dimmable and never a click target.
-    this.borderEl.style.display = on ? "block" : "none";
 
-    if (!on) return;
     if (this.lastScreenRect) this.applyRect(this.lastScreenRect);
 
-    const url = embedUrl(this.settings);
+    const url = this.embedCheckbox.checked ? embedUrl(this.settings) : undefined;
     if (url) {
       this.iframe.style.display = "block";
       this.placeholder.style.display = "none";
