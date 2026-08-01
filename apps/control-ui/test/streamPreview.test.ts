@@ -110,16 +110,23 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
   });
 });
 
+const OVERSCAN = 1.08; // must match streamPreview.ts's own OVERSCAN constant
+
 describe("StreamPreviewPanel -- fills the rect despite the video's fixed 16:9 aspect", () => {
-  it("leaves the iframe at 100%/100% when the rect is already exactly 16:9", () => {
+  it("overscans both axes by the same margin when the rect is already exactly 16:9", () => {
     const panel = new StreamPreviewPanel(root, overlay, settingsModal);
     checkbox("embed").checked = true;
     checkbox("embed").dispatchEvent(new Event("change"));
 
     panel.setScreenRect({ left: 0, top: 0, width: 1920, height: 1080 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    expect(iframe.style.width).toBe("100%");
-    expect(iframe.style.height).toBe("100%");
+    // Regression: sizing exactly to 100%/100% still left a sliver of the
+    // dashed viewport border visible in practice (a real broadcast's
+    // encoded aspect isn't always precisely 16:9, and Twitch's own player
+    // page reserves a bit of its own layout around the video canvas) --
+    // this deliberately bleeds past every edge instead.
+    expect(parseFloat(iframe.style.width)).toBeCloseTo(OVERSCAN * 100, 5);
+    expect(parseFloat(iframe.style.height)).toBeCloseTo(OVERSCAN * 100, 5);
   });
 
   it("oversizes height (not width) when the rect is wider than 16:9, so no horizontal gap is left", () => {
@@ -130,8 +137,8 @@ describe("StreamPreviewPanel -- fills the rect despite the video's fixed 16:9 as
     // 32:9 rect -- twice as wide as the video's own aspect.
     panel.setScreenRect({ left: 0, top: 0, width: 1600, height: 450 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    expect(iframe.style.width).toBe("100%");
-    expect(iframe.style.height).toBe("200%");
+    expect(parseFloat(iframe.style.width)).toBeCloseTo(OVERSCAN * 100, 5);
+    expect(parseFloat(iframe.style.height)).toBeCloseTo(2 * OVERSCAN * 100, 5);
   });
 
   it("oversizes width (not height) when the rect is taller/narrower than 16:9 (e.g. a square viewport)", () => {
@@ -141,8 +148,8 @@ describe("StreamPreviewPanel -- fills the rect despite the video's fixed 16:9 as
 
     panel.setScreenRect({ left: 0, top: 0, width: 1000, height: 1000 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    expect(iframe.style.height).toBe("100%");
-    expect(parseFloat(iframe.style.width)).toBeCloseTo((16 / 9) * 100, 1);
+    expect(parseFloat(iframe.style.height)).toBeCloseTo(OVERSCAN * 100, 5);
+    expect(parseFloat(iframe.style.width)).toBeCloseTo((16 / 9) * OVERSCAN * 100, 1);
   });
 
   it("keeps the iframe centered via a translate transform, independent of rect size", () => {

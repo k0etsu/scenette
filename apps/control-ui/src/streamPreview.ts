@@ -19,6 +19,16 @@ const DEFAULT_SETTINGS: StreamPreviewSettings = { platform: "twitch", twitchChan
 // oversized in applyRect() to compensate.
 const VIDEO_ASPECT = 16 / 9;
 
+// A real broadcast's encoded aspect ratio isn't always *exactly* 16:9 (and
+// Twitch's own player page reserves a sliver of its own layout/padding
+// around the video canvas that isn't part of the video itself), so sizing
+// purely off VIDEO_ASPECT still left a visible sliver of the dashed
+// viewport border showing on one edge. This adds a fixed overscan margin
+// on top of the computed cover size so the video always bleeds slightly
+// past every edge instead of landing exactly (or slightly short of) flush
+// -- trading an imperceptible extra crop for a guaranteed full fill.
+const OVERSCAN = 1.08;
+
 function loadSettings(): StreamPreviewSettings {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -169,12 +179,14 @@ export class StreamPreviewPanel {
     if (rectAspect > VIDEO_ASPECT) {
       // rect is wider than the video -- height is the binding constraint,
       // so stretch height until the video's own 16:9 width covers rect's
-      // full width too.
-      this.iframe.style.width = "100%";
-      this.iframe.style.height = `${(rectAspect / VIDEO_ASPECT) * 100}%`;
+      // full width too, then overscan both axes by the same margin so the
+      // result still fills exactly (scaling only one axis by OVERSCAN
+      // would distort the crop's aspect ratio).
+      this.iframe.style.width = `${OVERSCAN * 100}%`;
+      this.iframe.style.height = `${(rectAspect / VIDEO_ASPECT) * OVERSCAN * 100}%`;
     } else {
-      this.iframe.style.height = "100%";
-      this.iframe.style.width = `${(VIDEO_ASPECT / rectAspect) * 100}%`;
+      this.iframe.style.height = `${OVERSCAN * 100}%`;
+      this.iframe.style.width = `${(VIDEO_ASPECT / rectAspect) * OVERSCAN * 100}%`;
     }
   }
 
