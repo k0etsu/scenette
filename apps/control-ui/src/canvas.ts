@@ -612,9 +612,10 @@ export class CanvasView {
   // surface (rather than popping a separate input/modal) so the in-place
   // font/size/color styling is visible while typing. Every keystroke
   // patches immediately (same real-time behavior as the sidebar's sliders),
-  // so there's no separate "commit" step -- Enter is left to its default
-  // contentEditable behavior (inserts a line break) and Escape just ends
-  // the editing session (the text is already saved).
+  // so there's no separate "commit" step -- Enter inserts a line break
+  // (see onKeyDown below for why that can't just be left to the browser's
+  // own default behavior) and Escape just ends the editing session (the
+  // text is already saved).
   private beginInlineTextEdit(event: MouseEvent, assetId: string, content: HTMLElement): void {
     event.stopPropagation();
     const entry = this.entries.get(assetId);
@@ -653,6 +654,36 @@ export class CanvasView {
       if (e.key === "Escape") {
         e.preventDefault();
         content.blur();
+      } else if (e.key === "Enter") {
+        // A plain contentEditable div's *default* Enter behavior doesn't
+        // insert a literal "\n" text node -- browsers insert a new <div>/
+        // <br> element boundary instead, purely a visual line break. Since
+        // content.textContent (read in onInput above, and by every other
+        // consumer of asset.text) just concatenates descendant text nodes
+        // with no regard for element boundaries, that meant every line
+        // break silently vanished from the *stored* text the instant it
+        // left this specific DOM -- rendering correctly here (still the
+        // same live DOM with its <br>s intact) but joining every line back
+        // together with no separator at all everywhere else (sidebar,
+        // browser-source, other collaborators). Inserting the newline as
+        // an actual text character at the cursor (via Range, not the
+        // deprecated execCommand) keeps it a plain string end to end.
+        e.preventDefault();
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return;
+        const insertRange = selection.getRangeAt(0);
+        insertRange.deleteContents();
+        const newlineNode = document.createTextNode("\n");
+        insertRange.insertNode(newlineNode);
+        insertRange.setStartAfter(newlineNode);
+        insertRange.setEndAfter(newlineNode);
+        selection.removeAllRanges();
+        selection.addRange(insertRange);
+        // Programmatic DOM mutation (unlike a real keypress the browser
+        // handles itself) never dispatches its own "input" event -- fire
+        // the same sync/resize logic explicitly so this newline is patched
+        // and measured exactly like any other edit.
+        onInput();
       }
     };
     content.addEventListener("input", onInput);

@@ -477,6 +477,24 @@ describe("double-click to edit text inline", () => {
     expect(div.contentEditable).toBe("true");
   });
 
+  it("patches a multi-line edit as a single string with real newline characters preserved", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    // Simulates the result of onKeyDown's execCommand("insertText", ...,
+    // "\n") -- a literal newline character in the text node, not a <br>/
+    // <div> boundary.
+    div.textContent = "hellow\nthere\nwhy isn't this working";
+    div.dispatchEvent(new Event("input"));
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      { text: "hellow\nthere\nwhy isn't this working" },
+      expect.any(Number)
+    );
+  });
+
   it("does not send a patch on an input event where the text didn't actually change", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
@@ -521,16 +539,37 @@ describe("double-click to edit text inline", () => {
     expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
   });
 
-  it("Enter is left to its default contentEditable behavior (inserts a line break) instead of committing/blurring", () => {
-    const { canvas } = setup();
+  it("Enter inserts a literal newline character rather than committing/blurring or letting the browser insert a <div>/<br>", () => {
+    // Regression: a plain contentEditable div's *default* Enter behavior
+    // inserts a new element boundary (<div>/<br>), not a "\n" text node --
+    // content.textContent (what onInput patches, and what every other
+    // consumer of asset.text reads) just concatenates text nodes with no
+    // regard for element boundaries, so lines typed that way rendered fine
+    // in this specific live DOM but silently lost their line breaks the
+    // instant the text left it (sidebar, browser-source, collaborators).
+    const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
     div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    // Collapse the (select-all-on-open) selection to just after "hello" so
+    // the inserted newline lands at the end, not replacing the selection.
+    const range = document.createRange();
+    range.selectNodeContents(div);
+    range.collapse(false);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
 
     const blurSpy = vi.spyOn(div, "blur");
     const event = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
     div.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(false);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(div.textContent).toBe("hello\n");
+    // Fired the same real-time patch as any other edit -- this is a
+    // programmatic DOM mutation, which (unlike a real keypress) never
+    // dispatches its own "input" event on its own.
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { text: "hello\n" }, expect.any(Number));
     expect(blurSpy).not.toHaveBeenCalled();
     expect(div.contentEditable).toBe("true");
   });
