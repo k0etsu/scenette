@@ -63,6 +63,23 @@ describe("StreamPreviewPanel -- visibility", () => {
     expect(overlay.style.display).toBe("block");
     expect(borderEl.style.display).toBe("block");
   });
+
+  it("hides both via visibility until the first setScreenRect call, so neither paints at an unpositioned default before CanvasView's first (already-centered) rect arrives", () => {
+    // Regression: CanvasView used to fire its first rect synchronously
+    // during construction at the uncentered pan:0/zoom:1 transform, and
+    // this panel applied whatever rect it was given immediately -- so the
+    // boundary rendered at the top-left corner for a frame before jumping
+    // to center. CanvasView no longer fires that premature rect, but
+    // hiding here too means this panel is correct even if some other
+    // caller ever calls setScreenRect before a real rect is known.
+    const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    expect(overlay.style.visibility).toBe("hidden");
+    expect(borderEl.style.visibility).toBe("hidden");
+
+    panel.setScreenRect(rect);
+    expect(overlay.style.visibility).toBe("visible");
+    expect(borderEl.style.visibility).toBe("visible");
+  });
 });
 
 describe("StreamPreviewPanel -- placeholder vs iframe", () => {

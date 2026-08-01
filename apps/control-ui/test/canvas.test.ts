@@ -68,6 +68,10 @@ function worldTransform(container: HTMLElement): string {
   return (container.querySelector('[data-role="world"]') as HTMLElement).style.transform;
 }
 
+function worldVisibility(container: HTMLElement): string {
+  return (container.querySelector('[data-role="world"]') as HTMLElement).style.visibility;
+}
+
 // The initial center-on-load is deferred to the next animation frame (see
 // canvas.ts) so the forced clientWidth read doesn't block the page's first
 // paint -- tests need to let that frame run before asserting the result.
@@ -440,14 +444,43 @@ describe("setViewport auto-centering", () => {
     canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
     expect(worldTransform(container)).toBe("translate(0px, 0px) scale(1)");
   });
+
+  it("hides the world until the first centering pass completes, so the pan:0/zoom:1 default transform is never actually painted", async () => {
+    // Regression: the world painted at the default top-left transform for
+    // one frame before the deferred centering pass repositioned it, which
+    // showed up as a visible top-left-then-jump-to-center flash on every
+    // page load/refresh.
+    const { canvas, container } = setup();
+    stubClientSize(container, 2000, 1200);
+    expect(worldVisibility(container)).toBe("hidden");
+
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
+    expect(worldVisibility(container)).toBe("hidden");
+    await flushFrame();
+    expect(worldVisibility(container)).toBe("visible");
+  });
+
+  it("still reveals the world (rather than leaving it stuck hidden) when the container has no laid-out size yet", async () => {
+    const { canvas, container } = setup();
+    canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1920, height: 1080 });
+    await flushFrame();
+    expect(worldVisibility(container)).toBe("visible");
+  });
 });
 
 describe("onViewportTransformChanged / getViewportScreenRect", () => {
-  it("fires once synchronously during construction, before any setViewport call", () => {
+  it("does not fire during construction -- that transform is the pre-centering default and was never meant to be observed", () => {
+    // Regression: this used to fire synchronously during construction with
+    // the uncentered pan:0/zoom:1 rect, before the deferred first
+    // centerOnViewport() pass (see setViewport() below) had run. The
+    // stream-preview panel applies whatever rect it's given immediately, so
+    // that premature callback positioned its always-on-top boundary at the
+    // top-left corner for a frame before centering moved it -- visible as a
+    // flash on every page load, even though this.world itself was already
+    // correctly hidden until centering completed.
     const onViewportTransformChanged = vi.fn();
     setup({ onViewportTransformChanged });
-    // Default pan (0,0) / zoom 1 / default 1920x1080 viewport.
-    expect(onViewportTransformChanged).toHaveBeenCalledWith({ left: 0, top: 0, width: 1920, height: 1080 });
+    expect(onViewportTransformChanged).not.toHaveBeenCalled();
   });
 
   it("getViewportScreenRect reflects the current pan/zoom applied to the viewport rect", async () => {

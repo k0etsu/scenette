@@ -138,6 +138,15 @@ export class CanvasView {
     this.world.dataset.role = "world";
     this.world.style.position = "absolute";
     this.world.style.transformOrigin = "0 0";
+    // Hidden until the first real centerOnViewport() runs (see setViewport()
+    // below) -- otherwise this paints for a frame at the default pan:0/
+    // zoom:1 transform (viewport rect pinned to the world's top-left
+    // origin) before the deferred centering pass repositions it, which
+    // showed up as a visible top-left-then-jump-to-center flash on every
+    // page load/refresh. visibility (unlike display) doesn't affect layout,
+    // so this doesn't interfere with the container-size read centering
+    // depends on.
+    this.world.style.visibility = "hidden";
     this.container.appendChild(this.world);
 
     this.viewportRect = document.createElement("div");
@@ -173,7 +182,18 @@ export class CanvasView {
       this.handles[corner] = handle;
     }
 
-    this.applyWorldTransform();
+    // Suppressed here: this fires at the default pan:0/zoom:1 transform,
+    // before the deferred first centerOnViewport() pass (see setViewport()
+    // below) has had a chance to run. Firing onViewportTransformChanged with
+    // that rect anyway made the stream-preview panel's always-on-top
+    // boundary -- a *separate* element from this.world, so hiding the world
+    // alone (see setViewport()'s comment) didn't cover it -- position itself
+    // at the top-left corner for a frame before jumping to center, matching
+    // the reported flash exactly. The callback fires normally from every
+    // subsequent applyWorldTransform() call, including the one inside
+    // centerOnViewport() itself, so real consumers still get their first
+    // rect -- just the already-centered one, never this transient one.
+    this.applyWorldTransform(true);
     this.bindContainerEvents();
     this.bindKeyboard();
   }
@@ -211,7 +231,10 @@ export class CanvasView {
     const containerHeight = this.container.clientHeight;
     // Not laid out yet (e.g. hidden by a display:none ancestor) -- nothing
     // sane to compute against, so leave the default pan/zoom in place.
-    if (containerWidth <= 0 || containerHeight <= 0) return;
+    if (containerWidth <= 0 || containerHeight <= 0) {
+      this.world.style.visibility = "visible";
+      return;
+    }
 
     const zoomByWidth = (containerWidth * VIEWPORT_WIDTH_FRACTION) / this.viewport.width;
     const zoomByHeight = containerHeight / this.viewport.height;
@@ -223,6 +246,9 @@ export class CanvasView {
     this.pan.y = containerHeight / 2 - viewportCenterY * this.zoom;
 
     this.applyWorldTransform();
+    // Reveal only now that the transform reflects the centered position --
+    // this is the frame the user should actually see first.
+    this.world.style.visibility = "visible";
   }
 
   getViewport(): Viewport {
@@ -793,8 +819,9 @@ export class CanvasView {
     }
   }
 
-  private applyWorldTransform(): void {
+  private applyWorldTransform(suppressCallback = false): void {
     this.world.style.transform = `translate(${this.pan.x}px, ${this.pan.y}px) scale(${this.zoom})`;
+    if (suppressCallback) return;
     // Passes the rect directly rather than letting the callback call back
     // into this CanvasView instance -- this fires from within the
     // constructor itself (the initial applyWorldTransform() call), before
