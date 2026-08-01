@@ -12,7 +12,18 @@ import { getSessionUsername, getMembership } from "../../accounts/src/store";
 // duplicateAsset() doesn't double-count) rather than re-implementing it here.
 import { sumRoomStorageBytes } from "../../websocket-handlers/src/roomState";
 
-const s3 = new S3Client({});
+// requestChecksumCalculation defaults to "WHEN_SUPPORTED" as of a recent
+// SDK version, which makes PutObjectCommand -- including one only ever
+// used to *presign* a URL, never to actually send a request itself --
+// bake x-amz-checksum-crc32/x-amz-sdk-checksum-algorithm into the signed
+// query string. A real browser's plain `fetch(uploadUrl, { method: "PUT",
+// body: file })` (see control-ui's upload.ts) never computes or sends a
+// matching checksum, so every presigned URL minted without this override
+// gets rejected by S3 ("headers present which were not signed" / 501,
+// depending on exactly what's attempted) -- uploads were broken outright.
+// "WHEN_REQUIRED" restores the pre-default behavior: only compute/require
+// a checksum when a command explicitly asks for one via ChecksumAlgorithm.
+const s3 = new S3Client({ requestChecksumCalculation: "WHEN_REQUIRED" });
 const ASSETS_BUCKET = process.env.ASSETS_BUCKET!;
 const URL_EXPIRY_SECONDS = 300;
 const ROOM_STORAGE_QUOTA_BYTES = Number(process.env.ROOM_STORAGE_QUOTA_BYTES!);
