@@ -111,45 +111,76 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
 });
 
 const OVERSCAN = 1.08; // must match streamPreview.ts's own OVERSCAN constant
+const NATIVE_WIDTH = 1920; // must match streamPreview.ts's own NATIVE_WIDTH/HEIGHT
+const NATIVE_HEIGHT = 1080;
 
-describe("StreamPreviewPanel -- fills the rect despite the video's fixed 16:9 aspect", () => {
-  it("overscans both axes by the same margin when the rect is already exactly 16:9", () => {
+function scaleOf(iframe: HTMLIFrameElement): number {
+  const match = iframe.style.transform.match(/scale\(([\d.]+)\)/);
+  return match ? parseFloat(match[1]) : NaN;
+}
+
+describe("StreamPreviewPanel -- fills the rect via transform scale, not by resizing the iframe box", () => {
+  it("never changes the iframe's own CSS width/height -- always the fixed native size", () => {
+    const panel = new StreamPreviewPanel(root, overlay, settingsModal);
+    checkbox("embed").checked = true;
+    checkbox("embed").dispatchEvent(new Event("change"));
+
+    // Regression: resizing the iframe's own CSS box directly made Twitch's
+    // page re-layout at that (often tiny) size -- its chrome (the
+    // "channel is offline" card, control bar icons) has some minimum size
+    // it won't shrink below, so at a small on-screen size that chrome
+    // visually dominated a now-tiny video instead of shrinking
+    // proportionally with it, unlike the reference tool. Keeping the
+    // iframe's own box at a constant native size (letting Twitch always
+    // render its normal, fully-proportioned desktop UI) and scaling the
+    // whole already-rendered result via CSS transform instead fixes that,
+    // since transform never triggers Twitch's own internal re-layout.
+    const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
+    for (const rect of [
+      { left: 0, top: 0, width: 1920, height: 1080 },
+      { left: 0, top: 0, width: 300, height: 169 }, // zoomed way out
+      { left: 0, top: 0, width: 4000, height: 2250 }, // zoomed way in
+    ]) {
+      panel.setScreenRect(rect);
+      expect(iframe.style.width).toBe(`${NATIVE_WIDTH}px`);
+      expect(iframe.style.height).toBe(`${NATIVE_HEIGHT}px`);
+    }
+  });
+
+  it("scales to exactly OVERSCAN when the rect is already native-sized (16:9, 1920x1080)", () => {
     const panel = new StreamPreviewPanel(root, overlay, settingsModal);
     checkbox("embed").checked = true;
     checkbox("embed").dispatchEvent(new Event("change"));
 
     panel.setScreenRect({ left: 0, top: 0, width: 1920, height: 1080 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    // Regression: sizing exactly to 100%/100% still left a sliver of the
-    // dashed viewport border visible in practice (a real broadcast's
-    // encoded aspect isn't always precisely 16:9, and Twitch's own player
-    // page reserves a bit of its own layout around the video canvas) --
-    // this deliberately bleeds past every edge instead.
-    expect(parseFloat(iframe.style.width)).toBeCloseTo(OVERSCAN * 100, 5);
-    expect(parseFloat(iframe.style.height)).toBeCloseTo(OVERSCAN * 100, 5);
+    expect(scaleOf(iframe)).toBeCloseTo(OVERSCAN, 5);
   });
 
-  it("oversizes height (not width) when the rect is wider than 16:9, so no horizontal gap is left", () => {
+  it("scales down proportionally when zoomed out to a small on-screen rect", () => {
     const panel = new StreamPreviewPanel(root, overlay, settingsModal);
     checkbox("embed").checked = true;
     checkbox("embed").dispatchEvent(new Event("change"));
 
-    // 32:9 rect -- twice as wide as the video's own aspect.
-    panel.setScreenRect({ left: 0, top: 0, width: 1600, height: 450 });
+    // Half native size, still exactly 16:9.
+    panel.setScreenRect({ left: 0, top: 0, width: 960, height: 540 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    expect(parseFloat(iframe.style.width)).toBeCloseTo(OVERSCAN * 100, 5);
-    expect(parseFloat(iframe.style.height)).toBeCloseTo(2 * OVERSCAN * 100, 5);
+    expect(scaleOf(iframe)).toBeCloseTo(0.5 * OVERSCAN, 5);
   });
 
-  it("oversizes width (not height) when the rect is taller/narrower than 16:9 (e.g. a square viewport)", () => {
+  it("uses the larger of the two axis ratios (cover, not contain) when the rect's aspect differs from 16:9", () => {
     const panel = new StreamPreviewPanel(root, overlay, settingsModal);
     checkbox("embed").checked = true;
     checkbox("embed").dispatchEvent(new Event("change"));
 
+    // Square rect: height ratio (1000/1080 ≈ 0.926) is larger than width
+    // ratio (1000/1920 ≈ 0.521) -- height is the binding constraint, so
+    // the scale must be large enough to cover it, or the video would fall
+    // short vertically even though width alone would already be covered.
     panel.setScreenRect({ left: 0, top: 0, width: 1000, height: 1000 });
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
-    expect(parseFloat(iframe.style.height)).toBeCloseTo(OVERSCAN * 100, 5);
-    expect(parseFloat(iframe.style.width)).toBeCloseTo((16 / 9) * OVERSCAN * 100, 1);
+    const expectedScale = Math.max(1000 / NATIVE_WIDTH, 1000 / NATIVE_HEIGHT) * OVERSCAN;
+    expect(scaleOf(iframe)).toBeCloseTo(expectedScale, 5);
   });
 
   it("keeps the iframe centered via a translate transform, independent of rect size", () => {
@@ -157,7 +188,7 @@ describe("StreamPreviewPanel -- fills the rect despite the video's fixed 16:9 as
     const iframe = overlay.querySelector("iframe") as HTMLIFrameElement;
     expect(iframe.style.top).toBe("50%");
     expect(iframe.style.left).toBe("50%");
-    expect(iframe.style.transform).toBe("translate(-50%, -50%)");
+    expect(iframe.style.transform).toContain("translate(-50%, -50%)");
   });
 });
 

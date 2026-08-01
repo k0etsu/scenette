@@ -12,19 +12,31 @@ interface StreamPreviewSettings {
 
 const DEFAULT_SETTINGS: StreamPreviewSettings = { platform: "twitch", twitchChannel: "", youtubeChannelId: "" };
 
-// Twitch/YouTube's embedded player always preserves its own ~16:9 aspect
-// ratio internally (letterboxing to fit whatever size iframe it's given,
-// the same way a plain <video> would) -- there's no way to tell it to
-// stretch or crop instead. Assumed here so the iframe can be deliberately
-// oversized in applyRect() to compensate.
-const VIDEO_ASPECT = 16 / 9;
+// The iframe's own CSS box is held at this fixed "native" size at all
+// times, regardless of the actual on-screen rect -- see applyRect(). Sized
+// directly (via CSS width/height) rather than always this fixed native
+// size, Twitch's page treats the iframe's own box as its real viewport and
+// re-flows its own responsive CSS at that size; its chrome (the "channel
+// is offline" card, control bar icons, etc) doesn't shrink below some
+// minimum, so at a small on-screen size that chrome visually dominates a
+// now-tiny video instead of shrinking proportionally with it -- confirmed
+// by comparing a zoomed-out screenshot of this against the reference tool,
+// where the offline card and controls visibly shrink right along with the
+// video. Keeping the iframe's box at a constant native size means Twitch
+// always renders its normal, fully-proportioned desktop UI; a CSS
+// `transform: scale()` (a paint-time-only operation that never triggers
+// Twitch's own internal re-layout) then uniformly shrinks the *entire*
+// already-rendered result -- video and chrome together -- to fit the
+// actual on-screen rect.
+const NATIVE_WIDTH = 1920;
+const NATIVE_HEIGHT = 1080;
 
 // A real broadcast's encoded aspect ratio isn't always *exactly* 16:9 (and
 // Twitch's own player page reserves a sliver of its own layout/padding
-// around the video canvas that isn't part of the video itself), so sizing
-// purely off VIDEO_ASPECT still left a visible sliver of the dashed
+// around the video canvas that isn't part of the video itself), so scaling
+// purely to cover the rect still left a visible sliver of the dashed
 // viewport border showing on one edge. This adds a fixed overscan margin
-// on top of the computed cover size so the video always bleeds slightly
+// on top of the computed cover scale so the video always bleeds slightly
 // past every edge instead of landing exactly (or slightly short of) flush
 // -- trading an imperceptible extra crop for a guaranteed full fill.
 const OVERSCAN = 1.08;
@@ -138,14 +150,17 @@ export class StreamPreviewPanel {
     this.overlay.style.overflow = "hidden";
     this.overlay.style.display = "none";
     this.iframe = document.createElement("iframe");
-    // Sized precisely by applyRect() on every rect update, not left at a
-    // flat 100%/100% -- see applyRect() for why (filling an arbitrary-
-    // aspect-ratio rect with a fixed-16:9 video needs deliberate
-    // oversizing, not a plain 100% fit, or a gap is left on one axis).
+    // Fixed native size, never resized directly -- see NATIVE_WIDTH's
+    // comment for why. applyRect() only ever adjusts the CSS *transform*
+    // scale on top of this constant box.
     this.iframe.style.position = "absolute";
     this.iframe.style.top = "50%";
     this.iframe.style.left = "50%";
-    this.iframe.style.transform = "translate(-50%, -50%)";
+    this.iframe.style.width = `${NATIVE_WIDTH}px`;
+    this.iframe.style.height = `${NATIVE_HEIGHT}px`;
+    // Real scale is set by applyRect() once a rect is known -- this is
+    // just a sane default so the transform is never left unset.
+    this.iframe.style.transform = "translate(-50%, -50%) scale(1)";
     this.iframe.style.border = "none";
     this.iframe.allow = "autoplay";
     this.overlay.appendChild(this.iframe);
@@ -168,26 +183,15 @@ export class StreamPreviewPanel {
     this.overlay.style.width = `${rect.width}px`;
     this.overlay.style.height = `${rect.height}px`;
 
-    // The video itself always keeps VIDEO_ASPECT regardless of the iframe
-    // box's own shape (see VIDEO_ASPECT's comment) -- to make it actually
-    // fill `rect` (an object-fit: cover effect, which doesn't exist for
-    // iframes since we don't control the document inside one) rather than
-    // letterboxing with a visible gap, the iframe is deliberately made
-    // larger than the rect on whichever axis wouldn't otherwise be
-    // covered, then centered and clipped by the overlay's overflow:hidden.
-    const rectAspect = rect.width / rect.height;
-    if (rectAspect > VIDEO_ASPECT) {
-      // rect is wider than the video -- height is the binding constraint,
-      // so stretch height until the video's own 16:9 width covers rect's
-      // full width too, then overscan both axes by the same margin so the
-      // result still fills exactly (scaling only one axis by OVERSCAN
-      // would distort the crop's aspect ratio).
-      this.iframe.style.width = `${OVERSCAN * 100}%`;
-      this.iframe.style.height = `${(rectAspect / VIDEO_ASPECT) * OVERSCAN * 100}%`;
-    } else {
-      this.iframe.style.height = `${OVERSCAN * 100}%`;
-      this.iframe.style.width = `${(VIDEO_ASPECT / rectAspect) * OVERSCAN * 100}%`;
-    }
+    // Standard "cover" scale: the larger of the two ratios, so the
+    // native-sized iframe (after scaling) covers *both* dimensions of
+    // `rect`, not just one -- then the fixed OVERSCAN margin on top
+    // guarantees it fully covers every edge rather than landing exactly
+    // (or slightly short of) flush. transform (not width/height) is what
+    // actually resizes the iframe on screen -- see NATIVE_WIDTH's comment
+    // for why that distinction is the whole point of this rewrite.
+    const scale = Math.max(rect.width / NATIVE_WIDTH, rect.height / NATIVE_HEIGHT) * OVERSCAN;
+    this.iframe.style.transform = `translate(-50%, -50%) scale(${scale})`;
   }
 
   private render(): void {
