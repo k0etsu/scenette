@@ -147,6 +147,39 @@ describe("nextSeq", () => {
   });
 });
 
+describe("keyboard delete", () => {
+  it("deletes the selected asset on Delete", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset());
+    canvas.selectAsset("a1");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete" }));
+    expect(callbacks.onAssetDelete).toHaveBeenCalledWith("a1");
+  });
+
+  it("does NOT delete on Backspace -- that's the character-erase key used while typing in text fields", () => {
+    // Regression: Backspace used to also delete the selected asset, so
+    // backspacing text in the sidebar's name/text fields (or the canvas's
+    // own inline text editor) while an asset was selected deleted the
+    // asset instead of just erasing a character.
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset());
+    canvas.selectAsset("a1");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace" }));
+    expect(callbacks.onAssetDelete).not.toHaveBeenCalled();
+  });
+
+  it("ignores Delete while focus is inside an input/textarea/contenteditable region", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset());
+    canvas.selectAsset("a1");
+
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", bubbles: true }));
+    expect(callbacks.onAssetDelete).not.toHaveBeenCalled();
+  });
+});
+
 describe("selectAsset", () => {
   it("fires onSelectionChange with the new id", () => {
     const { canvas, callbacks } = setup();
@@ -358,6 +391,81 @@ describe("volume multipliers", () => {
     canvas.setVolumeMultipliers(0.6, 1);
     canvas.setVolumeMultipliers(0.9, 1);
     expect(playSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("double-click to edit text inline", () => {
+  it("makes the text element contentEditable on double-click", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    expect(div.contentEditable).not.toBe("true");
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(div.contentEditable).toBe("true");
+  });
+
+  it("commits the edited text as a patch on blur", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    div.textContent = "edited";
+    div.dispatchEvent(new FocusEvent("blur"));
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { text: "edited" }, expect.any(Number));
+    expect(div.contentEditable).not.toBe("true");
+  });
+
+  it("does not send a patch on blur if the text didn't actually change", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    div.dispatchEvent(new FocusEvent("blur"));
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+  });
+
+  it("reverts to the original text on Escape without sending a patch", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    div.textContent = "edited";
+    div.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(div.textContent).toBe("hello");
+    expect(div.contentEditable).not.toBe("true");
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+  });
+
+  it("Enter (without Shift) blurs to commit rather than inserting a newline", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+
+    const blurSpy = vi.spyOn(div, "blur");
+    const event = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
+    div.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(blurSpy).toHaveBeenCalled();
+  });
+
+  it("does not start a canvas drag from a mousedown while the text is being edited", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
+    const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+
+    vi.mocked(callbacks.onSelectionChange).mockClear();
+    div.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    // A drag-starting mousedown always fires onSelectionChange on first
+    // selection -- since the asset was already selected by upsert/dblclick
+    // in this flow, the clean check is just that no new drag state broke
+    // anything: moving the mouse must not move the (still-being-edited) asset.
+    window.dispatchEvent(new MouseEvent("mousemove", { movementX: 50, movementY: 50 }));
+    window.dispatchEvent(new MouseEvent("mouseup"));
+    expect(callbacks.onAssetMove).not.toHaveBeenCalled();
   });
 });
 

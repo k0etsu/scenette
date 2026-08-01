@@ -232,6 +232,179 @@ describe("bindSlider", () => {
   });
 });
 
+describe("editable name field", () => {
+  it("shows an empty input with the derived label as a placeholder when no name is set", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello world" })]);
+    sidebar.setSelected("a1");
+
+    const nameInput = propertiesPanel.querySelector('[data-role="name"]') as HTMLInputElement;
+    expect(nameInput.value).toBe("");
+    expect(nameInput.placeholder).toBe("hello world");
+  });
+
+  it("prefills the input with an explicitly-set name", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ name: "My Label" })]);
+    sidebar.setSelected("a1");
+
+    const nameInput = propertiesPanel.querySelector('[data-role="name"]') as HTMLInputElement;
+    expect(nameInput.value).toBe("My Label");
+  });
+
+  it("sends a patch on change (blur), not on every keystroke", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset()]);
+    sidebar.setSelected("a1");
+
+    const nameInput = propertiesPanel.querySelector('[data-role="name"]') as HTMLInputElement;
+    nameInput.value = "Renamed";
+    nameInput.dispatchEvent(new Event("input"));
+    expect(onPatch).not.toHaveBeenCalled();
+
+    nameInput.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { name: "Renamed" });
+  });
+
+  it("blurs the input on Enter (which commits via the change listener, same as clicking away)", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset()]);
+    sidebar.setSelected("a1");
+
+    const nameInput = propertiesPanel.querySelector('[data-role="name"]') as HTMLInputElement;
+    nameInput.focus();
+    expect(document.activeElement).toBe(nameInput);
+    nameInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(document.activeElement).not.toBe(nameInput);
+  });
+
+  it("is shown for every asset type, not just text", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "video" })]);
+    sidebar.setSelected("a1");
+    expect(propertiesPanel.querySelector('[data-role="name"]')).not.toBeNull();
+  });
+});
+
+describe("text settings section", () => {
+  it("is only shown for text assets", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "image" })]);
+    sidebar.setSelected("a1");
+    expect(propertiesPanel.querySelector('[data-role="font-family"]')).toBeNull();
+  });
+
+  it("lists every font family as an option, defaulting to Roboto", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const select = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    expect(select.value).toBe("Roboto");
+    const options = [...select.options].map((o) => o.value);
+    expect(options).toContain("Comic Sans MS");
+    expect(options).toContain("RuneScape");
+    expect(options).toHaveLength(12);
+  });
+
+  it("patches fontFamily/fontSize/fontWeight/textAlign on change", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const family = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    family.value = "Comic Neue";
+    family.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { fontFamily: "Comic Neue" });
+
+    const size = propertiesPanel.querySelector('[data-role="font-size"]') as HTMLInputElement;
+    size.value = "32";
+    size.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { fontSize: 32 });
+
+    const align = propertiesPanel.querySelector('[data-role="text-align"]') as HTMLSelectElement;
+    align.value = "center";
+    align.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { textAlign: "center" });
+  });
+
+  it("keeps the color swatch and hex input in sync and patches on change", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const hex = propertiesPanel.querySelector('[data-role="bg-color-hex"]') as HTMLInputElement;
+    const swatch = propertiesPanel.querySelector('[data-role="bg-color-swatch"]') as HTMLInputElement;
+    hex.value = "#ff00ff";
+    hex.dispatchEvent(new Event("change"));
+    expect(swatch.value).toBe("#ff00ff");
+    expect(onPatch).toHaveBeenCalledWith("a1", { backgroundColor: "#ff00ff" });
+  });
+
+  it("swaps background and text colors", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(
+      objectsPanel,
+      propertiesPanel,
+      makeCallbacks({ onPatch })
+    );
+    sidebar.setAssets([makeAsset({ type: "text", backgroundColor: "#000000", textColor: "#ffffff" })]);
+    sidebar.setSelected("a1");
+
+    propertiesPanel.querySelector<HTMLButtonElement>('[data-role="swap-colors"]')!.click();
+    expect(onPatch).toHaveBeenCalledWith("a1", { backgroundColor: "#ffffff", textColor: "#000000" });
+  });
+
+  it("patches backgroundAlpha as a 0-1 fraction from the 0-100 slider", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const alpha = propertiesPanel.querySelector('[data-role="bg-alpha"]') as HTMLInputElement;
+    alpha.value = "70";
+    alpha.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { backgroundAlpha: 0.7 });
+  });
+
+  it("patches shadow fields including the enabled checkbox", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const enabled = propertiesPanel.querySelector('[data-role="shadow-enabled"]') as HTMLInputElement;
+    enabled.checked = true;
+    enabled.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { shadowEnabled: true });
+
+    const blur = propertiesPanel.querySelector('[data-role="shadow-blur"]') as HTMLInputElement;
+    blur.value = "8";
+    blur.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { shadowBlur: 8 });
+  });
+
+  it("patches outline fields including the enabled checkbox", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const enabled = propertiesPanel.querySelector('[data-role="outline-enabled"]') as HTMLInputElement;
+    enabled.checked = true;
+    enabled.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { outlineEnabled: true });
+
+    const width = propertiesPanel.querySelector('[data-role="outline-width"]') as HTMLInputElement;
+    width.value = "3";
+    width.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { outlineWidth: 3 });
+  });
+});
+
 describe("setAssets / selection lifecycle", () => {
   it("clears selection when the previously-selected asset is no longer present", () => {
     const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());

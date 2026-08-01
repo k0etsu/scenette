@@ -207,8 +207,7 @@ async function main(): Promise<void> {
 
   function createTextAsset(): void {
     if (!current) return;
-    const text = window.prompt("Text content:");
-    if (!text) return;
+    const text = "New Text";
 
     const width = 200;
     const height = 50;
@@ -595,6 +594,7 @@ function enterRoom(
       zIndex: source.zIndex,
       s3Key: source.s3Key,
       text: source.text,
+      name: source.name,
       opacity: source.opacity,
       blur: source.blur,
       flipX: source.flipX,
@@ -605,6 +605,21 @@ function enterRoom(
       muted: source.muted,
       volume: source.volume,
       paused: source.paused,
+      fontFamily: source.fontFamily,
+      fontSize: source.fontSize,
+      fontWeight: source.fontWeight,
+      textAlign: source.textAlign,
+      textColor: source.textColor,
+      backgroundColor: source.backgroundColor,
+      backgroundAlpha: source.backgroundAlpha,
+      shadowEnabled: source.shadowEnabled,
+      shadowX: source.shadowX,
+      shadowY: source.shadowY,
+      shadowBlur: source.shadowBlur,
+      shadowColor: source.shadowColor,
+      outlineEnabled: source.outlineEnabled,
+      outlineColor: source.outlineColor,
+      outlineWidth: source.outlineWidth,
     };
     room.connection.send({ action: "asset:add", roomId, asset });
     // Select the new copy, not the original -- matches standard duplicate

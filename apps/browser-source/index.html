@@ -3,6 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <title>scenette browser source</title>
+    <!-- Must match control-ui/index.html's <link> exactly (same families/
+         weights) so a text asset renders identically here as it does in the
+         editor preview -- see that file's comment for which of
+         TEXT_FONT_FAMILIES this actually covers. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;200;300;400;500;600;700;800;900&family=Roboto+Mono:wght@100;200;300;400;500;600;700&family=Space+Mono:wght@400;700&family=Comic+Neue:wght@300;400;700&family=Redressed&display=swap"
+      rel="stylesheet"
+    />
     <style>
       html, body {
         margin: 0;

@@ -1,4 +1,4 @@
-import { Asset, Variable, Viewport, interpolateText } from "@scenette/protocol";
+import { Asset, Variable, Viewport, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
 
 // Renders viewport-relative coordinates: an asset at world position (x,y)
 // is drawn at (x - viewport.x, y - viewport.y) so the OBS canvas only ever
@@ -194,6 +194,7 @@ export class Renderer {
     if (asset.type === "text") {
       const interpolated = interpolateText(asset.text ?? "", this.variables);
       if (el.textContent !== interpolated) el.textContent = interpolated;
+      Object.assign(el.style, textStyleToCss(resolveTextStyle(asset)));
     }
     if (asset.type === "video" || asset.type === "audio") {
       syncMediaState(el as HTMLMediaElement, asset, this.effectiveVolume(asset));
@@ -225,8 +226,18 @@ export class Renderer {
         break;
       }
       case "text": {
+        // Layout-only here -- the actual styling (font/colors/shadow/
+        // outline) is applied in applyImmediateFields(), which runs
+        // immediately after this element is created (see upsert()/paint()),
+        // matching control-ui's canvas.ts exactly so a text asset renders
+        // the same in both.
         el = document.createElement("div");
         el.textContent = asset.text ?? "";
+        el.style.padding = "4px";
+        el.style.boxSizing = "border-box";
+        el.style.overflow = "hidden";
+        el.style.whiteSpace = "pre-wrap";
+        el.style.wordBreak = "break-word";
         break;
       }
     }

@@ -1,4 +1,4 @@
-import { Asset, AssetPatch, Variable, Viewport, interpolateText } from "@scenette/protocol";
+import { Asset, AssetPatch, Variable, Viewport, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
 import { ICON_AUDIO_LARGE } from "./icons";
 
 interface Entry {
@@ -468,6 +468,10 @@ export class CanvasView {
     if (asset.type === "text") {
       const interpolated = interpolateText(asset.text ?? "", this.variables);
       if (content.textContent !== interpolated) content.textContent = interpolated;
+      // Applied identically in browser-source's render.ts (via the same
+      // shared resolveTextStyle/textStyleToCss helpers) so a text asset
+      // looks the same in the editor preview as it does to viewers.
+      Object.assign(content.style, textStyleToCss(resolveTextStyle(asset)));
     }
     // The editor's own preview never actually played video -- only
     // browser-source synced .loop/.muted/.volume/.play()/.pause() from the
@@ -519,8 +523,18 @@ export class CanvasView {
         break;
       }
       case "text": {
+        // Layout-only here (never changes per-edit) -- the actual styling
+        // (font/colors/shadow/outline) is applied in applyTransform(),
+        // which runs on every render including the one immediately
+        // following this element's creation, so setting it twice here
+        // would just be overwritten redundantly.
         content = document.createElement("div");
         content.textContent = asset.text ?? "";
+        content.style.padding = "4px";
+        content.style.boxSizing = "border-box";
+        content.style.overflow = "hidden";
+        content.style.whiteSpace = "pre-wrap";
+        content.style.wordBreak = "break-word";
         break;
       }
     }
@@ -534,7 +548,62 @@ export class CanvasView {
     el.style.cursor = "grab";
     el.appendChild(content);
     el.addEventListener("mousedown", (event) => this.onAssetMouseDown(event, asset.assetId));
+    if (asset.type === "text") {
+      content.addEventListener("dblclick", (event) => this.beginInlineTextEdit(event, asset.assetId, content));
+    }
     return { el, content };
+  }
+
+  // Double-click-to-edit: makes the text element itself the editing
+  // surface (rather than popping a separate input/modal) so the in-place
+  // font/size/color styling is visible while typing. Committed on blur or
+  // Enter (Shift+Enter inserts a literal newline instead, matching a normal
+  // textarea); Escape reverts to the last-committed text without patching.
+  private beginInlineTextEdit(event: MouseEvent, assetId: string, content: HTMLElement): void {
+    event.stopPropagation();
+    const entry = this.entries.get(assetId);
+    if (!entry || entry.asset.locked) return;
+
+    const original = entry.asset.text ?? "";
+    content.contentEditable = "true";
+    content.style.cursor = "text";
+    content.focus();
+    // Select all existing text so typing immediately replaces it, matching
+    // the reference tool's own double-click-to-edit behavior.
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const stopEditing = (commit: boolean): void => {
+      content.contentEditable = "false";
+      content.style.cursor = "";
+      content.removeEventListener("blur", onBlur);
+      content.removeEventListener("keydown", onKeyDown);
+      if (commit) {
+        const next = content.textContent ?? "";
+        if (next !== original) this.patchAsset(assetId, { text: next });
+      } else if (content.textContent !== original) {
+        // Reverted -- restore the displayed text without a patch. (See
+        // applyTransform: it only rewrites textContent when it actually
+        // differs from the interpolated value, so this needs to happen
+        // explicitly here rather than relying on the next render.)
+        content.textContent = original;
+      }
+    };
+    const onBlur = () => stopEditing(true);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        content.blur();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        stopEditing(false);
+      }
+    };
+    content.addEventListener("blur", onBlur);
+    content.addEventListener("keydown", onKeyDown);
   }
 
   // Bound once as instance fields (not inline closures) so dispose() has a
@@ -597,9 +666,19 @@ export class CanvasView {
   };
 
   private readonly handleWindowKeyDown = (event: KeyboardEvent): void => {
-    if ((event.key === "Delete" || event.key === "Backspace") && this.selectedAssetId) {
-      this.callbacks.onAssetDelete(this.selectedAssetId);
-    }
+    // Backspace deliberately excluded -- it's the character-erase key used
+    // while typing in the sidebar's name/text fields (and the canvas's own
+    // inline text editing), so treating it as "delete asset" too meant
+    // backspacing text while an asset was selected also deleted the asset.
+    // Only "Delete" is a delete gesture anywhere else in the app.
+    if (event.key !== "Delete" || !this.selectedAssetId) return;
+    // Ignore while focus is inside a form field/editable region (typing in
+    // the properties panel or the canvas's own inline text editor) --
+    // otherwise pressing Delete to remove a character forward still deletes
+    // the whole asset instead.
+    const target = event.target as HTMLElement | null;
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.contentEditable === "true")) return;
+    this.callbacks.onAssetDelete(this.selectedAssetId);
   };
 
   private bindContainerEvents(): void {
@@ -633,6 +712,12 @@ export class CanvasView {
     // click (context menu) both need to fall through to the container's
     // own handlers rather than being captured here.
     if (event.button !== 0) return;
+    // While a text asset's inline editor is active (see the dblclick
+    // handler in createElement below), a mousedown is the user placing the
+    // text cursor / selecting a range inside it -- must NOT also start a
+    // canvas drag, or every click while editing would drag the asset out
+    // from under the cursor instead of moving the caret.
+    if ((event.target as HTMLElement).contentEditable === "true") return;
     event.stopPropagation();
     if (this.selectedAssetId !== assetId) {
       this.selectedAssetId = assetId;
