@@ -328,6 +328,12 @@
       #canvas-inner {
         position: absolute;
         inset: 0;
+        /* Must outrank #stream-preview-overlay's z-index (both are
+           position:absolute siblings under #canvas-container) so canvas
+           assets render *in front of* the stream preview, not behind it --
+           the whole point of the preview is to see assets composited over
+           the real stream, not have it cover them. */
+        z-index: 10;
       }
       /* Sibling of #canvas-inner (not a child of it) so CanvasView's own
          dispose()-on-room-switch (which wipes #canvas-inner's contents
@@ -335,7 +341,7 @@
       #stream-preview-overlay {
         display: none;
         pointer-events: none;
-        z-index: 50;
+        z-index: 1;
       }
       .stream-preview-row {
         display: flex;
