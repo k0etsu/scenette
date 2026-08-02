@@ -540,7 +540,13 @@ function enterRoom(
           canvas.setAssets(message.assets);
           sidebar.setAssets(message.assets);
           soundPanel.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
-          streamPreviewPanel.applySettings(message.streamPreviewSettings, message.streamPreviewSettingsSeq);
+          // enterRoom (not applySettings) -- this panel is a singleton that
+          // survives every room switch, so a plain seq-guarded apply here
+          // would compare this room's stored seq against whatever this
+          // browser last applied in the PREVIOUS room, silently rejecting
+          // the new room's real settings as "stale" whenever that happened
+          // to be lower. See streamPreview.ts's enterRoom() doc comment.
+          streamPreviewPanel.enterRoom(message.streamPreviewSettings, message.streamPreviewSettingsSeq);
           canvas.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
           variablesPanel.setVariables(message.variables);
           connectedUsersPanel.setPresence(message.presence);

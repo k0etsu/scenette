@@ -323,16 +323,19 @@ describe("StreamPreviewPanel -- always-on-top border strips", () => {
 });
 
 describe("StreamPreviewPanel -- room-scoped settings, owner-only", () => {
-  it("defaults to read-only: settings gear hidden and platform select disabled", () => {
+  it("defaults to read-only: settings gear hidden (via visibility, not display) and platform select disabled", () => {
+    // visibility (not display) -- the button's layout space must stay
+    // reserved either way, so the header title stays centered regardless
+    // of ownership (see setIsOwner's doc comment).
     makePanel();
-    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.display).toBe("none");
+    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.visibility).toBe("hidden");
     expect((root.querySelector('[data-role="platform"]') as HTMLSelectElement).disabled).toBe(true);
   });
 
   it("setIsOwner(true) reveals the settings gear and enables the platform select", () => {
     const panel = makePanel();
     panel.setIsOwner(true);
-    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.display).not.toBe("none");
+    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.visibility).toBe("visible");
     expect((root.querySelector('[data-role="platform"]') as HTMLSelectElement).disabled).toBe(false);
   });
 
@@ -340,7 +343,7 @@ describe("StreamPreviewPanel -- room-scoped settings, owner-only", () => {
     const panel = makePanel();
     panel.setIsOwner(true);
     panel.setIsOwner(false);
-    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.display).toBe("none");
+    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.visibility).toBe("hidden");
     expect((root.querySelector('[data-role="platform"]') as HTMLSelectElement).disabled).toBe(true);
   });
 
@@ -388,7 +391,7 @@ describe("StreamPreviewPanel -- room-scoped settings, owner-only", () => {
   });
 });
 
-describe("StreamPreviewPanel -- applySettings (snapshot/broadcast)", () => {
+describe("StreamPreviewPanel -- applySettings (live broadcast within the same room)", () => {
   it("updates the settings, platform select, and embed URL", () => {
     const panel = makePanel();
     panel.applySettings({ platform: "youtube", twitchChannel: "", youtubeChannelId: "UCabc123" }, 1);
@@ -415,6 +418,60 @@ describe("StreamPreviewPanel -- applySettings (snapshot/broadcast)", () => {
     configureTwitchChannel(panel, "third");
     enableEmbed();
     expect(iframeEl().src).toContain("channel=third");
+  });
+});
+
+describe("StreamPreviewPanel -- enterRoom (switching rooms)", () => {
+  // Regression: this panel is a singleton that survives every room switch
+  // (it's a sibling of #canvas-inner so CanvasView.dispose() never wipes
+  // it -- see the class doc). Without a dedicated per-room reset, its state
+  // from the PREVIOUS room leaked into the next one in three separate ways,
+  // each covered below.
+  it("applies the new room's settings even when its stored seq is LOWER than this browser's last-applied seq from a previous room", () => {
+    const panel = makePanel();
+    // Simulates having already applied a high seq while in a previous room.
+    panel.applySettings({ platform: "twitch", twitchChannel: "old-room-channel", youtubeChannelId: "" }, 999);
+
+    // The new room's own stored seq can easily be lower -- seq is a
+    // per-room value, not shared across rooms.
+    panel.enterRoom({ platform: "twitch", twitchChannel: "new-room-channel", youtubeChannelId: "" }, 5);
+
+    enableEmbed();
+    expect(iframeEl().src).toContain("channel=new-room-channel");
+  });
+
+  it("defaults the embed checkbox back to unticked", () => {
+    const panel = makePanel();
+    enableEmbed();
+    expect(checkbox("embed").checked).toBe(true);
+
+    panel.enterRoom({ platform: "twitch", twitchChannel: "", youtubeChannelId: "" }, 1);
+    expect(checkbox("embed").checked).toBe(false);
+  });
+
+  it("resets interactive and opacity back to their defaults too", () => {
+    const panel = makePanel();
+    checkbox("interactive").checked = true;
+    checkbox("interactive").dispatchEvent(new Event("change"));
+    const slider = root.querySelector('[data-role="opacity"]') as HTMLInputElement;
+    slider.value = "30";
+    slider.dispatchEvent(new Event("input"));
+
+    panel.enterRoom({ platform: "twitch", twitchChannel: "", youtubeChannelId: "" }, 1);
+
+    expect(checkbox("interactive").checked).toBe(false);
+    expect((root.querySelector('[data-role="opacity"]') as HTMLInputElement).value).toBe("100");
+  });
+
+  it("does not carry over the previous room's already-loaded iframe src", () => {
+    const panel = makePanel();
+    configureTwitchChannel(panel, "old-room-channel");
+    enableEmbed();
+    expect(iframeEl().src).toContain("channel=old-room-channel");
+
+    panel.enterRoom({ platform: "twitch", twitchChannel: "new-room-channel", youtubeChannelId: "" }, 1);
+    enableEmbed(); // enterRoom already unticked it -- re-enable to check the src
+    expect(iframeEl().src).toContain("channel=new-room-channel");
   });
 });
 

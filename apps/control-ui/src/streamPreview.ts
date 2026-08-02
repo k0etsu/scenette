@@ -161,7 +161,9 @@ export class StreamPreviewPanel {
     // room's owner -- see the class doc for why the channel itself is
     // room-owned, unlike embed/interactive/opacity.
     this.platformSelect.disabled = true;
-    this.settingsButton.style.display = "none";
+    // visibility, not display -- see setIsOwner's comment on why this
+    // button's layout space must stay reserved regardless of ownership.
+    this.settingsButton.style.visibility = "hidden";
 
     this.embedCheckbox.addEventListener("change", () => this.render());
     this.interactiveCheckbox.addEventListener("change", () => this.render());
@@ -363,15 +365,38 @@ export class StreamPreviewPanel {
     return this.lastSeq;
   }
 
-  // Applied from both the initial room:snapshot and any later
-  // room:streamPreviewSettingsChanged broadcast (including this browser's
-  // own echo) -- guarded the same way as SoundPanel.setGlobalVolume so an
-  // out-of-order arrival can't stomp a more recent local edit.
+  // Applied only from a later room:streamPreviewSettingsChanged broadcast
+  // (including this browser's own echo) within the SAME room -- guarded the
+  // same way as SoundPanel.setGlobalVolume so an out-of-order arrival can't
+  // stomp a more recent local edit. Never called for a room's initial
+  // snapshot -- see enterRoom() below for why that needs to bypass this
+  // guard entirely rather than reuse it.
   applySettings(settings: StreamPreviewSettings, seq: number): void {
     if (seq < this.lastSeq) return;
     this.lastSeq = seq;
     this.settings = settings;
     this.platformSelect.value = settings.platform;
+    this.render();
+  }
+
+  // Called once per room entry (this room's initial room:snapshot), not for
+  // a later live broadcast -- this panel is a singleton that survives every
+  // room switch (see the class doc), so without this its state from the
+  // PREVIOUS room leaked into the next one: `lastSeq` doesn't reset between
+  // rooms, so the new room's real (lower) stored seq could get silently
+  // rejected as "stale" by applySettings' guard, permanently stuck showing
+  // the old room's channel; the embed checkbox stayed however it was left in
+  // the last room instead of defaulting off; and the iframe kept its
+  // previous room's already-loaded src (lastAssignedSrc suppresses a
+  // reassignment that looks like "no change", even though the room changed).
+  enterRoom(settings: StreamPreviewSettings, seq: number): void {
+    this.lastSeq = seq;
+    this.settings = settings;
+    this.platformSelect.value = settings.platform;
+    this.lastAssignedSrc = undefined;
+    this.embedCheckbox.checked = false;
+    this.interactiveCheckbox.checked = false;
+    this.opacitySlider.value = "100";
     this.render();
   }
 
@@ -381,7 +406,11 @@ export class StreamPreviewPanel {
   setIsOwner(isOwner: boolean): void {
     this.isOwner = isOwner;
     this.platformSelect.disabled = !isOwner;
-    this.settingsButton.style.display = isOwner ? "" : "none";
+    // visibility (not display) -- keeps this button's layout space
+    // reserved so the header title stays centered between the expand icon
+    // and this slot regardless of ownership, rather than the title visibly
+    // drifting off-center when the third element disappears entirely.
+    this.settingsButton.style.visibility = isOwner ? "visible" : "hidden";
   }
 
   private openSettings(): void {
