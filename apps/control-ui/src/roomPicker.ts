@@ -1,14 +1,13 @@
 import { RoomMembership } from "./auth";
 
-// Shown right after login when the account has access to more than just
-// its own personal room (e.g. it's a mod on someone else's room too) --
-// previously the app skipped straight into the personal room every time,
-// with no way to reach a room you only have mod access to except via a
-// bookmarked/shared link. A single-room account never sees this
-// automatically, but can still reach it via the in-room "Dashboard" button
-// (see main.ts's caller for both cases).
+// Shown right after every login/bare visit (unless the URL names an
+// explicit room), regardless of how many rooms the account has access to --
+// a consistent landing spot rather than sometimes skipping straight into a
+// room. Also reachable any time via the in-room "Dashboard" button (see
+// main.ts's caller for both cases).
 export interface RoomPickerCallbacks {
   onLogout: () => void;
+  onSettings: () => void;
 }
 
 export class RoomPicker {
@@ -48,7 +47,10 @@ export class RoomPicker {
         <div id="room-picker">
           <div class="room-picker-header">
             <h2>Choose a room</h2>
-            <button type="button" data-role="logout" class="room-picker-logout">Log out</button>
+            <div class="room-picker-header-buttons">
+              <button type="button" data-role="settings" class="room-picker-logout">Settings</button>
+              <button type="button" data-role="logout" class="room-picker-logout">Log out</button>
+            </div>
           </div>
           <div data-role="room-picker-list">${rowsHtml}</div>
         </div>
@@ -65,6 +67,9 @@ export class RoomPicker {
 
       this.root.querySelector('[data-role="logout"]')!.addEventListener("click", () => {
         this.callbacks.onLogout();
+      });
+      this.root.querySelector('[data-role="settings"]')!.addEventListener("click", () => {
+        this.callbacks.onSettings();
       });
     });
   }

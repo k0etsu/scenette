@@ -13,23 +13,21 @@ vi.mock("../src/store", () => ({
   listMembers: vi.fn(),
   deleteMembership: vi.fn(),
   getRoomOwner: vi.fn(),
-  createVerification: vi.fn(),
-  getVerificationUsername: vi.fn(),
-  deleteVerification: vi.fn(),
-  markEmailVerified: vi.fn(),
+  updateAccountPassword: vi.fn(),
+  updateAccountEmail: vi.fn(),
   createInvite: vi.fn(),
   getInvite: vi.fn(),
   redeemInvite: vi.fn(),
   deleteInvite: vi.fn(),
   listPendingInvites: vi.fn(),
 }));
-vi.mock("../src/email", () => ({
-  sendVerificationEmail: vi.fn(),
+vi.mock("../src/cascade", () => ({
+  deleteAccountCascade: vi.fn(),
 }));
 
 import { handler } from "../src/index";
 import * as store from "../src/store";
-import * as email from "../src/email";
+import * as cascade from "../src/cascade";
 
 function event(routeKey: string, opts: Partial<APIGatewayProxyEventV2> = {}): APIGatewayProxyEventV2 {
   return {
@@ -79,7 +77,7 @@ describe("POST /auth/register", () => {
     expect(jsonBody(res).error).toMatch(/password/);
   });
 
-  it("rejects an invalid email", async () => {
+  it("rejects an invalid email when one is provided", async () => {
     const res: any = await handler(
       event("POST /auth/register", { body: JSON.stringify({ username: "alice", email: "not-an-email", password: "password123" }) }),
       {} as any,
@@ -89,22 +87,34 @@ describe("POST /auth/register", () => {
     expect(jsonBody(res).error).toMatch(/email/);
   });
 
-  it("creates an unverified account, sends a verification email, and returns no sessionToken", async () => {
+  it("allows registering with no email at all -- it's optional", async () => {
     vi.mocked(store.createAccount).mockResolvedValue(true);
-    vi.mocked(store.createVerification).mockResolvedValue("tok123");
+    vi.mocked(store.createSession).mockResolvedValue("session-token");
+
+    const res: any = await handler(
+      event("POST /auth/register", { body: JSON.stringify({ username: "alice", password: "password123" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(201);
+    expect(store.createAccount).toHaveBeenCalledWith(expect.objectContaining({ username: "alice", email: undefined }));
+  });
+
+  it("creates the account, its personal room membership, and logs straight in -- no verification step", async () => {
+    vi.mocked(store.createAccount).mockResolvedValue(true);
+    vi.mocked(store.createSession).mockResolvedValue("session-token");
 
     const res: any = await handler(event("POST /auth/register", { body: validBody }), {} as any, undefined as any);
 
     expect(store.createAccount).toHaveBeenCalledWith(
-      expect.objectContaining({ username: "alice", email: "alice@example.com", emailVerified: false })
+      expect.objectContaining({ username: "alice", email: "alice@example.com" })
     );
     expect(store.putMembership).toHaveBeenCalledWith(
       expect.objectContaining({ accountId: "alice", role: "owner" })
     );
-    expect(email.sendVerificationEmail).toHaveBeenCalledWith("alice@example.com", "alice", "tok123");
     expect(res.statusCode).toBe(201);
     const body = jsonBody(res);
-    expect(body.sessionToken).toBeUndefined();
+    expect(body.sessionToken).toBe("session-token");
     expect(body.username).toBe("alice");
   });
 
@@ -112,15 +122,6 @@ describe("POST /auth/register", () => {
     vi.mocked(store.createAccount).mockResolvedValue(false);
     const res: any = await handler(event("POST /auth/register", { body: validBody }), {} as any, undefined as any);
     expect(res.statusCode).toBe(409);
-  });
-
-  it("still returns 201 even if sending the verification email fails", async () => {
-    vi.mocked(store.createAccount).mockResolvedValue(true);
-    vi.mocked(store.createVerification).mockResolvedValue("tok123");
-    vi.mocked(email.sendVerificationEmail).mockRejectedValue(new Error("SES down"));
-
-    const res: any = await handler(event("POST /auth/register", { body: validBody }), {} as any, undefined as any);
-    expect(res.statusCode).toBe(201);
   });
 });
 
@@ -133,7 +134,7 @@ describe("POST /auth/login", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("blocks login when emailVerified is explicitly false", async () => {
+  it("logs in successfully with no email-verification gate", async () => {
     const { hashPassword } = await import("../src/passwords");
     const { hash, salt } = await hashPassword("password123");
     vi.mocked(store.getAccount).mockResolvedValue({
@@ -141,26 +142,6 @@ describe("POST /auth/login", () => {
       passwordHash: hash,
       passwordSalt: salt,
       email: "alice@example.com",
-      emailVerified: false,
-      personalRoomId: "room1",
-      createdAt: "t",
-    });
-
-    const res: any = await handler(event("POST /auth/login", { body: loginBody }), {} as any, undefined as any);
-    expect(res.statusCode).toBe(403);
-    expect(jsonBody(res).unverified).toBe(true);
-    expect(store.createSession).not.toHaveBeenCalled();
-  });
-
-  it("allows login for a verified account", async () => {
-    const { hashPassword } = await import("../src/passwords");
-    const { hash, salt } = await hashPassword("password123");
-    vi.mocked(store.getAccount).mockResolvedValue({
-      username: "alice",
-      passwordHash: hash,
-      passwordSalt: salt,
-      email: "alice@example.com",
-      emailVerified: true,
       personalRoomId: "room1",
       createdAt: "t",
     });
@@ -171,18 +152,16 @@ describe("POST /auth/login", () => {
     expect(jsonBody(res).sessionToken).toBe("session-token");
   });
 
-  it("grandfathers in a legacy account with no emailVerified attribute at all", async () => {
+  it("logs in an account with no email at all", async () => {
     const { hashPassword } = await import("../src/passwords");
     const { hash, salt } = await hashPassword("password123");
     vi.mocked(store.getAccount).mockResolvedValue({
       username: "alice",
       passwordHash: hash,
       passwordSalt: salt,
-      // emailVerified deliberately omitted -- simulates a pre-existing
-      // DynamoDB row from before this field existed.
       personalRoomId: "room1",
       createdAt: "t",
-    } as any);
+    });
     vi.mocked(store.createSession).mockResolvedValue("session-token");
 
     const res: any = await handler(event("POST /auth/login", { body: loginBody }), {} as any, undefined as any);
@@ -197,7 +176,6 @@ describe("POST /auth/login", () => {
       passwordHash: hash,
       passwordSalt: salt,
       email: "alice@example.com",
-      emailVerified: true,
       personalRoomId: "room1",
       createdAt: "t",
     });
@@ -207,91 +185,157 @@ describe("POST /auth/login", () => {
   });
 });
 
-describe("GET /auth/verify", () => {
-  it("returns 400 html when the token query param is missing", async () => {
+describe("POST /auth/change-password", () => {
+  it("requires a session", async () => {
     const res: any = await handler(
-      event("GET /auth/verify", { queryStringParameters: undefined }),
+      event("POST /auth/change-password", { body: JSON.stringify({ currentPassword: "a", newPassword: "b" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("rejects a too-short new password", async () => {
+    const res: any = await handler(
+      authedEvent("POST /auth/change-password", "alice", {
+        body: JSON.stringify({ currentPassword: "password123", newPassword: "short" }),
+      }),
       {} as any,
       undefined as any
     );
     expect(res.statusCode).toBe(400);
-    expect(res.headers["Content-Type"]).toMatch(/text\/html/);
   });
 
-  it("returns 400 html for an unknown/expired token", async () => {
-    vi.mocked(store.getVerificationUsername).mockResolvedValue(undefined);
+  it("rejects an incorrect current password", async () => {
+    const { hashPassword } = await import("../src/passwords");
+    const { hash, salt } = await hashPassword("the-real-password");
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: hash,
+      passwordSalt: salt,
+      personalRoomId: "room1",
+      createdAt: "t",
+    });
     const res: any = await handler(
-      event("GET /auth/verify", { queryStringParameters: { token: "bogus" } }),
+      authedEvent("POST /auth/change-password", "alice", {
+        body: JSON.stringify({ currentPassword: "wrong-password", newPassword: "newpassword123" }),
+      }),
       {} as any,
       undefined as any
     );
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(401);
+    expect(store.updateAccountPassword).not.toHaveBeenCalled();
   });
 
-  it("marks the account verified, deletes the token, and returns 200 html on success", async () => {
-    vi.mocked(store.getVerificationUsername).mockResolvedValue("alice");
+  it("updates the password hash/salt on success", async () => {
+    const { hashPassword } = await import("../src/passwords");
+    const { hash, salt } = await hashPassword("password123");
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: hash,
+      passwordSalt: salt,
+      personalRoomId: "room1",
+      createdAt: "t",
+    });
     const res: any = await handler(
-      event("GET /auth/verify", { queryStringParameters: { token: "tok123" } }),
+      authedEvent("POST /auth/change-password", "alice", {
+        body: JSON.stringify({ currentPassword: "password123", newPassword: "newpassword123" }),
+      }),
       {} as any,
       undefined as any
     );
-    expect(store.markEmailVerified).toHaveBeenCalledWith("alice");
-    expect(store.deleteVerification).toHaveBeenCalledWith("tok123");
     expect(res.statusCode).toBe(200);
-    expect(res.headers["Content-Type"]).toMatch(/text\/html/);
+    expect(store.updateAccountPassword).toHaveBeenCalledWith("alice", expect.any(String), expect.any(String));
   });
 });
 
-describe("POST /auth/resend-verification", () => {
-  it("returns the same generic response for an unknown username (no enumeration)", async () => {
-    vi.mocked(store.getAccount).mockResolvedValue(undefined);
+describe("POST /auth/change-email", () => {
+  it("requires a session", async () => {
     const res: any = await handler(
-      event("POST /auth/resend-verification", { body: JSON.stringify({ username: "ghost" }) }),
+      event("POST /auth/change-email", { body: JSON.stringify({ email: "a@b.com" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("rejects an invalid email", async () => {
+    const res: any = await handler(
+      authedEvent("POST /auth/change-email", "alice", { body: JSON.stringify({ email: "not-an-email" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+    expect(store.updateAccountEmail).not.toHaveBeenCalled();
+  });
+
+  it("updates the email on success", async () => {
+    const res: any = await handler(
+      authedEvent("POST /auth/change-email", "alice", { body: JSON.stringify({ email: "new@example.com" }) }),
       {} as any,
       undefined as any
     );
     expect(res.statusCode).toBe(200);
-    expect(email.sendVerificationEmail).not.toHaveBeenCalled();
+    expect(store.updateAccountEmail).toHaveBeenCalledWith("alice", "new@example.com");
   });
 
-  it("does not resend for an already-verified account", async () => {
+  it("clears the email when given an empty string", async () => {
+    const res: any = await handler(
+      authedEvent("POST /auth/change-email", "alice", { body: JSON.stringify({ email: "" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(store.updateAccountEmail).toHaveBeenCalledWith("alice", undefined);
+  });
+});
+
+describe("DELETE /auth/account", () => {
+  it("requires a session", async () => {
+    const res: any = await handler(
+      event("DELETE /auth/account", { body: JSON.stringify({ password: "password123" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("rejects an incorrect password without running the cascade", async () => {
+    const { hashPassword } = await import("../src/passwords");
+    const { hash, salt } = await hashPassword("the-real-password");
     vi.mocked(store.getAccount).mockResolvedValue({
       username: "alice",
-      passwordHash: "h",
-      passwordSalt: "s",
-      email: "alice@example.com",
-      emailVerified: true,
+      passwordHash: hash,
+      passwordSalt: salt,
       personalRoomId: "room1",
       createdAt: "t",
     });
     const res: any = await handler(
-      event("POST /auth/resend-verification", { body: JSON.stringify({ username: "alice" }) }),
+      authedEvent("DELETE /auth/account", "alice", { body: JSON.stringify({ password: "wrong" }) }),
       {} as any,
       undefined as any
     );
-    expect(res.statusCode).toBe(200);
-    expect(email.sendVerificationEmail).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(401);
+    expect(cascade.deleteAccountCascade).not.toHaveBeenCalled();
   });
 
-  it("sends a new verification email for an unverified account", async () => {
+  it("runs the cascade on a correct password", async () => {
+    const { hashPassword } = await import("../src/passwords");
+    const { hash, salt } = await hashPassword("password123");
     vi.mocked(store.getAccount).mockResolvedValue({
       username: "alice",
-      passwordHash: "h",
-      passwordSalt: "s",
-      email: "alice@example.com",
-      emailVerified: false,
+      passwordHash: hash,
+      passwordSalt: salt,
       personalRoomId: "room1",
       createdAt: "t",
     });
-    vi.mocked(store.createVerification).mockResolvedValue("newtoken");
-
     const res: any = await handler(
-      event("POST /auth/resend-verification", { body: JSON.stringify({ username: "alice" }) }),
+      authedEvent("DELETE /auth/account", "alice", { body: JSON.stringify({ password: "password123" }) }),
       {} as any,
       undefined as any
     );
-    expect(email.sendVerificationEmail).toHaveBeenCalledWith("alice@example.com", "alice", "newtoken");
     expect(res.statusCode).toBe(200);
+    expect(cascade.deleteAccountCascade).toHaveBeenCalledWith("alice");
   });
 });
 

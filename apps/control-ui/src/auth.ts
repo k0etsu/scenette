@@ -3,6 +3,7 @@ const SESSION_TOKEN_KEY = "scenette.sessionToken";
 export interface SessionInfo {
   username: string;
   personalRoomId: string;
+  email?: string;
 }
 
 export function getStoredToken(): string | null {
@@ -23,37 +24,23 @@ async function parseJsonOrThrow(res: Response): Promise<any> {
   return data;
 }
 
-// Thrown specifically by login() when the account exists and the password
-// is correct, but the email hasn't been verified yet -- distinct from a
-// generic Error so main.ts can offer a "resend verification email" action
-// rather than just showing the message text.
-export class UnverifiedEmailError extends Error {
-  constructor(public readonly username: string) {
-    super("Email not verified");
-  }
-}
-
-export interface RegisterResult {
-  username: string;
-  personalRoomId: string;
-  message: string;
-}
-
-// Deliberately does NOT return a SessionInfo / store a token -- registering
-// no longer logs you in. The account is created but login is blocked until
-// the verification email's link is clicked (see login() below).
+// email is optional -- there's no verification step to gate on, it's kept
+// purely as an optional contact field a user can set later via
+// changeEmail().
 export async function register(
   httpApiUrl: string,
   username: string,
-  email: string,
+  email: string | undefined,
   password: string
-): Promise<RegisterResult> {
+): Promise<SessionInfo> {
   const res = await fetch(`${httpApiUrl}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, email, password }),
   });
-  return parseJsonOrThrow(res);
+  const data = await parseJsonOrThrow(res);
+  storeToken(data.sessionToken);
+  return { username: data.username, personalRoomId: data.personalRoomId, email: data.email };
 }
 
 export async function login(httpApiUrl: string, username: string, password: string): Promise<SessionInfo> {
@@ -62,22 +49,9 @@ export async function login(httpApiUrl: string, username: string, password: stri
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    if (data.unverified) throw new UnverifiedEmailError(username);
-    throw new Error(data.error ?? `Request failed: ${res.status}`);
-  }
+  const data = await parseJsonOrThrow(res);
   storeToken(data.sessionToken);
-  return { username: data.username, personalRoomId: data.personalRoomId };
-}
-
-export async function resendVerification(httpApiUrl: string, username: string): Promise<void> {
-  const res = await fetch(`${httpApiUrl}/auth/resend-verification`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username }),
-  });
-  await parseJsonOrThrow(res);
+  return { username: data.username, personalRoomId: data.personalRoomId, email: data.email };
 }
 
 // Returns null (rather than throwing) on any invalid/expired/missing token —
@@ -94,7 +68,7 @@ export async function checkSession(httpApiUrl: string): Promise<SessionInfo | nu
     return null;
   }
   const data = await res.json();
-  return { username: data.username, personalRoomId: data.personalRoomId };
+  return { username: data.username, personalRoomId: data.personalRoomId, email: data.email };
 }
 
 export async function logout(httpApiUrl: string): Promise<void> {
@@ -192,4 +166,37 @@ export async function redeemInvite(httpApiUrl: string, inviteToken: string): Pro
     headers: authHeaders(),
   });
   return parseJsonOrThrow(res);
+}
+
+export async function changePassword(httpApiUrl: string, currentPassword: string, newPassword: string): Promise<void> {
+  const res = await fetch(`${httpApiUrl}/auth/change-password`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  await parseJsonOrThrow(res);
+}
+
+// Empty string clears the account's stored email.
+export async function changeEmail(httpApiUrl: string, email: string): Promise<void> {
+  const res = await fetch(`${httpApiUrl}/auth/change-email`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  await parseJsonOrThrow(res);
+}
+
+// Irreversible -- wipes every room the account owns (assets, S3 objects,
+// memberships, invites), its own membership on any room it's only a mod on
+// elsewhere, every session, and the account itself. Clears the local token
+// afterward, same as logout().
+export async function deleteAccount(httpApiUrl: string, password: string): Promise<void> {
+  const res = await fetch(`${httpApiUrl}/auth/account`, {
+    method: "DELETE",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+  await parseJsonOrThrow(res);
+  clearStoredToken();
 }

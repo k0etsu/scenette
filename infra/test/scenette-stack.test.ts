@@ -38,13 +38,19 @@ describe("HTTP API CORS", () => {
   });
 });
 
-describe("SES identity", () => {
-  // SES identity verification is account+region scoped, not
-  // CloudFormation-stack scoped -- creating it in both stacks would have
-  // them fight over ownership of the same physical identity.
-  it("is only created in the prod stack, never dev", () => {
+describe("email verification removed", () => {
+  // Email verification (and its SES dependency) was removed to keep
+  // registration/testing simple without needing SES set up -- neither the
+  // SES identity nor the email-verifications table should exist anymore.
+  it("creates no SES::EmailIdentity in either stack", () => {
     expect(devTemplate.findResources("AWS::SES::EmailIdentity")).toEqual({});
-    expect(Object.keys(prodTemplate.findResources("AWS::SES::EmailIdentity"))).toHaveLength(1);
+    expect(prodTemplate.findResources("AWS::SES::EmailIdentity")).toEqual({});
+  });
+
+  it("creates no email-verifications DynamoDB table", () => {
+    const tables = devTemplate.findResources("AWS::DynamoDB::Table");
+    const names = Object.values(tables).map((t: any) => t.Properties?.TableName);
+    expect(names).not.toContain("scenette-dev-email-verifications");
   });
 });
 
@@ -61,5 +67,40 @@ describe("DynamoDB GSIs the accounts routes depend on", () => {
       TableName: "scenette-dev-invites",
       GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({ IndexName: "byRoom" })]),
     });
+  });
+});
+
+describe("account-deletion cascade routes/permissions", () => {
+  it("registers the change-password, change-email, and delete-account routes", () => {
+    devTemplate.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "POST /auth/change-password",
+    });
+    devTemplate.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "POST /auth/change-email",
+    });
+    devTemplate.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "DELETE /auth/account",
+    });
+  });
+
+  it("no longer registers the removed /auth/verify or /auth/resend-verification routes", () => {
+    const routes = devTemplate.findResources("AWS::ApiGatewayV2::Route");
+    const routeKeys = Object.values(routes).map((r: any) => r.Properties?.RouteKey);
+    expect(routeKeys).not.toContain("GET /auth/verify");
+    expect(routeKeys).not.toContain("POST /auth/resend-verification");
+  });
+
+  it("gives AccountsFn the ROOMS_TABLE/ASSETS_TABLE/ASSETS_BUCKET env vars its cascade needs", () => {
+    const functions = devTemplate.findResources("AWS::Lambda::Function");
+    // AccountsFn is the only Lambda with an ACCOUNTS_TABLE env var -- find
+    // it that way rather than depending on its exact logical ID.
+    const accountsFn = Object.values(functions).find(
+      (fn: any) => fn.Properties?.Environment?.Variables?.ACCOUNTS_TABLE
+    ) as any;
+    expect(accountsFn).toBeTruthy();
+    const vars = accountsFn.Properties.Environment.Variables;
+    expect(vars.ROOMS_TABLE).toBeTruthy();
+    expect(vars.ASSETS_TABLE).toBeTruthy();
+    expect(vars.ASSETS_BUCKET).toBeTruthy();
   });
 });
