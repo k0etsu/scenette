@@ -7,7 +7,7 @@ import {
   DeleteCommand,
   QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { Asset, AssetPatch, Variable, VariableType, Viewport, intersects } from "@scenette/protocol";
+import { Asset, AssetPatch, StreamPreviewSettings, Variable, VariableType, Viewport, intersects } from "@scenette/protocol";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const ASSETS_TABLE = process.env.ASSETS_TABLE!;
@@ -18,6 +18,11 @@ const ROOMS_TABLE = process.env.ROOMS_TABLE!;
 // viewport at the origin. TODO(v1): replace with an explicit create-room
 // step once accounts/ownership exist.
 const DEFAULT_VIEWPORT = { x: 0, y: 0, width: 1920, height: 1080 };
+const DEFAULT_STREAM_PREVIEW_SETTINGS: StreamPreviewSettings = {
+  platform: "twitch",
+  twitchChannel: "",
+  youtubeChannelId: "",
+};
 
 export interface Room extends Viewport {
   // Master multiplier broadcast to every client (control-ui AND
@@ -29,6 +34,11 @@ export interface Room extends Viewport {
   // guarantee, so this guards against an earlier-sent-but-later-processed
   // tick's write clobbering a later tick's already-applied value.
   globalVolumeSeq: number;
+  // Room-scoped (see StreamPreviewSettings's doc comment) -- only the
+  // room's owner may change it (see message.ts's owner check), but every
+  // connected client sees the same configured channel.
+  streamPreviewSettings: StreamPreviewSettings;
+  streamPreviewSettingsSeq: number;
   variables: Record<string, Variable>;
 }
 
@@ -43,11 +53,21 @@ export async function getOrCreateRoom(roomId: string): Promise<Room> {
       height: Item.height,
       globalVolume: Item.globalVolume ?? 1,
       globalVolumeSeq: Item.globalVolumeSeq ?? 0,
+      streamPreviewSettings: Item.streamPreviewSettings ?? DEFAULT_STREAM_PREVIEW_SETTINGS,
+      streamPreviewSettingsSeq: Item.streamPreviewSettingsSeq ?? 0,
       variables: Item.variables ?? {},
     };
   }
 
-  const room: Room = { roomId, ...DEFAULT_VIEWPORT, globalVolume: 1, globalVolumeSeq: 0, variables: {} };
+  const room: Room = {
+    roomId,
+    ...DEFAULT_VIEWPORT,
+    globalVolume: 1,
+    globalVolumeSeq: 0,
+    streamPreviewSettings: DEFAULT_STREAM_PREVIEW_SETTINGS,
+    streamPreviewSettingsSeq: 0,
+    variables: {},
+  };
   await ddb.send(
     new PutCommand({
       TableName: ROOMS_TABLE,
@@ -71,6 +91,28 @@ export async function setGlobalVolume(roomId: string, globalVolume: number, seq:
         UpdateExpression: "SET globalVolume = :v, globalVolumeSeq = :seq",
         ConditionExpression: "attribute_not_exists(globalVolumeSeq) OR globalVolumeSeq < :seq",
         ExpressionAttributeValues: { ":v": globalVolume, ":seq": seq },
+      })
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === "ConditionalCheckFailedException") return "stale";
+    throw err;
+  }
+  return undefined;
+}
+
+export async function setStreamPreviewSettings(
+  roomId: string,
+  settings: StreamPreviewSettings,
+  seq: number
+): Promise<"stale" | undefined> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: ROOMS_TABLE,
+        Key: { roomId },
+        UpdateExpression: "SET streamPreviewSettings = :v, streamPreviewSettingsSeq = :seq",
+        ConditionExpression: "attribute_not_exists(streamPreviewSettingsSeq) OR streamPreviewSettingsSeq < :seq",
+        ExpressionAttributeValues: { ":v": settings, ":seq": seq },
       })
     );
   } catch (err) {

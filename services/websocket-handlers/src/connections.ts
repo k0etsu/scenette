@@ -16,6 +16,11 @@ export interface ConnectionInfo {
   // message.ts only needs to check for its presence (not re-check
   // membership itself) to gate write actions to actual members.
   username?: string;
+  // Denormalized from the membership row at $connect time (see connect.ts)
+  // -- lets message.ts gate an owner-only action (e.g. changing the stream
+  // preview's channel) without needing its own MembershipsTable grant.
+  // Always present alongside `username`, never for an anonymous connection.
+  role?: "owner" | "mod";
 }
 
 export async function getConnectionInfo(connectionId: string): Promise<ConnectionInfo | undefined> {
@@ -23,7 +28,7 @@ export async function getConnectionInfo(connectionId: string): Promise<Connectio
     new GetCommand({ TableName: CONNECTIONS_TABLE, Key: { connectionId } })
   );
   if (!Item) return undefined;
-  return { roomId: Item.roomId, username: Item.username };
+  return { roomId: Item.roomId, username: Item.username, role: Item.role };
 }
 
 // One row per connected control-ui session -- anonymous browser-source

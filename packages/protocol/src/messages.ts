@@ -144,6 +144,28 @@ export interface RoomSetGlobalVolumeMessage {
   seq: number;
 }
 
+// Room-scoped, not per-browser -- every connected client (control-ui AND
+// browser-source, once it embeds a preview of its own) sees the same
+// configured channel, and only the room's owner may change it (see
+// message.ts's "room:setStreamPreviewSettings" case). Previously this lived
+// entirely in each browser's own localStorage, which meant every mod saw
+// (and could silently diverge on) their own separate channel setting for
+// what's supposed to be one shared alignment aid for the room.
+export interface StreamPreviewSettings {
+  platform: "twitch" | "youtube";
+  twitchChannel: string;
+  youtubeChannelId: string;
+}
+
+export interface RoomSetStreamPreviewSettingsMessage {
+  action: "room:setStreamPreviewSettings";
+  roomId: string;
+  settings: StreamPreviewSettings;
+  // Same rationale as Asset.seq / RoomSetGlobalVolumeMessage.seq -- guards
+  // against an earlier-sent-but-later-processed save clobbering a later one.
+  seq: number;
+}
+
 // Upsert -- covers both creating a new variable and editing an existing
 // one's value/type (key is immutable once created; renaming means
 // delete + re-create).
@@ -169,6 +191,7 @@ export type ClientMessage =
   | AssetUpdateMessage
   | AssetDeleteMessage
   | RoomSetGlobalVolumeMessage
+  | RoomSetStreamPreviewSettingsMessage
   | VariableSetMessage
   | VariableDeleteMessage;
 
@@ -191,6 +214,8 @@ export type ServerMessage =
       viewport: { x: number; y: number; width: number; height: number };
       globalVolume: number;
       globalVolumeSeq: number;
+      streamPreviewSettings: StreamPreviewSettings;
+      streamPreviewSettingsSeq: number;
       variables: Variable[];
       presence: PresenceEntry[];
     }
@@ -217,6 +242,7 @@ export type ServerMessage =
   | { type: "asset:updated"; assetId: string; patch: AssetPatch; visible: boolean; seq: number }
   | { type: "asset:deleted"; assetId: string }
   | { type: "room:globalVolumeChanged"; globalVolume: number; seq: number }
+  | { type: "room:streamPreviewSettingsChanged"; settings: StreamPreviewSettings; seq: number }
   | { type: "variable:updated"; variable: Variable }
   | { type: "variable:deleted"; key: string }
   | { type: "presence:joined"; entry: PresenceEntry }
@@ -354,6 +380,27 @@ export function parseClientMessage(raw: string): ClientMessage {
       if (typeof msg.globalVolume !== "number") throw new Error("Missing/invalid globalVolume");
       if (typeof msg.seq !== "number") throw new Error("Missing seq");
       return { action: "room:setGlobalVolume", roomId: msg.roomId, globalVolume: msg.globalVolume, seq: msg.seq };
+    }
+
+    case "room:setStreamPreviewSettings": {
+      if (typeof msg.seq !== "number") throw new Error("Missing seq");
+      const settings = msg.settings as Record<string, unknown> | undefined;
+      if (!settings || typeof settings !== "object") throw new Error("Missing settings");
+      if (settings.platform !== "twitch" && settings.platform !== "youtube") {
+        throw new Error("Invalid settings.platform");
+      }
+      if (typeof settings.twitchChannel !== "string") throw new Error("Missing/invalid settings.twitchChannel");
+      if (typeof settings.youtubeChannelId !== "string") throw new Error("Missing/invalid settings.youtubeChannelId");
+      return {
+        action: "room:setStreamPreviewSettings",
+        roomId: msg.roomId,
+        settings: {
+          platform: settings.platform,
+          twitchChannel: settings.twitchChannel,
+          youtubeChannelId: settings.youtubeChannelId,
+        },
+        seq: msg.seq,
+      };
     }
 
     case "variable:set": {

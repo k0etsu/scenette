@@ -4,6 +4,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCom
 import {
   getOrCreateRoom,
   setGlobalVolume,
+  setStreamPreviewSettings,
   setVariable,
   deleteVariable,
   getAsset,
@@ -13,6 +14,8 @@ import {
   sumRoomStorageBytes,
   isS3KeyReferencedElsewhere,
 } from "../src/roomState";
+
+const DEFAULT_STREAM_PREVIEW_SETTINGS = { platform: "twitch", twitchChannel: "", youtubeChannelId: "" };
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
@@ -39,6 +42,8 @@ describe("getOrCreateRoom", () => {
         height: 1080,
         globalVolume: 1,
         globalVolumeSeq: 0,
+        streamPreviewSettings: DEFAULT_STREAM_PREVIEW_SETTINGS,
+        streamPreviewSettingsSeq: 0,
         variables: {},
       });
     });
@@ -75,6 +80,8 @@ describe("getOrCreateRoom", () => {
       height: 1080,
       globalVolume: 1,
       globalVolumeSeq: 0,
+      streamPreviewSettings: DEFAULT_STREAM_PREVIEW_SETTINGS,
+      streamPreviewSettingsSeq: 0,
       variables: {},
     });
   });
@@ -83,6 +90,23 @@ describe("getOrCreateRoom", () => {
     ddbMock.on(GetCommand).resolves({ Item: undefined });
     ddbMock.on(PutCommand).rejects(conditionalCheckFailed);
     await expect(getOrCreateRoom("new-room")).resolves.toMatchObject({ roomId: "new-room" });
+  });
+
+  it("preserves an existing room's actual streamPreviewSettings/streamPreviewSettingsSeq", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        roomId: "r1",
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        streamPreviewSettings: { platform: "youtube", twitchChannel: "", youtubeChannelId: "UCabc123" },
+        streamPreviewSettingsSeq: 7,
+      },
+    });
+    const room = await getOrCreateRoom("r1");
+    expect(room.streamPreviewSettings).toEqual({ platform: "youtube", twitchChannel: "", youtubeChannelId: "UCabc123" });
+    expect(room.streamPreviewSettingsSeq).toBe(7);
   });
 });
 
@@ -100,6 +124,25 @@ describe("setGlobalVolume", () => {
   it("rethrows any other error", async () => {
     ddbMock.on(UpdateCommand).rejects(new Error("network blip"));
     await expect(setGlobalVolume("r1", 0.7, 100)).rejects.toThrow("network blip");
+  });
+});
+
+describe("setStreamPreviewSettings", () => {
+  const settings = { platform: "twitch" as const, twitchChannel: "shroud", youtubeChannelId: "" };
+
+  it("succeeds and returns undefined when the write isn't stale", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    await expect(setStreamPreviewSettings("r1", settings, 100)).resolves.toBeUndefined();
+  });
+
+  it("returns 'stale' instead of throwing when a newer seq already won", async () => {
+    ddbMock.on(UpdateCommand).rejects(conditionalCheckFailed);
+    await expect(setStreamPreviewSettings("r1", settings, 5)).resolves.toBe("stale");
+  });
+
+  it("rethrows any other error", async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error("network blip"));
+    await expect(setStreamPreviewSettings("r1", settings, 100)).rejects.toThrow("network blip");
   });
 });
 
