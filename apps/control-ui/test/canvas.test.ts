@@ -560,15 +560,36 @@ describe("double-click to edit text inline", () => {
     selection.removeAllRanges();
     selection.addRange(range);
 
+    // jsdom has no execCommand at all -- stub it to do what a real
+    // browser's "insertText" actually does (splice the given string into
+    // the current selection, then fire a real "input" event, same as any
+    // other edit), so this test exercises the same input->onInput->patch
+    // path production code relies on rather than special-casing Enter.
+    document.execCommand = vi.fn((command: string, _ui: boolean, value: string) => {
+      if (command === "insertText") {
+        const sel = window.getSelection();
+        if (sel && sel.rangeCount > 0) {
+          const insertRange = sel.getRangeAt(0);
+          insertRange.deleteContents();
+          const node = document.createTextNode(value);
+          insertRange.insertNode(node);
+          insertRange.setStartAfter(node);
+          insertRange.setEndAfter(node);
+          sel.removeAllRanges();
+          sel.addRange(insertRange);
+        }
+        div.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      return true;
+    });
+
     const blurSpy = vi.spyOn(div, "blur");
     const event = new KeyboardEvent("keydown", { key: "Enter", cancelable: true });
     div.dispatchEvent(event);
 
     expect(event.defaultPrevented).toBe(true);
+    expect(document.execCommand).toHaveBeenCalledWith("insertText", false, "\n");
     expect(div.textContent).toBe("hello\n");
-    // Fired the same real-time patch as any other edit -- this is a
-    // programmatic DOM mutation, which (unlike a real keypress) never
-    // dispatches its own "input" event on its own.
     expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { text: "hello\n" }, expect.any(Number));
     expect(blurSpy).not.toHaveBeenCalled();
     expect(div.contentEditable).toBe("true");

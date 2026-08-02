@@ -665,25 +665,23 @@ export class CanvasView {
         // left this specific DOM -- rendering correctly here (still the
         // same live DOM with its <br>s intact) but joining every line back
         // together with no separator at all everywhere else (sidebar,
-        // browser-source, other collaborators). Inserting the newline as
-        // an actual text character at the cursor (via Range, not the
-        // deprecated execCommand) keeps it a plain string end to end.
+        // browser-source, other collaborators).
+        //
+        // Regression: a hand-rolled Range/Selection insertion here (read
+        // window.getSelection(), manually splice in a text node) silently
+        // did nothing on the very first Enter press of an editing session,
+        // then worked on every press after that -- some browsers' own
+        // native dblclick-selects-word behavior for editable regions
+        // appears to still be settling the selection right after this
+        // editor opens, racing with a Range object captured a tick too
+        // early. execCommand hands the actual text insertion back to the
+        // browser's own (always-current) selection/caret handling instead
+        // of this code trying to track it -- deprecated, but still the
+        // standard, reliable way to do exactly this in a contentEditable
+        // region, and it dispatches its own "input" event same as a real
+        // keypress would, so onInput() doesn't need calling here directly.
         e.preventDefault();
-        const selection = window.getSelection();
-        if (!selection || selection.rangeCount === 0) return;
-        const insertRange = selection.getRangeAt(0);
-        insertRange.deleteContents();
-        const newlineNode = document.createTextNode("\n");
-        insertRange.insertNode(newlineNode);
-        insertRange.setStartAfter(newlineNode);
-        insertRange.setEndAfter(newlineNode);
-        selection.removeAllRanges();
-        selection.addRange(insertRange);
-        // Programmatic DOM mutation (unlike a real keypress the browser
-        // handles itself) never dispatches its own "input" event -- fire
-        // the same sync/resize logic explicitly so this newline is patched
-        // and measured exactly like any other edit.
-        onInput();
+        document.execCommand("insertText", false, "\n");
       }
     };
     content.addEventListener("input", onInput);
