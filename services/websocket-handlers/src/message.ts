@@ -14,6 +14,7 @@ import {
   deleteAsset,
   isS3KeyReferencedElsewhere,
   setGlobalVolume,
+  setStreamPreviewSettings,
   setVariable,
   deleteVariable,
 } from "./roomState";
@@ -75,6 +76,8 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           viewport: { x: viewport.x, y: viewport.y, width: viewport.width, height: viewport.height },
           globalVolume: room.globalVolume,
           globalVolumeSeq: room.globalVolumeSeq,
+          streamPreviewSettings: room.streamPreviewSettings,
+          streamPreviewSettingsSeq: room.streamPreviewSettingsSeq,
           variables: Object.values(room.variables),
           presence,
         });
@@ -242,6 +245,28 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
         await broadcastToRoom(apiGw, message.roomId, {
           type: "room:globalVolumeChanged",
           globalVolume: message.globalVolume,
+          seq: message.seq,
+        });
+        break;
+      }
+
+      // Room-scoped, owner-only (see StreamPreviewSettings's protocol doc
+      // comment) -- `connection.role` is denormalized onto the connection
+      // row at $connect from the membership table (see connect.ts), so this
+      // needs no MembershipsTable access of its own.
+      case "room:setStreamPreviewSettings": {
+        if (connection.role !== "owner") {
+          await sendTo(apiGw, connectionId, {
+            type: "error",
+            message: "Only the room owner can change the stream preview settings",
+          });
+          break;
+        }
+        const result = await setStreamPreviewSettings(message.roomId, message.settings, message.seq);
+        if (result === "stale") break;
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "room:streamPreviewSettingsChanged",
+          settings: message.settings,
           seq: message.seq,
         });
         break;

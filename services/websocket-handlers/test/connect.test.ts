@@ -133,4 +133,29 @@ describe("connect handler -- membership enforcement", () => {
     expect(getMembership).not.toHaveBeenCalled();
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
   });
+
+  it("denormalizes the membership row's role onto the connection row", async () => {
+    // message.ts has no MembershipsTable grant of its own -- it trusts this
+    // stamped-at-connect value instead of re-querying per message (see
+    // connections.ts's ConnectionInfo.role doc comment).
+    vi.mocked(getSessionUsername).mockResolvedValue("alice");
+    vi.mocked(getMembership).mockResolvedValue({ accountId: "alice", roomId: "r1", role: "owner" });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(event({ roomId: "r1", token: "tok" }), {} as any, {} as any);
+
+    const call = ddbMock.commandCalls(PutCommand)[0];
+    expect(call.args[0].input.Item?.role).toBe("owner");
+  });
+
+  it("stamps no role at all for an anonymous connection", async () => {
+    ddbMock.on(PutCommand).resolves({});
+
+    await handler(event({ roomId: "r1" }), {} as any, {} as any);
+
+    const call = ddbMock.commandCalls(PutCommand)[0];
+    expect(call.args[0].input.Item?.role).toBeUndefined();
+  });
 });

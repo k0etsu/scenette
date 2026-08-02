@@ -1,16 +1,18 @@
+import { StreamPreviewSettings } from "@scenette/protocol";
 import { ICON_EXPAND, ICON_SETTINGS, ICON_VIDEO } from "./icons";
 
-const STORAGE_KEY = "scenette.streamPreview";
-
-type Platform = "twitch" | "youtube";
-
-interface StreamPreviewSettings {
-  platform: Platform;
-  twitchChannel: string;
-  youtubeChannelId: string;
-}
+type Platform = StreamPreviewSettings["platform"];
 
 const DEFAULT_SETTINGS: StreamPreviewSettings = { platform: "twitch", twitchChannel: "", youtubeChannelId: "" };
+
+export interface StreamPreviewCallbacks {
+  // Fires only when the room's owner actually saves a channel change (see
+  // openSettings()) -- never for a mod, who can't reach this at all (the
+  // settings gear is hidden and the platform select disabled for them, see
+  // setIsOwner). The caller is responsible for actually sending this over
+  // the wire (room:setStreamPreviewSettings) with the given seq.
+  onSettingsChange: (settings: StreamPreviewSettings, seq: number) => void;
+}
 
 // The reference tool hardcodes its embed area at exactly 1920x1080 rather
 // than fitting/cropping to whatever aspect ratio the room's own viewport
@@ -27,21 +29,22 @@ const NATIVE_HEIGHT = 1080;
 // tool's own fixed-px strips inside its identically-scaled wrapper).
 const BORDER_STRIP_THICKNESS = 6;
 
-function loadSettings(): StreamPreviewSettings {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
-}
-
 function embedUrl(settings: StreamPreviewSettings): string | undefined {
   if (settings.platform === "twitch") {
     if (!settings.twitchChannel) return undefined;
     // parent must match the actual serving hostname exactly or Twitch
     // refuses to render the embed -- read live rather than hardcoded so
     // this works the same on dev.hanzomon.co, hanzomon.co, and localhost.
+    //
+    // Known Twitch-side limitation, not fixable here: channels streaming at
+    // the 1440p "Enhanced Broadcasting" tier can fail inside this embed with
+    // "Player stopping playback - error MasterPlaylist:4 (ErrorInvalidData
+    // code 0 - Failed to parse HLS master playlist)", thrown from Twitch's
+    // own amazon-ivs-wasmworker. Confirmed this isn't about our iframe/
+    // parent/URL construction -- the same channel fails identically when
+    // player.twitch.tv is opened directly in a bare tab, while a channel
+    // streaming at a lower resolution works fine through the exact same
+    // embed. Nothing to do on our end until Twitch fixes their embed player.
     return `https://player.twitch.tv/?channel=${encodeURIComponent(settings.twitchChannel)}&parent=${window.location.hostname}&muted=true`;
   }
   if (!settings.youtubeChannelId) return undefined;
@@ -79,15 +82,26 @@ function makeBorderStrip(edge: "top" | "bottom" | "left" | "right"): HTMLElement
   return strip;
 }
 
-// A purely local alignment aid, never synced to collaborators or broadcast
-// to browser-source (only asset transforms are shared room state -- see
-// plan). The viewport-rect placeholder + boundary line are *always*
-// visible (confirmed against the reference tool -- both show regardless
-// of the "embed" checkbox's state), tracking pan/zoom continuously; the
-// "embed" checkbox only chooses what's composited into that area: the
-// generic placeholder icon, or the actual live Twitch/YouTube page.
+// The viewport-rect placeholder + boundary line are *always* visible
+// (confirmed against the reference tool -- both show regardless of the
+// "embed" checkbox's state), tracking pan/zoom continuously; the "embed"
+// checkbox only chooses what's composited into that area: the generic
+// placeholder icon, or the actual live Twitch/YouTube page.
+//
+// Which channel is configured (`this.settings`) is room state, not a local
+// preference -- every connected client sees the same platform/channel, and
+// only the room's owner may change it (see setIsOwner). This used to be
+// per-browser localStorage, which meant every mod could silently diverge on
+// their own separate channel for what's supposed to be one shared alignment
+// aid. The "embed"/"interactive"/opacity controls stay purely local though
+// (never synced) -- they're just this one browser's own viewing preference,
+// not something collaborators need to agree on.
 export class StreamPreviewPanel {
-  private settings: StreamPreviewSettings;
+  private settings: StreamPreviewSettings = DEFAULT_SETTINGS;
+  // Starts false (read-only) until the caller confirms ownership via
+  // setIsOwner -- safer default than briefly allowing an edit that then
+  // gets rejected server-side once the room's real membership is known.
+  private isOwner = false;
   private lastScreenRect?: { left: number; top: number; width: number; height: number };
   // Tracked separately from iframe.src -- both Twitch's and YouTube's
   // embed pages rewrite the URL after load (session params, redirects),
@@ -97,11 +111,17 @@ export class StreamPreviewPanel {
   // a genuinely new URL and reassign iframe.src, reloading -- and pausing
   // -- the embed on every single drag tick.
   private lastAssignedSrc?: string;
+  // Same wall-clock-based monotonic pattern as sound.ts's SoundPanel --
+  // see nextSeq()'s own comment for the full rationale (server-stored seq
+  // persists across reloads/sessions, so a fresh session's counter
+  // restarting at 0 would almost always lose the server's staleness check).
+  private lastSeq = 0;
 
   private readonly embedCheckbox: HTMLInputElement;
   private readonly interactiveCheckbox: HTMLInputElement;
   private readonly opacitySlider: HTMLInputElement;
   private readonly platformSelect: HTMLSelectElement;
+  private readonly settingsButton: HTMLButtonElement;
   private readonly wrapper: HTMLElement;
   private readonly placeholder: HTMLElement;
   private readonly iframe: HTMLIFrameElement;
@@ -112,10 +132,9 @@ export class StreamPreviewPanel {
     private readonly overlay: HTMLElement,
     private readonly borderEl: HTMLElement,
     private readonly settingsModal: HTMLElement,
-    private readonly canvasInner: HTMLElement
+    private readonly canvasInner: HTMLElement,
+    private readonly callbacks: StreamPreviewCallbacks
   ) {
-    this.settings = loadSettings();
-
     root.innerHTML = `
       <div class="sidebar-header">
         <span class="sidebar-icon-button" data-role="expand">${ICON_EXPAND}</span>
@@ -147,17 +166,26 @@ export class StreamPreviewPanel {
     this.opacitySlider = root.querySelector('[data-role="opacity"]')!;
     this.platformSelect = root.querySelector('[data-role="platform"]')!;
     this.platformSelect.value = this.settings.platform;
+    this.settingsButton = root.querySelector('[data-role="settings"]')!;
+    // Read-only until setIsOwner(true) confirms this connection is the
+    // room's owner -- see the class doc for why the channel itself is
+    // room-owned, unlike embed/interactive/opacity.
+    this.platformSelect.disabled = true;
+    // visibility, not display -- see setIsOwner's comment on why this
+    // button's layout space must stay reserved regardless of ownership.
+    this.settingsButton.style.visibility = "hidden";
 
     this.embedCheckbox.addEventListener("change", () => this.render());
     this.interactiveCheckbox.addEventListener("change", () => this.render());
     this.opacitySlider.addEventListener("input", () => this.render());
     this.platformSelect.addEventListener("change", () => {
-      this.settings.platform = this.platformSelect.value as Platform;
-      this.saveSettings();
+      if (!this.isOwner) return; // defensive -- disabled should already prevent this
+      this.settings = { ...this.settings, platform: this.platformSelect.value as Platform };
+      this.callbacks.onSettingsChange(this.settings, this.nextSeq());
       this.render();
     });
 
-    root.querySelector('[data-role="settings"]')!.addEventListener("click", () => this.openSettings());
+    this.settingsButton.addEventListener("click", () => this.openSettings());
 
     // Bound once here (not per-open) -- settingsModal itself is a
     // persistent element that survives openSettings()'s innerHTML rebuild,
@@ -336,11 +364,67 @@ export class StreamPreviewPanel {
     }
   }
 
-  private saveSettings(): void {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings));
+  // Wall-clock-based, not a simple session-local counter -- see
+  // CanvasView.nextSeq()'s comment for the full rationale (a fresh
+  // session's counter restarting at 0 would almost always be lower than
+  // whatever the server already has stored, permanently rejecting every
+  // save after a page refresh).
+  private nextSeq(): number {
+    const now = Date.now();
+    this.lastSeq = now > this.lastSeq ? now : this.lastSeq + 1;
+    return this.lastSeq;
+  }
+
+  // Applied only from a later room:streamPreviewSettingsChanged broadcast
+  // (including this browser's own echo) within the SAME room -- guarded the
+  // same way as SoundPanel.setGlobalVolume so an out-of-order arrival can't
+  // stomp a more recent local edit. Never called for a room's initial
+  // snapshot -- see enterRoom() below for why that needs to bypass this
+  // guard entirely rather than reuse it.
+  applySettings(settings: StreamPreviewSettings, seq: number): void {
+    if (seq < this.lastSeq) return;
+    this.lastSeq = seq;
+    this.settings = settings;
+    this.platformSelect.value = settings.platform;
+    this.render();
+  }
+
+  // Called once per room entry (this room's initial room:snapshot), not for
+  // a later live broadcast -- this panel is a singleton that survives every
+  // room switch (see the class doc), so without this its state from the
+  // PREVIOUS room leaked into the next one: `lastSeq` doesn't reset between
+  // rooms, so the new room's real (lower) stored seq could get silently
+  // rejected as "stale" by applySettings' guard, permanently stuck showing
+  // the old room's channel; the embed checkbox stayed however it was left in
+  // the last room instead of defaulting off; and the iframe kept its
+  // previous room's already-loaded src (lastAssignedSrc suppresses a
+  // reassignment that looks like "no change", even though the room changed).
+  enterRoom(settings: StreamPreviewSettings, seq: number): void {
+    this.lastSeq = seq;
+    this.settings = settings;
+    this.platformSelect.value = settings.platform;
+    this.lastAssignedSrc = undefined;
+    this.embedCheckbox.checked = false;
+    this.interactiveCheckbox.checked = false;
+    this.opacitySlider.value = "100";
+    this.render();
+  }
+
+  // Controls whether this connection may actually change the channel --
+  // only the room's owner can (see the class doc). Mods still see and use
+  // whatever channel is currently configured; they just can't change it.
+  setIsOwner(isOwner: boolean): void {
+    this.isOwner = isOwner;
+    this.platformSelect.disabled = !isOwner;
+    // visibility (not display) -- keeps this button's layout space
+    // reserved so the header title stays centered between the expand icon
+    // and this slot regardless of ownership, rather than the title visibly
+    // drifting off-center when the third element disappears entirely.
+    this.settingsButton.style.visibility = isOwner ? "visible" : "hidden";
   }
 
   private openSettings(): void {
+    if (!this.isOwner) return; // defensive -- the button is hidden for a non-owner
     this.settingsModal.innerHTML = `
       <div class="stream-settings-content">
         <div class="sidebar-header">
@@ -361,9 +445,8 @@ export class StreamPreviewPanel {
     this.settingsModal.querySelector('[data-role="save"]')!.addEventListener("click", () => {
       const twitchChannel = (this.settingsModal.querySelector('[data-role="twitch-channel"]') as HTMLInputElement).value.trim();
       const youtubeChannelId = (this.settingsModal.querySelector('[data-role="youtube-channel"]') as HTMLInputElement).value.trim();
-      this.settings.twitchChannel = twitchChannel;
-      this.settings.youtubeChannelId = youtubeChannelId;
-      this.saveSettings();
+      this.settings = { ...this.settings, twitchChannel, youtubeChannelId };
+      this.callbacks.onSettingsChange(this.settings, this.nextSeq());
       this.render();
       this.closeSettings();
     });

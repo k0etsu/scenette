@@ -283,6 +283,49 @@ describe("parseClientMessage", () => {
     });
   });
 
+  describe("room:setStreamPreviewSettings", () => {
+    const settings = { platform: "twitch", twitchChannel: "shroud", youtubeChannelId: "" };
+
+    it("parses a valid message", () => {
+      const msg = { action: "room:setStreamPreviewSettings", roomId: "room1", settings, seq: 1 };
+      expect(send(msg)).toEqual(msg);
+    });
+
+    it("rejects a missing seq", () => {
+      expect(() =>
+        send({ action: "room:setStreamPreviewSettings", roomId: "room1", settings })
+      ).toThrow("Missing seq");
+    });
+
+    it("rejects a missing settings object", () => {
+      expect(() =>
+        send({ action: "room:setStreamPreviewSettings", roomId: "room1", seq: 1 })
+      ).toThrow("Missing settings");
+    });
+
+    it("rejects an invalid platform", () => {
+      expect(() =>
+        send({
+          action: "room:setStreamPreviewSettings",
+          roomId: "room1",
+          settings: { ...settings, platform: "twitter" },
+          seq: 1,
+        })
+      ).toThrow("Invalid settings.platform");
+    });
+
+    it("rejects a missing twitchChannel/youtubeChannelId", () => {
+      expect(() =>
+        send({
+          action: "room:setStreamPreviewSettings",
+          roomId: "room1",
+          settings: { platform: "twitch", youtubeChannelId: "" },
+          seq: 1,
+        })
+      ).toThrow("Missing/invalid settings.twitchChannel");
+    });
+  });
+
   describe("variable:set", () => {
     it("parses a number-type variable", () => {
       const msg = { action: "variable:set", roomId: "room1", key: "kills", type: "number", value: "4" };

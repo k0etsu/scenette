@@ -30,6 +30,11 @@ describe("getConnectionInfo", () => {
     ddbMock.on(GetCommand).resolves({ Item: undefined });
     await expect(getConnectionInfo("unknown")).resolves.toBeUndefined();
   });
+
+  it("passes through the role denormalized onto the connection row at $connect", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { connectionId: "c1", roomId: "r1", username: "alice", role: "owner" } });
+    await expect(getConnectionInfo("c1")).resolves.toEqual({ roomId: "r1", username: "alice", role: "owner" });
+  });
 });
 
 describe("listPresence", () => {

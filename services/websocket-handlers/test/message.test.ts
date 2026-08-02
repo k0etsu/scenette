@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { ApiGatewayManagementApiClient, PostToConnectionCommand } from "@aws-sdk/client-apigatewaymanagementapi";
 import { S3Client, HeadObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import type { APIGatewayProxyWebsocketEventV2 } from "aws-lambda";
@@ -28,7 +28,18 @@ function connectionRow(overrides: Record<string, unknown> = {}) {
 }
 
 function roomRow() {
-  return { roomId: "r1", x: 0, y: 0, width: 1920, height: 1080, globalVolume: 1, globalVolumeSeq: 0, variables: {} };
+  return {
+    roomId: "r1",
+    x: 0,
+    y: 0,
+    width: 1920,
+    height: 1080,
+    globalVolume: 1,
+    globalVolumeSeq: 0,
+    streamPreviewSettings: { platform: "twitch", twitchChannel: "", youtubeChannelId: "" },
+    streamPreviewSettingsSeq: 0,
+    variables: {},
+  };
 }
 
 const assetAddMessage = {
@@ -95,6 +106,66 @@ describe("message handler -- write-action gate", () => {
     const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
     const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
     expect(payload).toEqual({ type: "error", message: "Not connected to this room" });
+  });
+});
+
+describe("message handler -- room:setStreamPreviewSettings is owner-only", () => {
+  const settingsMessage = {
+    action: "room:setStreamPreviewSettings",
+    roomId: "r1",
+    settings: { platform: "twitch", twitchChannel: "shroud", youtubeChannelId: "" },
+    seq: 100,
+  };
+
+  it("allows the room owner (role denormalized onto the connection row at $connect) to change it", async () => {
+    ddbMock
+      .on(GetCommand, { Key: { connectionId: "c1" } })
+      .resolves({ Item: connectionRow({ username: "alice", role: "owner" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    const res: any = await handler(event(settingsMessage), {} as any, undefined as any);
+
+    expect(res.statusCode).toBe(200);
+    const updateCall = ddbMock.commandCalls(UpdateCommand)[0];
+    expect(updateCall.args[0].input.UpdateExpression).toContain("streamPreviewSettings");
+  });
+
+  it("rejects a mod (role: 'mod') with an error frame, without writing anything", async () => {
+    ddbMock
+      .on(GetCommand, { Key: { connectionId: "c1" } })
+      .resolves({ Item: connectionRow({ username: "bob", role: "mod" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    const res: any = await handler(event(settingsMessage), {} as any, undefined as any);
+
+    expect(res.statusCode).toBe(200);
+    const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
+    const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
+    expect(payload).toEqual({
+      type: "error",
+      message: "Only the room owner can change the stream preview settings",
+    });
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  it("drops a stale write (an older seq than what's already applied) without broadcasting", async () => {
+    ddbMock
+      .on(GetCommand, { Key: { connectionId: "c1" } })
+      .resolves({ Item: connectionRow({ username: "alice", role: "owner" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(UpdateCommand).rejects(
+      Object.assign(new Error("conditional check failed"), { name: "ConditionalCheckFailedException" })
+    );
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    const res: any = await handler(event(settingsMessage), {} as any, undefined as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(apiGwMock.commandCalls(PostToConnectionCommand)).toHaveLength(0);
   });
 });
 

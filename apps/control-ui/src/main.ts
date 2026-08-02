@@ -299,7 +299,22 @@ async function main(): Promise<void> {
     streamPreviewOverlayEl!,
     streamPreviewBorderEl!,
     streamSettingsModalEl!,
-    canvasInner!
+    canvasInner!,
+    {
+      // streamPreviewPanel is constructed once at app level and survives
+      // every room switch (see its own class doc for why) -- reads the
+      // mutable `current` fresh here rather than closing over one room's
+      // connection, same pattern as the top-level context-menu handlers.
+      onSettingsChange: (settings, seq) => {
+        if (!current) return;
+        current.connection.send({
+          action: "room:setStreamPreviewSettings",
+          roomId: current.roomId,
+          settings,
+          seq,
+        });
+      },
+    }
   );
 
   const accessModal = new AccessModal(accessModalEl!);
@@ -401,6 +416,13 @@ function enterRoom(
   streamPreviewPanel: StreamPreviewPanel
 ): RoomSession {
   statusEl!.textContent = `room: ${roomId} (${session.username})`;
+
+  // An account's owned room is always exactly its own personalRoomId --
+  // invite redemption only ever grants "mod" access to someone else's room
+  // (see accounts/store.ts), never "owner" -- so this comparison alone is
+  // enough to know ownership for every entry path (dashboard pick, deep
+  // link, invite redemption) with no extra membership lookup needed.
+  streamPreviewPanel.setIsOwner(roomId === session.personalRoomId);
 
   const room: RoomSession = {
     roomId,
@@ -518,6 +540,13 @@ function enterRoom(
           canvas.setAssets(message.assets);
           sidebar.setAssets(message.assets);
           soundPanel.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
+          // enterRoom (not applySettings) -- this panel is a singleton that
+          // survives every room switch, so a plain seq-guarded apply here
+          // would compare this room's stored seq against whatever this
+          // browser last applied in the PREVIOUS room, silently rejecting
+          // the new room's real settings as "stale" whenever that happened
+          // to be lower. See streamPreview.ts's enterRoom() doc comment.
+          streamPreviewPanel.enterRoom(message.streamPreviewSettings, message.streamPreviewSettingsSeq);
           canvas.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
           variablesPanel.setVariables(message.variables);
           connectedUsersPanel.setPresence(message.presence);
@@ -552,6 +581,9 @@ function enterRoom(
           break;
         case "room:globalVolumeChanged":
           soundPanel.setGlobalVolume(message.globalVolume, message.seq);
+          break;
+        case "room:streamPreviewSettingsChanged":
+          streamPreviewPanel.applySettings(message.settings, message.seq);
           break;
         case "variable:updated":
           variablesPanel.upsertVariable(message.variable);

@@ -44,11 +44,21 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   // read-only regardless (see message.ts, which only allows a
   // username-bearing -- i.e. already-verified-member -- connection to send
   // a write action).
+  //
+  // The membership row's `role` is denormalized onto the connection row
+  // below rather than re-queried per message -- message.ts has no grant on
+  // MembershipsTable at all, and this is the one place membership is
+  // already authoritatively checked. Same staleness window this system
+  // already accepts elsewhere (a revoked mod stays connected until they
+  // reconnect): an owner demoted mid-session keeps write access to
+  // owner-gated actions until their connection drops.
+  let role: "owner" | "mod" | undefined;
   if (username) {
     const membership = await getMembership(username, roomId);
     if (!membership) {
       return { statusCode: 403, body: "Not a member of this room" };
     }
+    role = membership.role;
   }
 
   // The client sends its logical session-start time (set once and reused
@@ -70,7 +80,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
         connectionId,
         roomId,
         connectedAt,
-        ...(username ? { username } : {}),
+        ...(username ? { username, role } : {}),
       },
     })
   );

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { StreamPreviewPanel } from "../src/streamPreview";
+import { StreamPreviewPanel, StreamPreviewCallbacks } from "../src/streamPreview";
 
 let root: HTMLElement;
 let overlay: HTMLElement;
@@ -10,7 +10,6 @@ let canvasInner: HTMLElement;
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  window.localStorage.clear();
   root = document.createElement("div");
   overlay = document.createElement("div");
   borderEl = document.createElement("div");
@@ -18,6 +17,14 @@ beforeEach(() => {
   canvasInner = document.createElement("div");
   document.body.append(root, overlay, borderEl, settingsModal, canvasInner);
 });
+
+function makeCallbacks(overrides: Partial<StreamPreviewCallbacks> = {}): StreamPreviewCallbacks {
+  return { onSettingsChange: vi.fn(), ...overrides };
+}
+
+function makePanel(callbacks: StreamPreviewCallbacks = makeCallbacks()): StreamPreviewPanel {
+  return new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner, callbacks);
+}
 
 function checkbox(role: string): HTMLInputElement {
   return root.querySelector(`[data-role="${role}"]`) as HTMLInputElement;
@@ -36,7 +43,10 @@ function placeholderEl(): HTMLElement {
   return overlay.children[0].children[0] as HTMLElement; // wrapper > placeholder (first child)
 }
 
-function configureTwitchChannel(channel: string): void {
+// Only the room owner can reach the settings modal at all (see setIsOwner) --
+// tests that need to configure a channel must opt into ownership first.
+function configureTwitchChannel(panel: StreamPreviewPanel, channel: string): void {
+  panel.setIsOwner(true);
   root.querySelector('[data-role="settings"]')!.dispatchEvent(new Event("click"));
   (settingsModal.querySelector('[data-role="twitch-channel"]') as HTMLInputElement).value = channel;
   settingsModal.querySelector('[data-role="save"]')!.dispatchEvent(new Event("click"));
@@ -50,13 +60,13 @@ describe("StreamPreviewPanel -- visibility", () => {
     // the placeholder + boundary are visible with "embed" unchecked too,
     // not only once it's checked. Only the iframe-vs-placeholder choice
     // inside the (always-visible) area responds to that checkbox.
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     expect(overlay.style.display).toBe("block");
     expect(borderEl.style.display).toBe("block");
   });
 
   it("stays visible after embed is checked and then unchecked again", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     enableEmbed();
     checkbox("embed").checked = false;
     checkbox("embed").dispatchEvent(new Event("change"));
@@ -72,7 +82,7 @@ describe("StreamPreviewPanel -- visibility", () => {
     // to center. CanvasView no longer fires that premature rect, but
     // hiding here too means this panel is correct even if some other
     // caller ever calls setScreenRect before a real rect is known.
-    const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    const panel = makePanel();
     expect(overlay.style.visibility).toBe("hidden");
     expect(borderEl.style.visibility).toBe("hidden");
 
@@ -84,30 +94,30 @@ describe("StreamPreviewPanel -- visibility", () => {
 
 describe("StreamPreviewPanel -- placeholder vs iframe", () => {
   it("shows the placeholder (not the iframe) by default, with embed unchecked", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     expect(placeholderEl().style.display).toBe("flex");
     expect(iframeEl().style.display).toBe("none");
     expect(placeholderEl().querySelector("svg")).not.toBeNull();
   });
 
   it("still shows the placeholder when embed is checked but no channel is configured", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     enableEmbed();
     expect(placeholderEl().style.display).toBe("flex");
     expect(iframeEl().style.display).toBe("none");
   });
 
   it("switches to the iframe (hiding the placeholder) once a channel is configured AND embed is checked", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
-    configureTwitchChannel("shroud");
+    const panel = makePanel();
+    configureTwitchChannel(panel, "shroud");
     enableEmbed();
     expect(iframeEl().style.display).toBe("block");
     expect(placeholderEl().style.display).toBe("none");
   });
 
   it("goes back to the placeholder if embed is unchecked again, even with a channel configured", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
-    configureTwitchChannel("shroud");
+    const panel = makePanel();
+    configureTwitchChannel(panel, "shroud");
     enableEmbed();
     checkbox("embed").checked = false;
     checkbox("embed").dispatchEvent(new Event("change"));
@@ -116,7 +126,7 @@ describe("StreamPreviewPanel -- placeholder vs iframe", () => {
   });
 
   it("the placeholder sits before the iframe in DOM order, so a configured embed naturally covers it", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     const wrapper = overlay.children[0];
     expect(wrapper.children[0]).toBe(placeholderEl());
     expect(wrapper.children[1].tagName).toBe("IFRAME");
@@ -135,7 +145,7 @@ describe("StreamPreviewPanel -- positioning (single uniform scale, 1920x1080 nat
   }
 
   it("positions the overlay and border at the same left/top from setScreenRect, regardless of embed state", () => {
-    const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    const panel = makePanel();
 
     panel.setScreenRect(rect);
 
@@ -146,7 +156,7 @@ describe("StreamPreviewPanel -- positioning (single uniform scale, 1920x1080 nat
   });
 
   it("scales both the overlay wrapper and the border wrapper by the same factor: rect.width / 1920", () => {
-    const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    const panel = makePanel();
     panel.setScreenRect({ left: 0, top: 0, width: 960, height: 540 });
 
     expect(wrapperTransform()).toBe("scale(0.5)");
@@ -154,13 +164,13 @@ describe("StreamPreviewPanel -- positioning (single uniform scale, 1920x1080 nat
   });
 
   it("scales to exactly 1 when the rect is already native-sized (1920x1080)", () => {
-    const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    const panel = makePanel();
     panel.setScreenRect({ left: 0, top: 0, width: NATIVE_WIDTH, height: 1080 });
     expect(wrapperTransform()).toBe("scale(1)");
   });
 
   it("never resizes the iframe's own CSS width/height -- always the fixed native size regardless of rect", () => {
-    const panel = new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    const panel = makePanel();
     enableEmbed();
     // Regression: resizing the iframe's own CSS box directly made Twitch's
     // page re-layout at that (often tiny) size -- its chrome (the
@@ -182,12 +192,12 @@ describe("StreamPreviewPanel -- positioning (single uniform scale, 1920x1080 nat
 
 describe("StreamPreviewPanel -- interactive and opacity", () => {
   it("defaults to pointer-events none (click-through) so the canvas stays usable", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     expect(overlay.style.pointerEvents).toBe("none");
   });
 
   it("switches to pointer-events auto when interactive is checked", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     checkbox("interactive").checked = true;
     checkbox("interactive").dispatchEvent(new Event("change"));
     expect(overlay.style.pointerEvents).toBe("auto");
@@ -199,14 +209,14 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
     // element hit-tested for clicks across the whole canvas area -- setting
     // pointer-events: auto on the overlay alone did nothing, because
     // canvas-inner still intercepted the click first.
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     checkbox("interactive").checked = true;
     checkbox("interactive").dispatchEvent(new Event("change"));
     expect(canvasInner.style.pointerEvents).toBe("none");
   });
 
   it("restores canvas-inner's pointer-events when interactive is unchecked again", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     checkbox("interactive").checked = true;
     checkbox("interactive").dispatchEvent(new Event("change"));
     checkbox("interactive").checked = false;
@@ -215,7 +225,7 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
   });
 
   it("maps the 0-100 opacity slider to a 0-1 CSS opacity on the overlay only", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     const slider = root.querySelector('[data-role="opacity"]') as HTMLInputElement;
     slider.value = "40";
     slider.dispatchEvent(new Event("input"));
@@ -223,7 +233,7 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
   });
 
   it("never applies opacity or pointer-events to the border -- it's a fixed alignment aid, not dimmable or clickable", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     checkbox("interactive").checked = true;
     checkbox("interactive").dispatchEvent(new Event("change"));
     const slider = root.querySelector('[data-role="opacity"]') as HTMLInputElement;
@@ -236,8 +246,8 @@ describe("StreamPreviewPanel -- interactive and opacity", () => {
 
   it("does not reassign iframe.src on a later render (e.g. an opacity change), which would reload and pause the embed", () => {
     const srcSetterSpy = vi.spyOn(window.HTMLIFrameElement.prototype, "src", "set");
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
-    configureTwitchChannel("shroud");
+    const panel = makePanel();
+    configureTwitchChannel(panel, "shroud");
 
     enableEmbed();
     const assignCountAfterFirstLoad = srcSetterSpy.mock.calls.length;
@@ -261,7 +271,7 @@ describe("StreamPreviewPanel -- always-on-top border strips", () => {
   const THICKNESS = 6; // must match streamPreview.ts's own BORDER_STRIP_THICKNESS
 
   it("renders exactly four border strips (top/bottom/left/right)", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     const strips = borderEl.querySelectorAll(".stream-preview-border-strip");
     expect(strips).toHaveLength(4);
   });
@@ -271,7 +281,7 @@ describe("StreamPreviewPanel -- always-on-top border strips", () => {
     // leaving a THICKNESSxTHICKNESS gap at each corner where no strip
     // covered the boundary. They now extend past the corners by the same
     // negative offset as their own edge.
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     const strips = [...borderEl.querySelectorAll<HTMLElement>(".stream-preview-border-strip")];
     const topOrBottom = strips.filter((s) => s.style.height === `${THICKNESS}px`);
     expect(topOrBottom).toHaveLength(2);
@@ -285,7 +295,7 @@ describe("StreamPreviewPanel -- always-on-top border strips", () => {
     // Overlap would double up backdrop-filter: invert() on that patch,
     // which cancels back out to no visible effect -- only one pair may
     // extend into the corner, and it's top/bottom (see the test above).
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     const strips = [...borderEl.querySelectorAll<HTMLElement>(".stream-preview-border-strip")];
     const leftOrRight = strips.filter((s) => s.style.width === `${THICKNESS}px`);
     expect(leftOrRight).toHaveLength(2);
@@ -300,7 +310,7 @@ describe("StreamPreviewPanel -- always-on-top border strips", () => {
     // negative), meaning their own width/height ate into the visible
     // placeholder/embed area instead of only marking the boundary from
     // outside it.
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    makePanel();
     const strips = [...borderEl.querySelectorAll<HTMLElement>(".stream-preview-border-strip")];
     const edgeOffsets = strips.map((s) => {
       const isTopOrBottom = s.style.height === `${THICKNESS}px`;
@@ -312,49 +322,163 @@ describe("StreamPreviewPanel -- always-on-top border strips", () => {
   });
 });
 
-describe("StreamPreviewPanel -- settings persistence", () => {
-  it("saves the entered channels to localStorage and loads a Twitch embed URL", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
-    configureTwitchChannel("shroud");
-
-    const stored = JSON.parse(window.localStorage.getItem("scenette.streamPreview")!);
-    expect(stored.twitchChannel).toBe("shroud");
-
-    enableEmbed();
-
-    expect(iframeEl().src).toContain("player.twitch.tv/?channel=shroud");
-    expect(iframeEl().src).toContain(`parent=${window.location.hostname}`);
+describe("StreamPreviewPanel -- room-scoped settings, owner-only", () => {
+  it("defaults to read-only: settings gear hidden (via visibility, not display) and platform select disabled", () => {
+    // visibility (not display) -- the button's layout space must stay
+    // reserved either way, so the header title stays centered regardless
+    // of ownership (see setIsOwner's doc comment).
+    makePanel();
+    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.visibility).toBe("hidden");
+    expect((root.querySelector('[data-role="platform"]') as HTMLSelectElement).disabled).toBe(true);
   });
 
-  it("builds a YouTube live_stream embed URL from the saved channel ID when that platform is selected", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
-    root.querySelector('[data-role="settings"]')!.dispatchEvent(new Event("click"));
-    (settingsModal.querySelector('[data-role="youtube-channel"]') as HTMLInputElement).value = "UCabc123";
-    settingsModal.querySelector('[data-role="save"]')!.dispatchEvent(new Event("click"));
+  it("setIsOwner(true) reveals the settings gear and enables the platform select", () => {
+    const panel = makePanel();
+    panel.setIsOwner(true);
+    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.visibility).toBe("visible");
+    expect((root.querySelector('[data-role="platform"]') as HTMLSelectElement).disabled).toBe(false);
+  });
+
+  it("setIsOwner(false) after being true hides/disables again", () => {
+    const panel = makePanel();
+    panel.setIsOwner(true);
+    panel.setIsOwner(false);
+    expect(root.querySelector<HTMLElement>('[data-role="settings"]')!.style.visibility).toBe("hidden");
+    expect((root.querySelector('[data-role="platform"]') as HTMLSelectElement).disabled).toBe(true);
+  });
+
+  it("a non-owner's platform select is disabled, so a change event never fires the callback", () => {
+    const onSettingsChange = vi.fn();
+    makePanel(makeCallbacks({ onSettingsChange }));
+    const platformSelect = root.querySelector('[data-role="platform"]') as HTMLSelectElement;
+    // Simulates a change event slipping through despite the disabled
+    // attribute (defensive: the handler itself also checks isOwner).
+    platformSelect.value = "youtube";
+    platformSelect.dispatchEvent(new Event("change"));
+    expect(onSettingsChange).not.toHaveBeenCalled();
+  });
+
+  it("the owner changing the platform select fires onSettingsChange with the updated settings", () => {
+    const onSettingsChange = vi.fn();
+    const panel = makePanel(makeCallbacks({ onSettingsChange }));
+    panel.setIsOwner(true);
 
     const platformSelect = root.querySelector('[data-role="platform"]') as HTMLSelectElement;
     platformSelect.value = "youtube";
     platformSelect.dispatchEvent(new Event("change"));
 
-    enableEmbed();
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: "youtube" }),
+      expect.any(Number)
+    );
+  });
 
+  it("the owner saving the settings modal fires onSettingsChange with both channels", () => {
+    const onSettingsChange = vi.fn();
+    const panel = makePanel(makeCallbacks({ onSettingsChange }));
+    configureTwitchChannel(panel, "shroud");
+
+    expect(onSettingsChange).toHaveBeenCalledWith(
+      expect.objectContaining({ twitchChannel: "shroud" }),
+      expect.any(Number)
+    );
+  });
+
+  it("openSettings does nothing for a non-owner even if the (hidden) button is somehow clicked", () => {
+    makePanel();
+    root.querySelector('[data-role="settings"]')!.dispatchEvent(new Event("click"));
+    expect(settingsModal.style.display).not.toBe("flex");
+  });
+});
+
+describe("StreamPreviewPanel -- applySettings (live broadcast within the same room)", () => {
+  it("updates the settings, platform select, and embed URL", () => {
+    const panel = makePanel();
+    panel.applySettings({ platform: "youtube", twitchChannel: "", youtubeChannelId: "UCabc123" }, 1);
+
+    expect((root.querySelector('[data-role="platform"]') as HTMLSelectElement).value).toBe("youtube");
+
+    enableEmbed();
     expect(iframeEl().src).toContain("youtube.com/embed/live_stream?channel=UCabc123");
   });
 
-  it("loads previously-saved settings on construction", () => {
-    window.localStorage.setItem(
-      "scenette.streamPreview",
-      JSON.stringify({ platform: "twitch", twitchChannel: "existing_streamer", youtubeChannelId: "" })
-    );
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
-    root.querySelector('[data-role="settings"]')!.dispatchEvent(new Event("click"));
+  it("ignores a stale (older) seq than what's already applied", () => {
+    const panel = makePanel();
+    panel.applySettings({ platform: "youtube", twitchChannel: "", youtubeChannelId: "UCabc123" }, 100);
+    panel.applySettings({ platform: "twitch", twitchChannel: "late-echo", youtubeChannelId: "" }, 5);
 
-    const twitchInput = settingsModal.querySelector('[data-role="twitch-channel"]') as HTMLInputElement;
-    expect(twitchInput.value).toBe("existing_streamer");
+    expect((root.querySelector('[data-role="platform"]') as HTMLSelectElement).value).toBe("youtube");
   });
 
+  it("applies a newer seq even if it arrives after a locally-initiated change (e.g. this browser's own echo)", () => {
+    const panel = makePanel();
+    panel.applySettings({ platform: "twitch", twitchChannel: "first", youtubeChannelId: "" }, 1);
+    panel.applySettings({ platform: "twitch", twitchChannel: "second", youtubeChannelId: "" }, 2);
+
+    configureTwitchChannel(panel, "third");
+    enableEmbed();
+    expect(iframeEl().src).toContain("channel=third");
+  });
+});
+
+describe("StreamPreviewPanel -- enterRoom (switching rooms)", () => {
+  // Regression: this panel is a singleton that survives every room switch
+  // (it's a sibling of #canvas-inner so CanvasView.dispose() never wipes
+  // it -- see the class doc). Without a dedicated per-room reset, its state
+  // from the PREVIOUS room leaked into the next one in three separate ways,
+  // each covered below.
+  it("applies the new room's settings even when its stored seq is LOWER than this browser's last-applied seq from a previous room", () => {
+    const panel = makePanel();
+    // Simulates having already applied a high seq while in a previous room.
+    panel.applySettings({ platform: "twitch", twitchChannel: "old-room-channel", youtubeChannelId: "" }, 999);
+
+    // The new room's own stored seq can easily be lower -- seq is a
+    // per-room value, not shared across rooms.
+    panel.enterRoom({ platform: "twitch", twitchChannel: "new-room-channel", youtubeChannelId: "" }, 5);
+
+    enableEmbed();
+    expect(iframeEl().src).toContain("channel=new-room-channel");
+  });
+
+  it("defaults the embed checkbox back to unticked", () => {
+    const panel = makePanel();
+    enableEmbed();
+    expect(checkbox("embed").checked).toBe(true);
+
+    panel.enterRoom({ platform: "twitch", twitchChannel: "", youtubeChannelId: "" }, 1);
+    expect(checkbox("embed").checked).toBe(false);
+  });
+
+  it("resets interactive and opacity back to their defaults too", () => {
+    const panel = makePanel();
+    checkbox("interactive").checked = true;
+    checkbox("interactive").dispatchEvent(new Event("change"));
+    const slider = root.querySelector('[data-role="opacity"]') as HTMLInputElement;
+    slider.value = "30";
+    slider.dispatchEvent(new Event("input"));
+
+    panel.enterRoom({ platform: "twitch", twitchChannel: "", youtubeChannelId: "" }, 1);
+
+    expect(checkbox("interactive").checked).toBe(false);
+    expect((root.querySelector('[data-role="opacity"]') as HTMLInputElement).value).toBe("100");
+  });
+
+  it("does not carry over the previous room's already-loaded iframe src", () => {
+    const panel = makePanel();
+    configureTwitchChannel(panel, "old-room-channel");
+    enableEmbed();
+    expect(iframeEl().src).toContain("channel=old-room-channel");
+
+    panel.enterRoom({ platform: "twitch", twitchChannel: "new-room-channel", youtubeChannelId: "" }, 1);
+    enableEmbed(); // enterRoom already unticked it -- re-enable to check the src
+    expect(iframeEl().src).toContain("channel=new-room-channel");
+  });
+});
+
+describe("StreamPreviewPanel -- settings modal", () => {
   it("closes the settings modal on save without leaking a duplicate backdrop-close listener across opens", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    const panel = makePanel();
+    panel.setIsOwner(true);
 
     // Open/save/reopen twice -- if the backdrop-click listener were rebound
     // on every open() (rather than once in the constructor), this wouldn't
@@ -370,7 +494,8 @@ describe("StreamPreviewPanel -- settings persistence", () => {
   });
 
   it("closes when clicking the backdrop but not the content box", () => {
-    new StreamPreviewPanel(root, overlay, borderEl, settingsModal, canvasInner);
+    const panel = makePanel();
+    panel.setIsOwner(true);
     root.querySelector('[data-role="settings"]')!.dispatchEvent(new Event("click"));
 
     settingsModal.querySelector(".stream-settings-content")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
