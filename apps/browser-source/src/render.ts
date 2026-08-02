@@ -1,4 +1,4 @@
-import { Asset, Variable, Viewport, interpolateText } from "@scenette/protocol";
+import { Asset, Variable, Viewport, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
 
 // Renders viewport-relative coordinates: an asset at world position (x,y)
 // is drawn at (x - viewport.x, y - viewport.y) so the OBS canvas only ever
@@ -194,6 +194,7 @@ export class Renderer {
     if (asset.type === "text") {
       const interpolated = interpolateText(asset.text ?? "", this.variables);
       if (el.textContent !== interpolated) el.textContent = interpolated;
+      Object.assign(el.style, textStyleToCss(resolveTextStyle(asset)));
     }
     if (asset.type === "video" || asset.type === "audio") {
       syncMediaState(el as HTMLMediaElement, asset, this.effectiveVolume(asset));
@@ -225,8 +226,25 @@ export class Renderer {
         break;
       }
       case "text": {
+        // Layout-only here -- the actual styling (font/colors/shadow/
+        // outline) is applied in applyImmediateFields(), which runs
+        // immediately after this element is created (see upsert()/paint()).
+        //
+        // Must match control-ui/src/canvas.ts's text case exactly: white-
+        // space: pre (not pre-wrap), no word-break, no overflow:hidden.
+        // Text assets auto-size themselves to fit their own content there
+        // (see canvas.ts's autoSizeText) rather than wrapping within a
+        // fixed box -- only an explicit newline breaks a line, the text's
+        // own length determines the width. Rendering this with pre-wrap +
+        // word-break (the old fixed-box styling) forced text to wrap
+        // mid-word to fit whatever width/height happened to be stored,
+        // which visibly diverged from control-ui's own (correctly
+        // unwrapped, auto-fit) rendering of the same asset.
         el = document.createElement("div");
         el.textContent = asset.text ?? "";
+        el.style.padding = "4px";
+        el.style.boxSizing = "border-box";
+        el.style.whiteSpace = "pre";
         break;
       }
     }

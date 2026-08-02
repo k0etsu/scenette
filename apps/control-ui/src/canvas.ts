@@ -1,4 +1,4 @@
-import { Asset, AssetPatch, Variable, Viewport, interpolateText } from "@scenette/protocol";
+import { Asset, AssetPatch, Variable, Viewport, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
 import { ICON_AUDIO_LARGE } from "./icons";
 
 interface Entry {
@@ -25,7 +25,7 @@ const CORNER_CURSOR: Record<Corner, string> = {
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.001;
-const MIN_ASSET_SIZE = 20;
+export const MIN_ASSET_SIZE = 20;
 // Leaves ~15% of the container's width free on each side, so the viewport
 // rect reads as centered rather than edge-to-edge.
 const VIEWPORT_WIDTH_FRACTION = 0.7;
@@ -436,6 +436,37 @@ export class CanvasView {
     this.applyTransform(entry, entry.asset);
     if (assetId === this.selectedAssetId) this.positionHandles();
     this.callbacks.onAssetPatch(assetId, patch, seq);
+    // A font/size/weight change (from the sidebar's text-settings controls)
+    // can change the rendered box's natural size just as much as an actual
+    // text edit -- re-measure after any local patch on a text asset, not
+    // just from the inline-edit path. Safe to call unconditionally: this
+    // method is only ever invoked for *local* edits (remote/collaborator
+    // changes go through applyRemoteUpdate -> upsert instead), so there's
+    // no risk of every connected client redundantly re-measuring and
+    // re-broadcasting on someone else's edit.
+    if (entry.asset.type === "text") this.autoSizeText(assetId);
+  }
+
+  // Text assets size themselves to fit their own rendered content (see
+  // createElement/applyTransform's shrink-to-fit CSS) rather than being
+  // manually resized -- this re-measures the already-repainted content
+  // element and syncs the stored width/height via the normal resize path,
+  // so browser-source and other collaborators' viewport-intersection checks
+  // see an accurate box even though they never run this measurement
+  // themselves.
+  private autoSizeText(assetId: string): void {
+    const entry = this.entries.get(assetId);
+    if (!entry || entry.asset.type !== "text") return;
+    const { content, asset } = entry;
+    const width = content.offsetWidth;
+    const height = content.offsetHeight;
+    // Epsilon guard: offsetWidth/Height are whole-pixel snapshots, so an
+    // unchanged size can still round a pixel differently between renders --
+    // without this, every call would re-trigger setAssetSize -> applyTransform
+    // -> (no visual change, since text isn't sized from asset.width/height)
+    // for no reason.
+    if (Math.abs(width - asset.width) < 1 && Math.abs(height - asset.height) < 1) return;
+    this.setAssetSize(assetId, width, height);
   }
 
   remove(assetId: string): void {
@@ -455,8 +486,13 @@ export class CanvasView {
     const { el, content } = entry;
     el.style.left = `${asset.x}px`;
     el.style.top = `${asset.y}px`;
-    el.style.width = `${asset.width}px`;
-    el.style.height = `${asset.height}px`;
+    // Text assets shrink-wrap to their own content instead (see
+    // createElement/autoSizeText) -- forcing a width/height here would
+    // fight with that, either clipping long text or leaving dead space.
+    if (asset.type !== "text") {
+      el.style.width = `${asset.width}px`;
+      el.style.height = `${asset.height}px`;
+    }
     el.style.transform = `rotate(${asset.rotation}deg) scale(${asset.flipX ? -1 : 1}, ${asset.flipY ? -1 : 1})`;
     el.style.zIndex = String(asset.zIndex);
     el.style.outline = asset.assetId === this.selectedAssetId ? "2px solid #4da3ff" : "none";
@@ -466,8 +502,20 @@ export class CanvasView {
     // the element it's on, so applying it to `el` blurred the outline too.
     content.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
     if (asset.type === "text") {
-      const interpolated = interpolateText(asset.text ?? "", this.variables);
-      if (content.textContent !== interpolated) content.textContent = interpolated;
+      // While actively being edited (see beginInlineTextEdit), the DOM's
+      // own textContent -- the raw template the user is mid-typing -- is
+      // authoritative; overwriting it with the *interpolated* display here
+      // would both show the wrong thing (substituted values instead of the
+      // {variable} placeholder being edited) and reset the caret to the
+      // start on every keystroke.
+      if (content.contentEditable !== "true") {
+        const interpolated = interpolateText(asset.text ?? "", this.variables);
+        if (content.textContent !== interpolated) content.textContent = interpolated;
+      }
+      // Applied identically in browser-source's render.ts (via the same
+      // shared resolveTextStyle/textStyleToCss helpers) so a text asset
+      // looks the same in the editor preview as it does to viewers.
+      Object.assign(content.style, textStyleToCss(resolveTextStyle(asset)));
     }
     // The editor's own preview never actually played video -- only
     // browser-source synced .loop/.muted/.volume/.play()/.pause() from the
@@ -519,14 +567,34 @@ export class CanvasView {
         break;
       }
       case "text": {
+        // Layout-only here (never changes per-edit) -- the actual styling
+        // (font/colors/shadow/outline) is applied in applyTransform(),
+        // which runs on every render including the one immediately
+        // following this element's creation, so setting it twice here
+        // would just be overwritten redundantly.
+        //
+        // Deliberately no explicit width/height (see the skip below, and
+        // applyTransform's matching skip) -- text assets size themselves to
+        // fit their own content (autoSizeText) rather than being manually
+        // resized, so both this and the outer `el` are left to shrink-wrap
+        // naturally. white-space: pre (not pre-wrap) means only an explicit
+        // newline breaks a line -- the text's own length is what grows the
+        // box wider, matching a plain single-line-by-default text field.
         content = document.createElement("div");
         content.textContent = asset.text ?? "";
+        content.style.padding = "4px";
+        content.style.boxSizing = "border-box";
+        content.style.whiteSpace = "pre";
         break;
       }
     }
     content.dataset.assetType = asset.type;
-    content.style.width = "100%";
-    content.style.height = "100%";
+    // Text assets are sized by their own content, not stretched to fill
+    // `el` -- see the "text" case above.
+    if (asset.type !== "text") {
+      content.style.width = "100%";
+      content.style.height = "100%";
+    }
 
     const el = document.createElement("div");
     el.dataset.assetId = asset.assetId;
@@ -534,7 +602,91 @@ export class CanvasView {
     el.style.cursor = "grab";
     el.appendChild(content);
     el.addEventListener("mousedown", (event) => this.onAssetMouseDown(event, asset.assetId));
+    if (asset.type === "text") {
+      content.addEventListener("dblclick", (event) => this.beginInlineTextEdit(event, asset.assetId, content));
+    }
     return { el, content };
+  }
+
+  // Double-click-to-edit: makes the text element itself the editing
+  // surface (rather than popping a separate input/modal) so the in-place
+  // font/size/color styling is visible while typing. Every keystroke
+  // patches immediately (same real-time behavior as the sidebar's sliders),
+  // so there's no separate "commit" step -- Enter inserts a line break
+  // (see onKeyDown below for why that can't just be left to the browser's
+  // own default behavior) and Escape just ends the editing session (the
+  // text is already saved).
+  private beginInlineTextEdit(event: MouseEvent, assetId: string, content: HTMLElement): void {
+    event.stopPropagation();
+    const entry = this.entries.get(assetId);
+    if (!entry || entry.asset.locked) return;
+
+    // Edit the raw template (with any {variable} placeholders intact), not
+    // the interpolated display applyTransform normally shows -- otherwise
+    // editing would start from the substituted value and silently lose the
+    // placeholder syntax.
+    content.textContent = entry.asset.text ?? "";
+    content.contentEditable = "true";
+    content.style.cursor = "text";
+    content.focus();
+    // Select all existing text so typing immediately replaces it, matching
+    // the reference tool's own double-click-to-edit behavior.
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    const onInput = () => {
+      const next = content.textContent ?? "";
+      if (next !== entry.asset.text) this.patchAsset(assetId, { text: next });
+      this.autoSizeText(assetId);
+    };
+    const stopEditing = (): void => {
+      content.contentEditable = "false";
+      content.style.cursor = "";
+      content.removeEventListener("input", onInput);
+      content.removeEventListener("blur", onBlur);
+      content.removeEventListener("keydown", onKeyDown);
+    };
+    const onBlur = () => stopEditing();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        content.blur();
+      } else if (e.key === "Enter") {
+        // A plain contentEditable div's *default* Enter behavior doesn't
+        // insert a literal "\n" text node -- browsers insert a new <div>/
+        // <br> element boundary instead, purely a visual line break. Since
+        // content.textContent (read in onInput above, and by every other
+        // consumer of asset.text) just concatenates descendant text nodes
+        // with no regard for element boundaries, that meant every line
+        // break silently vanished from the *stored* text the instant it
+        // left this specific DOM -- rendering correctly here (still the
+        // same live DOM with its <br>s intact) but joining every line back
+        // together with no separator at all everywhere else (sidebar,
+        // browser-source, other collaborators).
+        //
+        // Regression: a hand-rolled Range/Selection insertion here (read
+        // window.getSelection(), manually splice in a text node) silently
+        // did nothing on the very first Enter press of an editing session,
+        // then worked on every press after that -- some browsers' own
+        // native dblclick-selects-word behavior for editable regions
+        // appears to still be settling the selection right after this
+        // editor opens, racing with a Range object captured a tick too
+        // early. execCommand hands the actual text insertion back to the
+        // browser's own (always-current) selection/caret handling instead
+        // of this code trying to track it -- deprecated, but still the
+        // standard, reliable way to do exactly this in a contentEditable
+        // region, and it dispatches its own "input" event same as a real
+        // keypress would, so onInput() doesn't need calling here directly.
+        e.preventDefault();
+        document.execCommand("insertText", false, "\n");
+      }
+    };
+    content.addEventListener("input", onInput);
+    content.addEventListener("blur", onBlur);
+    content.addEventListener("keydown", onKeyDown);
   }
 
   // Bound once as instance fields (not inline closures) so dispose() has a
@@ -564,10 +716,18 @@ export class CanvasView {
   private readonly handleContainerContextMenu = (event: MouseEvent): void => {
     event.preventDefault();
     const rect = this.container.getBoundingClientRect();
+    // Container-relative -- correct input for screenToWorld's pan/zoom math,
+    // which is defined in the container's own local coordinate space.
     const screenX = event.clientX - rect.left;
     const screenY = event.clientY - rect.top;
     const world = this.screenToWorld(screenX, screenY);
-    this.callbacks.onContextMenu(world.x, world.y, screenX, screenY);
+    // event.clientX/clientY (viewport-relative), not the container-relative
+    // screenX/screenY above -- #context-menu is position: fixed, which
+    // positions against the viewport, not this container. Passing the
+    // container-relative values here made the menu render offset from the
+    // actual click by exactly the container's own on-page position (the
+    // sidebar's width, the toolbar's height).
+    this.callbacks.onContextMenu(world.x, world.y, event.clientX, event.clientY);
   };
 
   private readonly handleContainerWheel = (event: WheelEvent): void => {
@@ -589,9 +749,19 @@ export class CanvasView {
   };
 
   private readonly handleWindowKeyDown = (event: KeyboardEvent): void => {
-    if ((event.key === "Delete" || event.key === "Backspace") && this.selectedAssetId) {
-      this.callbacks.onAssetDelete(this.selectedAssetId);
-    }
+    // Backspace deliberately excluded -- it's the character-erase key used
+    // while typing in the sidebar's name/text fields (and the canvas's own
+    // inline text editing), so treating it as "delete asset" too meant
+    // backspacing text while an asset was selected also deleted the asset.
+    // Only "Delete" is a delete gesture anywhere else in the app.
+    if (event.key !== "Delete" || !this.selectedAssetId) return;
+    // Ignore while focus is inside a form field/editable region (typing in
+    // the properties panel or the canvas's own inline text editor) --
+    // otherwise pressing Delete to remove a character forward still deletes
+    // the whole asset instead.
+    const target = event.target as HTMLElement | null;
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.contentEditable === "true")) return;
+    this.callbacks.onAssetDelete(this.selectedAssetId);
   };
 
   private bindContainerEvents(): void {
@@ -625,6 +795,12 @@ export class CanvasView {
     // click (context menu) both need to fall through to the container's
     // own handlers rather than being captured here.
     if (event.button !== 0) return;
+    // While a text asset's inline editor is active (see the dblclick
+    // handler in createElement below), a mousedown is the user placing the
+    // text cursor / selecting a range inside it -- must NOT also start a
+    // canvas drag, or every click while editing would drag the asset out
+    // from under the cursor instead of moving the caret.
+    if ((event.target as HTMLElement).contentEditable === "true") return;
     event.stopPropagation();
     if (this.selectedAssetId !== assetId) {
       this.selectedAssetId = assetId;
@@ -784,7 +960,10 @@ export class CanvasView {
   // matching a typical canvas editor's resize-handle behavior.
   private positionHandles(): void {
     const entry = this.selectedAssetId ? this.entries.get(this.selectedAssetId) : undefined;
-    if (!entry || entry.asset.locked) {
+    // Text assets size themselves to fit their own content (see
+    // autoSizeText) rather than being manually resized, so they never get
+    // corner handles regardless of selection/lock state.
+    if (!entry || entry.asset.locked || entry.asset.type === "text") {
       for (const corner of CORNERS) this.handles[corner].style.display = "none";
       return;
     }

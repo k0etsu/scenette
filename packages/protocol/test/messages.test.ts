@@ -52,6 +52,7 @@ describe("parseClientMessage", () => {
           zIndex: undefined,
           s3Key: undefined,
           text: undefined,
+          name: undefined,
           opacity: undefined,
           blur: undefined,
           flipX: undefined,
@@ -62,6 +63,21 @@ describe("parseClientMessage", () => {
           muted: undefined,
           volume: undefined,
           paused: undefined,
+          fontFamily: undefined,
+          fontSize: undefined,
+          fontWeight: undefined,
+          textAlign: undefined,
+          textColor: undefined,
+          backgroundColor: undefined,
+          backgroundAlpha: undefined,
+          shadowEnabled: undefined,
+          shadowX: undefined,
+          shadowY: undefined,
+          shadowBlur: undefined,
+          shadowColor: undefined,
+          outlineEnabled: undefined,
+          outlineColor: undefined,
+          outlineWidth: undefined,
         },
       });
     });
@@ -75,6 +91,7 @@ describe("parseClientMessage", () => {
           zIndex: 3,
           s3Key: "key.png",
           text: "hello",
+          name: "my label",
           opacity: 0.5,
           blur: 2,
           flipX: true,
@@ -85,6 +102,21 @@ describe("parseClientMessage", () => {
           muted: false,
           volume: 0.8,
           paused: true,
+          fontFamily: "Roboto Mono",
+          fontSize: 32,
+          fontWeight: "700",
+          textAlign: "center",
+          textColor: "#112233",
+          backgroundColor: "#445566",
+          backgroundAlpha: 0.7,
+          shadowEnabled: true,
+          shadowX: 1,
+          shadowY: 2,
+          shadowBlur: 3,
+          shadowColor: "#000000",
+          outlineEnabled: true,
+          outlineColor: "#ffffff",
+          outlineWidth: 2,
         },
       };
       const result = send(full) as { asset: unknown };
@@ -155,6 +187,7 @@ describe("parseClientMessage", () => {
     it("picks out every recognized patch field and drops unrecognized ones", () => {
       const patch = {
         text: "hi",
+        name: "my label",
         hidden: true,
         locked: true,
         opacity: 0.5,
@@ -167,11 +200,35 @@ describe("parseClientMessage", () => {
         muted: true,
         volume: 0.2,
         paused: false,
+        fontFamily: "Roboto Mono",
+        fontSize: 32,
+        fontWeight: "700",
+        textAlign: "center",
+        textColor: "#112233",
+        backgroundColor: "#445566",
+        backgroundAlpha: 0.7,
+        shadowEnabled: true,
+        shadowX: 1,
+        shadowY: 2,
+        shadowBlur: 3,
+        shadowColor: "#000000",
+        outlineEnabled: true,
+        outlineColor: "#ffffff",
+        outlineWidth: 2,
         somethingUnknown: "ignored",
       };
       const result = send({ action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch });
       const { somethingUnknown: _ignored, ...expected } = patch;
       expect(result).toEqual({ action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch: expected });
+    });
+
+    it("rejects an invalid textAlign value", () => {
+      const patch = { textAlign: "diagonal", opacity: 0.5 };
+      const result = send({ action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch }) as {
+        patch: Record<string, unknown>;
+      };
+      expect(result.patch).not.toHaveProperty("textAlign");
+      expect(result.patch.opacity).toBe(0.5);
     });
 
     it("rejects an empty patch", () => {

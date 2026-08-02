@@ -1,6 +1,27 @@
 import { Asset, AssetType } from "./asset";
 import { Variable, VariableType } from "./variables";
 
+// Shared between AssetAddMessage and AssetPatch below -- both carry the same
+// optional text-styling fields, just at different points in an asset's life
+// (creation vs. a later edit).
+interface TextStyleFields {
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: string;
+  textAlign?: "left" | "center" | "right";
+  textColor?: string;
+  backgroundColor?: string;
+  backgroundAlpha?: number;
+  shadowEnabled?: boolean;
+  shadowX?: number;
+  shadowY?: number;
+  shadowBlur?: number;
+  shadowColor?: string;
+  outlineEnabled?: boolean;
+  outlineColor?: string;
+  outlineWidth?: number;
+}
+
 // ---- Client -> server (sent over the $default WebSocket route) ----
 
 export interface SnapshotRequestMessage {
@@ -22,6 +43,7 @@ export interface AssetAddMessage {
     zIndex?: number;
     s3Key?: string;
     text?: string;
+    name?: string;
     // Optional so a plain new upload/text-add can omit them (server
     // defaults apply) while a client-side "duplicate" can carry over the
     // source asset's full styling/playback state in one message.
@@ -35,7 +57,7 @@ export interface AssetAddMessage {
     muted?: boolean;
     volume?: number;
     paused?: boolean;
-  };
+  } & TextStyleFields;
 }
 
 // Patch-style: only changed fields are sent/applied, covering every asset
@@ -44,8 +66,9 @@ export interface AssetAddMessage {
 // control (opacity, blur, flip, lock, loop, mute, volume, pause, text edit)
 // since these are all occasional, low-frequency edits with identical
 // handling needs.
-export interface AssetPatch {
+export interface AssetPatch extends TextStyleFields {
   text?: string;
+  name?: string;
   hidden?: boolean;
   locked?: boolean;
   opacity?: number;
@@ -248,6 +271,7 @@ export function parseClientMessage(raw: string): ClientMessage {
           zIndex: typeof asset.zIndex === "number" ? asset.zIndex : undefined,
           s3Key: typeof asset.s3Key === "string" ? asset.s3Key : undefined,
           text: typeof asset.text === "string" ? asset.text : undefined,
+          name: typeof asset.name === "string" ? asset.name : undefined,
           opacity: typeof asset.opacity === "number" ? asset.opacity : undefined,
           blur: typeof asset.blur === "number" ? asset.blur : undefined,
           flipX: typeof asset.flipX === "boolean" ? asset.flipX : undefined,
@@ -258,6 +282,7 @@ export function parseClientMessage(raw: string): ClientMessage {
           muted: typeof asset.muted === "boolean" ? asset.muted : undefined,
           volume: typeof asset.volume === "number" ? asset.volume : undefined,
           paused: typeof asset.paused === "boolean" ? asset.paused : undefined,
+          ...parseTextStyleFields(asset),
         },
       };
     }
@@ -300,8 +325,9 @@ export function parseClientMessage(raw: string): ClientMessage {
       const rawPatch = msg.patch as Record<string, unknown> | undefined;
       if (!rawPatch || typeof rawPatch !== "object") throw new Error("Missing patch");
 
-      const patch: AssetPatch = {};
+      const patch: AssetPatch = { ...parseTextStyleFields(rawPatch) };
       if (typeof rawPatch.text === "string") patch.text = rawPatch.text;
+      if (typeof rawPatch.name === "string") patch.name = rawPatch.name;
       if (typeof rawPatch.hidden === "boolean") patch.hidden = rawPatch.hidden;
       if (typeof rawPatch.locked === "boolean") patch.locked = rawPatch.locked;
       if (typeof rawPatch.opacity === "number") patch.opacity = rawPatch.opacity;
@@ -345,6 +371,28 @@ export function parseClientMessage(raw: string): ClientMessage {
     default:
       throw new Error(`Unknown action: ${String(msg.action)}`);
   }
+}
+
+function parseTextStyleFields(raw: Record<string, unknown>): TextStyleFields {
+  const fields: TextStyleFields = {};
+  if (typeof raw.fontFamily === "string") fields.fontFamily = raw.fontFamily;
+  if (typeof raw.fontSize === "number") fields.fontSize = raw.fontSize;
+  if (typeof raw.fontWeight === "string") fields.fontWeight = raw.fontWeight;
+  if (raw.textAlign === "left" || raw.textAlign === "center" || raw.textAlign === "right") {
+    fields.textAlign = raw.textAlign;
+  }
+  if (typeof raw.textColor === "string") fields.textColor = raw.textColor;
+  if (typeof raw.backgroundColor === "string") fields.backgroundColor = raw.backgroundColor;
+  if (typeof raw.backgroundAlpha === "number") fields.backgroundAlpha = raw.backgroundAlpha;
+  if (typeof raw.shadowEnabled === "boolean") fields.shadowEnabled = raw.shadowEnabled;
+  if (typeof raw.shadowX === "number") fields.shadowX = raw.shadowX;
+  if (typeof raw.shadowY === "number") fields.shadowY = raw.shadowY;
+  if (typeof raw.shadowBlur === "number") fields.shadowBlur = raw.shadowBlur;
+  if (typeof raw.shadowColor === "string") fields.shadowColor = raw.shadowColor;
+  if (typeof raw.outlineEnabled === "boolean") fields.outlineEnabled = raw.outlineEnabled;
+  if (typeof raw.outlineColor === "string") fields.outlineColor = raw.outlineColor;
+  if (typeof raw.outlineWidth === "number") fields.outlineWidth = raw.outlineWidth;
+  return fields;
 }
 
 function isAssetType(value: unknown): value is AssetType {

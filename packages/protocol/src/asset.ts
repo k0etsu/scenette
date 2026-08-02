@@ -43,6 +43,30 @@ export interface Asset {
   // Media assets reference their S3 object; text assets carry inline content instead.
   s3Key?: string;
   text?: string;
+  // User-assigned label shown in the objects list/properties header, purely
+  // for finding the asset in a busy room -- distinct from `text` (a text
+  // asset's own rendered content). Falls back to a derived label (filename,
+  // truncated text, or the raw assetId) when unset.
+  name?: string;
+  // Text-asset styling -- ignored for every other asset type. All optional
+  // so existing rooms' stored assets (and a plain asset:add with no
+  // overrides) fall back to the CANVAS/BROWSER_SOURCE-shared defaults in
+  // textStyle.ts rather than needing a migration.
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: string;
+  textAlign?: "left" | "center" | "right";
+  textColor?: string;
+  backgroundColor?: string;
+  backgroundAlpha?: number; // 0-1
+  shadowEnabled?: boolean;
+  shadowX?: number;
+  shadowY?: number;
+  shadowBlur?: number;
+  shadowColor?: string;
+  outlineEnabled?: boolean;
+  outlineColor?: string;
+  outlineWidth?: number;
   // Bytes, server-verified via an S3 HeadObject right after asset:add (see
   // message.ts) rather than trusted from the client -- used to enforce the
   // per-room storage quota (see upload-url). Absent for text assets and for

@@ -166,6 +166,59 @@ describe("mid-drag rebuild guard (`interacting`)", () => {
   });
 });
 
+describe("mid-typing rebuild guard (focus, not just mousedown/mouseup)", () => {
+  it("does not rebuild the properties panel while a text field has focus, even without an active mousedown", () => {
+    // Regression: text patches now fire live on every keystroke (see the
+    // realtime text-content/name tests below), so the remote echo of that
+    // same keystroke can arrive from the server while the user is still
+    // typing -- long after any mousedown from originally clicking into the
+    // field has already been followed by its mouseup. Rebuilding the panel
+    // mid-type would destroy and recreate the textarea, dropping focus and
+    // cursor position after a single keystroke.
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello" })]);
+    sidebar.setSelected("a1");
+
+    const textAreaBefore = propertiesPanel.querySelector('[data-role="text-content"]') as HTMLTextAreaElement;
+    textAreaBefore.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+
+    sidebar.upsertAsset(makeAsset({ type: "text", text: "hello w" }));
+
+    const textAreaAfter = propertiesPanel.querySelector('[data-role="text-content"]') as HTMLTextAreaElement;
+    expect(textAreaAfter).toBe(textAreaBefore);
+  });
+
+  it("resumes rebuilding once the field loses focus", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello" })]);
+    sidebar.setSelected("a1");
+
+    const textAreaBefore = propertiesPanel.querySelector('[data-role="text-content"]') as HTMLTextAreaElement;
+    textAreaBefore.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    textAreaBefore.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+
+    sidebar.upsertAsset(makeAsset({ type: "text", text: "hello world" }));
+
+    const textAreaAfter = propertiesPanel.querySelector('[data-role="text-content"]') as HTMLTextAreaElement;
+    expect(textAreaAfter).not.toBe(textAreaBefore);
+    expect(textAreaAfter.value).toBe("hello world");
+  });
+});
+
+describe("realtime text/name patching", () => {
+  it("patches text live on every keystroke (input, not change)", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello" })]);
+    sidebar.setSelected("a1");
+
+    const textArea = propertiesPanel.querySelector('[data-role="text-content"]') as HTMLTextAreaElement;
+    textArea.value = "hello world";
+    textArea.dispatchEvent(new Event("input"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { text: "hello world" });
+  });
+});
+
 describe("dispose", () => {
   it("stops clearing `interacting` on window mouseup after dispose (no leaked listener on a room switch)", () => {
     const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
@@ -229,6 +282,190 @@ describe("bindSlider", () => {
     const number = propertiesPanel.querySelector('[data-role="rotation-number"]') as HTMLInputElement;
     expect(range.value).toBe("-10");
     expect(number.value).toBe("-10");
+  });
+});
+
+describe("editable name field", () => {
+  it("shows an empty input with the derived label as a placeholder when no name is set", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello world" })]);
+    sidebar.setSelected("a1");
+
+    const nameInput = propertiesPanel.querySelector('[data-role="name"]') as HTMLInputElement;
+    expect(nameInput.value).toBe("");
+    expect(nameInput.placeholder).toBe("hello world");
+  });
+
+  it("prefills the input with an explicitly-set name", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ name: "My Label" })]);
+    sidebar.setSelected("a1");
+
+    const nameInput = propertiesPanel.querySelector('[data-role="name"]') as HTMLInputElement;
+    expect(nameInput.value).toBe("My Label");
+  });
+
+  it("sends a patch on change (blur), not on every keystroke", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset()]);
+    sidebar.setSelected("a1");
+
+    const nameInput = propertiesPanel.querySelector('[data-role="name"]') as HTMLInputElement;
+    nameInput.value = "Renamed";
+    nameInput.dispatchEvent(new Event("input"));
+    expect(onPatch).not.toHaveBeenCalled();
+
+    nameInput.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { name: "Renamed" });
+  });
+
+  it("blurs the input on Enter (which commits via the change listener, same as clicking away)", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset()]);
+    sidebar.setSelected("a1");
+
+    const nameInput = propertiesPanel.querySelector('[data-role="name"]') as HTMLInputElement;
+    nameInput.focus();
+    expect(document.activeElement).toBe(nameInput);
+    nameInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(document.activeElement).not.toBe(nameInput);
+  });
+
+  it("is shown for every asset type, not just text", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "video" })]);
+    sidebar.setSelected("a1");
+    expect(propertiesPanel.querySelector('[data-role="name"]')).not.toBeNull();
+  });
+});
+
+describe("text settings section", () => {
+  it("defaults the text textarea to 3 rows tall (not the old cramped 2)", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+    const textArea = propertiesPanel.querySelector('[data-role="text-content"]') as HTMLTextAreaElement;
+    expect(textArea.rows).toBe(3);
+  });
+
+  it("is only shown for text assets", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "image" })]);
+    sidebar.setSelected("a1");
+    expect(propertiesPanel.querySelector('[data-role="font-family"]')).toBeNull();
+  });
+
+  it("lists every font family as an option, defaulting to Roboto", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const select = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    expect(select.value).toBe("Roboto");
+    const options = [...select.options].map((o) => o.value);
+    expect(options).toContain("Comic Sans MS");
+    expect(options).toContain("Averia Serif Libre");
+    expect(options).toHaveLength(7);
+  });
+
+  it("patches fontFamily/fontSize/fontWeight/textAlign on change", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const family = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    family.value = "Comic Neue";
+    family.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { fontFamily: "Comic Neue" });
+
+    const size = propertiesPanel.querySelector('[data-role="font-size"]') as HTMLInputElement;
+    size.value = "32";
+    size.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { fontSize: 32 });
+
+    const align = propertiesPanel.querySelector('[data-role="text-align"]') as HTMLSelectElement;
+    align.value = "center";
+    align.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { textAlign: "center" });
+  });
+
+  it("keeps the color swatch and hex input in sync and patches on change", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const hex = propertiesPanel.querySelector('[data-role="bg-color-hex"]') as HTMLInputElement;
+    const swatch = propertiesPanel.querySelector('[data-role="bg-color-swatch"]') as HTMLInputElement;
+    hex.value = "#ff00ff";
+    hex.dispatchEvent(new Event("change"));
+    expect(swatch.value).toBe("#ff00ff");
+    expect(onPatch).toHaveBeenCalledWith("a1", { backgroundColor: "#ff00ff" });
+  });
+
+  it("swaps background and text colors", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(
+      objectsPanel,
+      propertiesPanel,
+      makeCallbacks({ onPatch })
+    );
+    sidebar.setAssets([makeAsset({ type: "text", backgroundColor: "#000000", textColor: "#ffffff" })]);
+    sidebar.setSelected("a1");
+
+    propertiesPanel.querySelector<HTMLButtonElement>('[data-role="swap-colors"]')!.click();
+    expect(onPatch).toHaveBeenCalledWith("a1", { backgroundColor: "#ffffff", textColor: "#000000" });
+  });
+
+  it("patches backgroundAlpha live on every drag tick (input, not change) as a 0-1 fraction from the 0-100 slider", () => {
+    // Real-time like every other slider in the app -- doesn't require the
+    // user to release the slider for it to take effect.
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const alpha = propertiesPanel.querySelector('[data-role="bg-alpha"]') as HTMLInputElement;
+    alpha.value = "70";
+    alpha.dispatchEvent(new Event("input"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { backgroundAlpha: 0.7 });
+  });
+
+  it("patches shadow fields including the enabled checkbox", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const enabled = propertiesPanel.querySelector('[data-role="shadow-enabled"]') as HTMLInputElement;
+    enabled.checked = true;
+    enabled.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { shadowEnabled: true });
+
+    const blur = propertiesPanel.querySelector('[data-role="shadow-blur"]') as HTMLInputElement;
+    blur.value = "8";
+    blur.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { shadowBlur: 8 });
+  });
+
+  it("patches outline fields including the enabled checkbox", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+
+    const enabled = propertiesPanel.querySelector('[data-role="outline-enabled"]') as HTMLInputElement;
+    enabled.checked = true;
+    enabled.dispatchEvent(new Event("change"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { outlineEnabled: true });
+
+    // Real-time like every other slider -- "input", not "change".
+    const width = propertiesPanel.querySelector('[data-role="outline-width"]') as HTMLInputElement;
+    width.value = "3";
+    width.dispatchEvent(new Event("input"));
+    expect(onPatch).toHaveBeenCalledWith("a1", { outlineWidth: 3 });
   });
 });
 

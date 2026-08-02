@@ -147,3 +147,21 @@ describe("global volume (regression: playback going unresponsive during a volume
     expect(audio.volume).toBeCloseTo(0.25, 5);
   });
 });
+
+describe("text asset layout", () => {
+  it("uses white-space: pre with no word-break/overflow-hiding, matching control-ui's canvas.ts exactly", () => {
+    // Regression: this app's text styling drifted out of sync with
+    // canvas.ts's (pre-wrap + word-break + overflow:hidden, from before
+    // text assets auto-sized themselves to fit their own content) --
+    // since a text asset's stored width/height now comes from control-ui's
+    // own unwrapped measurement, rendering it here with anything that
+    // forces mid-word wrapping to fit that box made the same asset visibly
+    // wrap differently (and look broken) in OBS versus the editor preview.
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "text", text: "hello" }));
+    const el = root.querySelector('[data-asset-type="text"]') as HTMLElement;
+    expect(el.style.whiteSpace).toBe("pre");
+    expect(el.style.wordBreak).toBe("");
+    expect(el.style.overflow).toBe("");
+  });
+});

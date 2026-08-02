@@ -1,6 +1,6 @@
-import { AssetAddMessage, ServerMessage } from "@scenette/protocol";
+import { AssetAddMessage, ServerMessage, DEFAULT_TEXT_STYLE } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
-import { CanvasView } from "./canvas";
+import { CanvasView, MIN_ASSET_SIZE } from "./canvas";
 import { Sidebar } from "./sidebar";
 import { SoundPanel } from "./sound";
 import { ConnectedUsersPanel } from "./connectedUsers";
@@ -10,6 +10,7 @@ import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
 import { RoomPicker } from "./roomPicker";
 import { StreamPreviewPanel } from "./streamPreview";
+import { measureTextBoxSize } from "./textMeasure";
 import {
   register,
   login,
@@ -47,7 +48,6 @@ const soundPanelEl = document.getElementById("sound-panel");
 const connectedUsersPanelEl = document.getElementById("connected-users-panel");
 const variablesPanelEl = document.getElementById("variables-panel");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
-const addTextButton = document.getElementById("add-text-button");
 const manageAccessButton = document.getElementById("manage-access-button");
 const accessModalEl = document.getElementById("access-modal");
 const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
@@ -63,7 +63,7 @@ if (
   !loginError || !loginMessage || !resendVerificationButton || !roomPickerViewEl ||
   !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
-  !variablesPanelEl || !uploadInput || !addTextButton || !manageAccessButton || !accessModalEl ||
+  !variablesPanelEl || !uploadInput || !manageAccessButton || !accessModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
   !contextMenuTextButton || !contextMenuMediaButton
 ) {
@@ -82,9 +82,9 @@ interface RoomSession {
   canvas: CanvasView;
   sidebar: Sidebar;
   connectedUsersPanel: ConnectedUsersPanel;
-  // Where the next text/media asset (toolbar button or context-menu "Text"/
-  // "Media") should land -- world coords from a right-click, or undefined
-  // to default to the viewport center.
+  // Where the next text/media asset (context-menu "Text"/"Media") should
+  // land -- world coords from a right-click, or undefined to default to
+  // the viewport center.
   createPosition?: { x: number; y: number };
 }
 
@@ -201,18 +201,20 @@ async function main(): Promise<void> {
     }
   });
 
-  // ---- Toolbar / context-menu wiring, bound exactly once for the whole
-  // page's lifetime -- these target static DOM elements that persist across
-  // every room switch. Each reads/writes the *current* room via the mutable
+  // ---- Context-menu wiring, bound exactly once for the whole page's
+  // lifetime -- these target static DOM elements that persist across every
+  // room switch. Each reads/writes the *current* room via the mutable
   // `current` holder above rather than closing over one room's state.
 
   function createTextAsset(): void {
     if (!current) return;
-    const text = window.prompt("Text content:");
-    if (!text) return;
+    const text = "New Text";
 
-    const width = 200;
-    const height = 50;
+    // Measured up front (rather than a fixed placeholder size that only
+    // self-corrects once the user first edits it) so the box already fits
+    // "New Text" the instant it appears -- matches DEFAULT_TEXT_STYLE since
+    // no per-asset style overrides exist yet for a brand-new asset.
+    const { width, height } = measureTextBoxSize(text, DEFAULT_TEXT_STYLE, MIN_ASSET_SIZE);
     const viewport = current.canvas.getViewport();
     const pos = current.createPosition ?? {
       x: viewport.x + viewport.width / 2 - width / 2,
@@ -227,7 +229,6 @@ async function main(): Promise<void> {
     });
   }
 
-  addTextButton!.addEventListener("click", createTextAsset);
   contextMenuTextButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     createTextAsset();
@@ -597,6 +598,7 @@ function enterRoom(
       zIndex: source.zIndex,
       s3Key: source.s3Key,
       text: source.text,
+      name: source.name,
       opacity: source.opacity,
       blur: source.blur,
       flipX: source.flipX,
@@ -607,6 +609,21 @@ function enterRoom(
       muted: source.muted,
       volume: source.volume,
       paused: source.paused,
+      fontFamily: source.fontFamily,
+      fontSize: source.fontSize,
+      fontWeight: source.fontWeight,
+      textAlign: source.textAlign,
+      textColor: source.textColor,
+      backgroundColor: source.backgroundColor,
+      backgroundAlpha: source.backgroundAlpha,
+      shadowEnabled: source.shadowEnabled,
+      shadowX: source.shadowX,
+      shadowY: source.shadowY,
+      shadowBlur: source.shadowBlur,
+      shadowColor: source.shadowColor,
+      outlineEnabled: source.outlineEnabled,
+      outlineColor: source.outlineColor,
+      outlineWidth: source.outlineWidth,
     };
     room.connection.send({ action: "asset:add", roomId, asset });
     // Select the new copy, not the original -- matches standard duplicate
