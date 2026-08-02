@@ -251,10 +251,16 @@ async function main(): Promise<void> {
     try {
       const result = await uploadFile(httpApiUrl, roomId, file);
       const viewport = canvas.getViewport();
-      const pos = current.createPosition ?? {
-        x: viewport.x + viewport.width / 2 - result.width / 2,
-        y: viewport.y + viewport.height / 2 - result.height / 2,
-      };
+      // createPosition (an explicit right-click "add media" here) wins when
+      // set; otherwise this was triggered from the toolbar button or a
+      // clipboard paste, neither of which has a click of its own to read a
+      // position from -- fall back to wherever the mouse was last actually
+      // over the canvas rather than always dropping the asset dead center.
+      const pos = current.createPosition ??
+        canvas.getCursorWorldPosition() ?? {
+          x: viewport.x + viewport.width / 2 - result.width / 2,
+          y: viewport.y + viewport.height / 2 - result.height / 2,
+        };
       current.createPosition = undefined;
 
       connection.send({
@@ -491,6 +497,7 @@ function enterRoom(
       canvas.patchAsset(assetId, patch);
       syncSidebarFromCanvas(assetId);
     },
+    onTextEditBlur: (assetId) => canvas.flushPendingTextPatch(assetId),
     onMove: (assetId, x, y) => {
       canvas.setAssetPosition(assetId, x, y);
       syncSidebarFromCanvas(assetId);

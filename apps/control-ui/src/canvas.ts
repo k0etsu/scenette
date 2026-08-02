@@ -37,6 +37,50 @@ const VIEWPORT_WIDTH_FRACTION = 0.7;
 // mid-drag and fighting with continued local movement.
 const MOVE_SEND_THROTTLE_MS = 40;
 
+// Caps how often a text asset's content is actually sent over the network
+// while typing -- see sendTextPatchThrottled's own doc comment for why this
+// exists at all. Deliberately looser than MOVE_SEND_THROTTLE_MS: a typed
+// keystroke is naturally much less frequent than a mousemove tick, so this
+// mainly matters for fast typists/paste bursts rather than every edit.
+const TEXT_SEND_THROTTLE_MS = 100;
+
+// Builds an AssetPatch carrying every currently-patchable field's live
+// value from `asset`, rather than just whichever field(s) a particular
+// local edit actually changed -- see patchAsset's own doc comment for why.
+function fullAssetPatch(asset: Asset): AssetPatch {
+  return {
+    text: asset.text,
+    name: asset.name,
+    hidden: asset.hidden,
+    locked: asset.locked,
+    opacity: asset.opacity,
+    blur: asset.blur,
+    flipX: asset.flipX,
+    flipY: asset.flipY,
+    zIndex: asset.zIndex,
+    rotation: asset.rotation,
+    loop: asset.loop,
+    muted: asset.muted,
+    volume: asset.volume,
+    paused: asset.paused,
+    fontFamily: asset.fontFamily,
+    fontSize: asset.fontSize,
+    fontWeight: asset.fontWeight,
+    textAlign: asset.textAlign,
+    textColor: asset.textColor,
+    backgroundColor: asset.backgroundColor,
+    backgroundAlpha: asset.backgroundAlpha,
+    shadowEnabled: asset.shadowEnabled,
+    shadowX: asset.shadowX,
+    shadowY: asset.shadowY,
+    shadowBlur: asset.shadowBlur,
+    shadowColor: asset.shadowColor,
+    outlineEnabled: asset.outlineEnabled,
+    outlineColor: asset.outlineColor,
+    outlineWidth: asset.outlineWidth,
+  };
+}
+
 export interface CanvasCallbacks {
   onAssetMove: (assetId: string, x: number, y: number, seq: number) => void;
   onAssetResize: (assetId: string, x: number, y: number, width: number, height: number, seq: number) => void;
@@ -88,6 +132,15 @@ export class CanvasView {
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
   private lastMoveSentAt = 0;
+
+  // Updated on every plain mousemove over the canvas (not just while
+  // dragging) so a toolbar/paste-triggered upload -- which has no click
+  // event of its own to read a position from -- can still place the new
+  // asset near wherever the user was last actually pointing, instead of
+  // always falling back to the viewport center. Undefined until the mouse
+  // has entered this container at least once (e.g. right after a room
+  // switch, before the pointer has crossed back over the canvas).
+  private lastMouseWorld?: { x: number; y: number };
 
   // Room-level master (synced, affects browser-source too) and this user's
   // own local-only monitoring level -- see sound.ts. Multiplied together
@@ -253,6 +306,13 @@ export class CanvasView {
 
   getViewport(): Viewport {
     return this.viewport;
+  }
+
+  // See lastMouseWorld's own doc -- undefined if the cursor hasn't crossed
+  // over the canvas yet this room (falls back to viewport center at the
+  // call site, same as it always did).
+  getCursorWorldPosition(): { x: number; y: number } | undefined {
+    return this.lastMouseWorld;
   }
 
   // Deliberately touches only video elements' .volume, not a full
@@ -431,11 +491,13 @@ export class CanvasView {
   patchAsset(assetId: string, patch: AssetPatch): void {
     const entry = this.entries.get(assetId);
     if (!entry) return;
-    const seq = this.nextSeq();
-    entry.asset = { ...entry.asset, ...patch, seq };
+    // Local state/rendering applies immediately regardless of the text
+    // throttle below -- only the network send (and the seq that goes with
+    // it) is ever delayed, so typing always feels instant to the person
+    // doing it.
+    entry.asset = { ...entry.asset, ...patch };
     this.applyTransform(entry, entry.asset);
     if (assetId === this.selectedAssetId) this.positionHandles();
-    this.callbacks.onAssetPatch(assetId, patch, seq);
     // A font/size/weight change (from the sidebar's text-settings controls)
     // can change the rendered box's natural size just as much as an actual
     // text edit -- re-measure after any local patch on a text asset, not
@@ -445,6 +507,96 @@ export class CanvasView {
     // no risk of every connected client redundantly re-measuring and
     // re-broadcasting on someone else's edit.
     if (entry.asset.type === "text") this.autoSizeText(assetId);
+
+    if ("text" in patch) {
+      this.sendTextPatchThrottled(assetId);
+      return;
+    }
+
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, seq };
+    this.callbacks.onAssetPatch(assetId, patch, seq);
+  }
+
+  // Keyed by assetId (not a single shared record) so throttled edits to two
+  // different text assets -- unusual, but possible if the user clicks
+  // between them fast enough -- don't interfere with each other.
+  private readonly textSendState = new Map<string, { lastSentAt: number; trailingTimer?: ReturnType<typeof setTimeout> }>();
+
+  // Text content edits fire on every keystroke. Sending one asset:update per
+  // keystroke with no coalescing at all (the original design) turned out to
+  // lose real keystrokes in practice -- a fast typist's messages arrived (or
+  // were processed) faster than API Gateway's PostToConnection/Lambda
+  // pipeline reliably keeps up with, so some interior updates never reached
+  // other clients, not merely raced-and-superseded but genuinely dropped.
+  // Coalescing those keystrokes into fewer sends (leading+trailing throttle,
+  // same shape as MOVE_SEND_THROTTLE_MS's own scheme) cuts the send volume
+  // enough to stop that -- and since sendFullTextPatch() below always sends
+  // *this* asset's complete current state rather than a per-keystroke diff,
+  // no coalesced-away intermediate keystroke's content is ever actually
+  // lost, only its intermediate on-screen appearance to other viewers.
+  // Debouncing (waiting for a pause before sending anything) was tried first
+  // and rejected -- it made typing invisible to collaborators until the
+  // person stopped, which is worse than the bug it fixed.
+  private sendTextPatchThrottled(assetId: string): void {
+    // -Infinity (not 0) so the very first edit to a given asset always
+    // leading-sends immediately regardless of how early it happens --
+    // performance.now() is relative to page/worker start, not the epoch, so
+    // it can legitimately be near 0 for an edit made right after load.
+    const state = this.textSendState.get(assetId) ?? { lastSentAt: -Infinity };
+    this.textSendState.set(assetId, state);
+
+    const now = performance.now();
+    const elapsed = now - state.lastSentAt;
+    if (elapsed >= TEXT_SEND_THROTTLE_MS) {
+      if (state.trailingTimer !== undefined) {
+        clearTimeout(state.trailingTimer);
+        state.trailingTimer = undefined;
+      }
+      this.sendFullTextPatch(assetId, state);
+      return;
+    }
+
+    // Already within the throttle window -- a trailing send is already
+    // scheduled (or gets one now) for the moment it ends, so this exact
+    // keystroke's content is never simply skipped, only delayed slightly.
+    if (state.trailingTimer === undefined) {
+      state.trailingTimer = setTimeout(() => {
+        state.trailingTimer = undefined;
+        this.sendFullTextPatch(assetId, state);
+      }, TEXT_SEND_THROTTLE_MS - elapsed);
+    }
+  }
+
+  private sendFullTextPatch(assetId: string, state: { lastSentAt: number }): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, seq };
+    state.lastSentAt = performance.now();
+    // The asset's entire current patchable state, not just the text field
+    // this particular keystroke changed -- every field of an asset shares
+    // one seq-gated conditional write on the server (roomState.ts's
+    // updateAsset), so a patch carrying only what changed would lose that
+    // data permanently if it lost the seq race and got rejected as stale
+    // (message.ts's silent "stale" drop, no retry). Sending everything means
+    // a rejected/coalesced-away send is always truly redundant.
+    this.callbacks.onAssetPatch(assetId, fullAssetPatch(entry.asset), seq);
+  }
+
+  // Bypasses the throttle to flush on session end (blur) -- otherwise the
+  // very last keystroke before the user clicks away could sit unsent for up
+  // to TEXT_SEND_THROTTLE_MS with no further typing left to eventually carry
+  // it, same reasoning as onMouseUp's throttle bypass for move/resize. A
+  // no-op if nothing's pending (e.g. blur with no edits made this session).
+  // Public: also called from the sidebar's textarea on blur (see main.ts),
+  // not just the canvas's own inline editor.
+  flushPendingTextPatch(assetId: string): void {
+    const state = this.textSendState.get(assetId);
+    if (!state?.trailingTimer) return;
+    clearTimeout(state.trailingTimer);
+    state.trailingTimer = undefined;
+    this.sendFullTextPatch(assetId, state);
   }
 
   // Text assets size themselves to fit their own rendered content (see
@@ -649,7 +801,10 @@ export class CanvasView {
       content.removeEventListener("blur", onBlur);
       content.removeEventListener("keydown", onKeyDown);
     };
-    const onBlur = () => stopEditing();
+    const onBlur = () => {
+      stopEditing();
+      this.flushPendingTextPatch(assetId);
+    };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -824,6 +979,17 @@ export class CanvasView {
   }
 
   private onMouseMove(event: MouseEvent): void {
+    const rect = this.container.getBoundingClientRect();
+    const screenX = event.clientX - rect.left;
+    const screenY = event.clientY - rect.top;
+    // Bound to window (not just the container), so restrict tracking to
+    // while the cursor is actually over the canvas -- otherwise an upload
+    // triggered right after moving the mouse over the sidebar/toolbar would
+    // place the asset under whatever was last hovered there instead.
+    if (screenX >= 0 && screenY >= 0 && screenX <= rect.width && screenY <= rect.height) {
+      this.lastMouseWorld = this.screenToWorld(screenX, screenY);
+    }
+
     if (!this.dragging) return;
 
     if ("panning" in this.dragging) {
