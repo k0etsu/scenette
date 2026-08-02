@@ -497,6 +497,7 @@ function enterRoom(
       canvas.patchAsset(assetId, patch);
       syncSidebarFromCanvas(assetId);
     },
+    onTextEditBlur: (assetId) => canvas.flushPendingTextPatch(assetId),
     onMove: (assetId, x, y) => {
       canvas.setAssetPosition(assetId, x, y);
       syncSidebarFromCanvas(assetId);

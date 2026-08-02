@@ -37,6 +37,13 @@ const VIEWPORT_WIDTH_FRACTION = 0.7;
 // mid-drag and fighting with continued local movement.
 const MOVE_SEND_THROTTLE_MS = 40;
 
+// Caps how often a text asset's content is actually sent over the network
+// while typing -- see sendTextPatchThrottled's own doc comment for why this
+// exists at all. Deliberately looser than MOVE_SEND_THROTTLE_MS: a typed
+// keystroke is naturally much less frequent than a mousemove tick, so this
+// mainly matters for fast typists/paste bursts rather than every edit.
+const TEXT_SEND_THROTTLE_MS = 100;
+
 // Builds an AssetPatch carrying every currently-patchable field's live
 // value from `asset`, rather than just whichever field(s) a particular
 // local edit actually changed -- see patchAsset's own doc comment for why.
@@ -484,8 +491,11 @@ export class CanvasView {
   patchAsset(assetId: string, patch: AssetPatch): void {
     const entry = this.entries.get(assetId);
     if (!entry) return;
-    const seq = this.nextSeq();
-    entry.asset = { ...entry.asset, ...patch, seq };
+    // Local state/rendering applies immediately regardless of the text
+    // throttle below -- only the network send (and the seq that goes with
+    // it) is ever delayed, so typing always feels instant to the person
+    // doing it.
+    entry.asset = { ...entry.asset, ...patch };
     this.applyTransform(entry, entry.asset);
     if (assetId === this.selectedAssetId) this.positionHandles();
     // A font/size/weight change (from the sidebar's text-settings controls)
@@ -498,21 +508,95 @@ export class CanvasView {
     // re-broadcasting on someone else's edit.
     if (entry.asset.type === "text") this.autoSizeText(assetId);
 
-    // Text content edits fire on every keystroke (no throttle -- typing
-    // needs to look live for collaborators, unlike a dragged move/resize).
-    // That volume of independent asset:update sends made this one specific
-    // field far more exposed than any other to a genuine race: every patch
-    // for the same asset shares one seq-gated conditional write on the
-    // server (roomState.ts's updateAsset), and a patch that only carries
-    // the field(s) that changed loses that data *permanently* if it loses
-    // the race and gets rejected as stale (message.ts's silent "stale"
-    // drop, no retry). Sending the asset's entire current patchable state
-    // instead of just `patch` on a text edit means a rejected send is truly
-    // redundant -- whichever patch actually wins the seq race for this
-    // asset already carries every field's up-to-date value, so nothing is
-    // ever lost, only occasionally resent.
-    const outgoingPatch = "text" in patch ? fullAssetPatch(entry.asset) : patch;
-    this.callbacks.onAssetPatch(assetId, outgoingPatch, seq);
+    if ("text" in patch) {
+      this.sendTextPatchThrottled(assetId);
+      return;
+    }
+
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, seq };
+    this.callbacks.onAssetPatch(assetId, patch, seq);
+  }
+
+  // Keyed by assetId (not a single shared record) so throttled edits to two
+  // different text assets -- unusual, but possible if the user clicks
+  // between them fast enough -- don't interfere with each other.
+  private readonly textSendState = new Map<string, { lastSentAt: number; trailingTimer?: ReturnType<typeof setTimeout> }>();
+
+  // Text content edits fire on every keystroke. Sending one asset:update per
+  // keystroke with no coalescing at all (the original design) turned out to
+  // lose real keystrokes in practice -- a fast typist's messages arrived (or
+  // were processed) faster than API Gateway's PostToConnection/Lambda
+  // pipeline reliably keeps up with, so some interior updates never reached
+  // other clients, not merely raced-and-superseded but genuinely dropped.
+  // Coalescing those keystrokes into fewer sends (leading+trailing throttle,
+  // same shape as MOVE_SEND_THROTTLE_MS's own scheme) cuts the send volume
+  // enough to stop that -- and since sendFullTextPatch() below always sends
+  // *this* asset's complete current state rather than a per-keystroke diff,
+  // no coalesced-away intermediate keystroke's content is ever actually
+  // lost, only its intermediate on-screen appearance to other viewers.
+  // Debouncing (waiting for a pause before sending anything) was tried first
+  // and rejected -- it made typing invisible to collaborators until the
+  // person stopped, which is worse than the bug it fixed.
+  private sendTextPatchThrottled(assetId: string): void {
+    // -Infinity (not 0) so the very first edit to a given asset always
+    // leading-sends immediately regardless of how early it happens --
+    // performance.now() is relative to page/worker start, not the epoch, so
+    // it can legitimately be near 0 for an edit made right after load.
+    const state = this.textSendState.get(assetId) ?? { lastSentAt: -Infinity };
+    this.textSendState.set(assetId, state);
+
+    const now = performance.now();
+    const elapsed = now - state.lastSentAt;
+    if (elapsed >= TEXT_SEND_THROTTLE_MS) {
+      if (state.trailingTimer !== undefined) {
+        clearTimeout(state.trailingTimer);
+        state.trailingTimer = undefined;
+      }
+      this.sendFullTextPatch(assetId, state);
+      return;
+    }
+
+    // Already within the throttle window -- a trailing send is already
+    // scheduled (or gets one now) for the moment it ends, so this exact
+    // keystroke's content is never simply skipped, only delayed slightly.
+    if (state.trailingTimer === undefined) {
+      state.trailingTimer = setTimeout(() => {
+        state.trailingTimer = undefined;
+        this.sendFullTextPatch(assetId, state);
+      }, TEXT_SEND_THROTTLE_MS - elapsed);
+    }
+  }
+
+  private sendFullTextPatch(assetId: string, state: { lastSentAt: number }): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, seq };
+    state.lastSentAt = performance.now();
+    // The asset's entire current patchable state, not just the text field
+    // this particular keystroke changed -- every field of an asset shares
+    // one seq-gated conditional write on the server (roomState.ts's
+    // updateAsset), so a patch carrying only what changed would lose that
+    // data permanently if it lost the seq race and got rejected as stale
+    // (message.ts's silent "stale" drop, no retry). Sending everything means
+    // a rejected/coalesced-away send is always truly redundant.
+    this.callbacks.onAssetPatch(assetId, fullAssetPatch(entry.asset), seq);
+  }
+
+  // Bypasses the throttle to flush on session end (blur) -- otherwise the
+  // very last keystroke before the user clicks away could sit unsent for up
+  // to TEXT_SEND_THROTTLE_MS with no further typing left to eventually carry
+  // it, same reasoning as onMouseUp's throttle bypass for move/resize. A
+  // no-op if nothing's pending (e.g. blur with no edits made this session).
+  // Public: also called from the sidebar's textarea on blur (see main.ts),
+  // not just the canvas's own inline editor.
+  flushPendingTextPatch(assetId: string): void {
+    const state = this.textSendState.get(assetId);
+    if (!state?.trailingTimer) return;
+    clearTimeout(state.trailingTimer);
+    state.trailingTimer = undefined;
+    this.sendFullTextPatch(assetId, state);
   }
 
   // Text assets size themselves to fit their own rendered content (see
@@ -717,7 +801,10 @@ export class CanvasView {
       content.removeEventListener("blur", onBlur);
       content.removeEventListener("keydown", onKeyDown);
     };
-    const onBlur = () => stopEditing();
+    const onBlur = () => {
+      stopEditing();
+      this.flushPendingTextPatch(assetId);
+    };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();

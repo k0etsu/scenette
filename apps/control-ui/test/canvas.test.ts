@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Asset } from "@scenette/protocol";
 import { CanvasView, CanvasCallbacks } from "../src/canvas";
 
@@ -312,7 +312,20 @@ describe("setAssetPosition / setAssetSize / patchAsset", () => {
   });
 });
 
-describe("patchAsset -- text edits send the asset's full patchable state", () => {
+describe("patchAsset -- text edits: throttled send + full-object patch", () => {
+  let now = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
   it("sends every patchable field's current value, not just the text field that changed", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ type: "text", text: "hello", hidden: true, opacity: 0.5, fontSize: 24 }));
@@ -324,25 +337,84 @@ describe("patchAsset -- text edits send the asset's full patchable state", () =>
     expect(sentPatch).toMatchObject({ text: "hello!", hidden: true, opacity: 0.5, fontSize: 24 });
   });
 
-  it("sends immediately on every call -- no debounce, so collaborators see typing live", () => {
+  it("sends the very first text patch immediately (leading edge)", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ type: "text", text: "" }));
 
     canvas.patchAsset("a1", { text: "h" });
-    canvas.patchAsset("a1", { text: "he" });
-    canvas.patchAsset("a1", { text: "hel" });
 
-    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(3);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("a1", expect.objectContaining({ text: "h" }), expect.any(Number));
+  });
+
+  it("coalesces keystrokes within the throttle window into a single trailing send carrying the latest text", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "" }));
+
+    canvas.patchAsset("a1", { text: "h" }); // leading send at t=0
+    now = 30;
+    canvas.patchAsset("a1", { text: "he" }); // within the window -- schedules a trailing send
+    now = 60;
+    canvas.patchAsset("a1", { text: "hel" }); // still within the window -- no additional timer
+
+    // Local state already reflects every keystroke; only the leading send
+    // has gone over the wire so far.
+    expect(canvas.get("a1")?.text).toBe("hel");
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(100);
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(2);
     expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("a1", expect.objectContaining({ text: "hel" }), expect.any(Number));
   });
 
-  it("a non-text patch still sends only the fields it actually changed", () => {
+  it("sends immediately again once the throttle window has fully elapsed", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "" }));
+
+    canvas.patchAsset("a1", { text: "h" });
+    now = 150;
+    canvas.patchAsset("a1", { text: "he" });
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(2);
+  });
+
+  it("flushPendingTextPatch sends immediately and cancels the trailing timer", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "" }));
+
+    canvas.patchAsset("a1", { text: "h" });
+    now = 30;
+    canvas.patchAsset("a1", { text: "he" }); // schedules a trailing send
+
+    canvas.flushPendingTextPatch("a1");
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(2);
+    expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("a1", expect.objectContaining({ text: "he" }), expect.any(Number));
+
+    vi.advanceTimersByTime(200);
+    // Nothing further fires later -- the timer was actually cancelled, not
+    // just raced by the earlier flush.
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(2);
+  });
+
+  it("flushPendingTextPatch is a no-op when nothing is pending", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "" }));
+    canvas.flushPendingTextPatch("a1");
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+  });
+
+  it("a non-text patch still sends only the fields it actually changed, and isn't subject to the text throttle", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ type: "text", text: "hello", hidden: false }));
 
     canvas.patchAsset("a1", { hidden: true });
+    now = 10;
+    canvas.patchAsset("a1", { locked: true });
 
-    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("a1", { hidden: true }, expect.any(Number));
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(2);
+    expect(callbacks.onAssetPatch).toHaveBeenNthCalledWith(1, "a1", { hidden: true }, expect.any(Number));
+    expect(callbacks.onAssetPatch).toHaveBeenNthCalledWith(2, "a1", { locked: true }, expect.any(Number));
   });
 });
 
