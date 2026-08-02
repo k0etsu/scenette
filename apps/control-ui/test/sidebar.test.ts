@@ -40,7 +40,6 @@ function makeCallbacks(overrides: Partial<SidebarCallbacks> = {}): SidebarCallba
     onDelete: vi.fn(),
     onDuplicate: vi.fn(),
     onPatch: vi.fn(),
-    onTextEditBlur: vi.fn(),
     onMove: vi.fn(),
     onResize: vi.fn(),
     onCreateClick: vi.fn(),

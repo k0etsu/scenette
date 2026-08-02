@@ -37,16 +37,42 @@ const VIEWPORT_WIDTH_FRACTION = 0.7;
 // mid-drag and fighting with continued local movement.
 const MOVE_SEND_THROTTLE_MS = 40;
 
-// Text content edits (inline double-click editor, sidebar textarea) fire on
-// every keystroke with no natural per-gesture flush point the way mouse-up
-// gives move/resize -- sending one asset:update per keystroke let two rapid
-// patches for the same asset race under roomState.ts's shared per-asset seq
-// gate, silently dropping whichever lost with no re-send (see updateAsset's
-// "stale" handling in message.ts). Debouncing the network send to one per
-// pause in typing removes the race by construction: there's only ever one
-// text asset:update in flight at a time. Local rendering stays instant
-// regardless (see patchAsset) -- only the actual network send is delayed.
-const TEXT_PATCH_DEBOUNCE_MS = 250;
+// Builds an AssetPatch carrying every currently-patchable field's live
+// value from `asset`, rather than just whichever field(s) a particular
+// local edit actually changed -- see patchAsset's own doc comment for why.
+function fullAssetPatch(asset: Asset): AssetPatch {
+  return {
+    text: asset.text,
+    name: asset.name,
+    hidden: asset.hidden,
+    locked: asset.locked,
+    opacity: asset.opacity,
+    blur: asset.blur,
+    flipX: asset.flipX,
+    flipY: asset.flipY,
+    zIndex: asset.zIndex,
+    rotation: asset.rotation,
+    loop: asset.loop,
+    muted: asset.muted,
+    volume: asset.volume,
+    paused: asset.paused,
+    fontFamily: asset.fontFamily,
+    fontSize: asset.fontSize,
+    fontWeight: asset.fontWeight,
+    textAlign: asset.textAlign,
+    textColor: asset.textColor,
+    backgroundColor: asset.backgroundColor,
+    backgroundAlpha: asset.backgroundAlpha,
+    shadowEnabled: asset.shadowEnabled,
+    shadowX: asset.shadowX,
+    shadowY: asset.shadowY,
+    shadowBlur: asset.shadowBlur,
+    shadowColor: asset.shadowColor,
+    outlineEnabled: asset.outlineEnabled,
+    outlineColor: asset.outlineColor,
+    outlineWidth: asset.outlineWidth,
+  };
+}
 
 export interface CanvasCallbacks {
   onAssetMove: (assetId: string, x: number, y: number, seq: number) => void;
@@ -458,11 +484,8 @@ export class CanvasView {
   patchAsset(assetId: string, patch: AssetPatch): void {
     const entry = this.entries.get(assetId);
     if (!entry) return;
-    // Local state/rendering applies immediately regardless of the text
-    // debounce below -- only the network send (and the seq that goes with
-    // it) is ever deferred, so typing always feels instant to the person
-    // doing it.
-    entry.asset = { ...entry.asset, ...patch };
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, ...patch, seq };
     this.applyTransform(entry, entry.asset);
     if (assetId === this.selectedAssetId) this.positionHandles();
     // A font/size/weight change (from the sidebar's text-settings controls)
@@ -475,51 +498,21 @@ export class CanvasView {
     // re-broadcasting on someone else's edit.
     if (entry.asset.type === "text") this.autoSizeText(assetId);
 
-    if ("text" in patch) {
-      this.scheduleTextPatchSend(assetId);
-      return;
-    }
-
-    const seq = this.nextSeq();
-    entry.asset = { ...entry.asset, seq };
-    this.callbacks.onAssetPatch(assetId, patch, seq);
-  }
-
-  // Keyed by assetId (not a single shared timer) so debounced edits to two
-  // different text assets -- unusual, but possible if the user clicks
-  // between them fast enough -- don't cancel each other out.
-  private readonly textPatchTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-  private scheduleTextPatchSend(assetId: string): void {
-    const existing = this.textPatchTimers.get(assetId);
-    if (existing !== undefined) clearTimeout(existing);
-    this.textPatchTimers.set(
-      assetId,
-      setTimeout(() => this.sendPendingTextPatch(assetId), TEXT_PATCH_DEBOUNCE_MS)
-    );
-  }
-
-  private sendPendingTextPatch(assetId: string): void {
-    this.textPatchTimers.delete(assetId);
-    const entry = this.entries.get(assetId);
-    if (!entry) return;
-    const seq = this.nextSeq();
-    entry.asset = { ...entry.asset, seq };
-    this.callbacks.onAssetPatch(assetId, { text: entry.asset.text }, seq);
-  }
-
-  // Bypasses the debounce to flush on session end (blur) -- otherwise the
-  // very last burst of keystrokes before the user clicks away would sit
-  // unsent for up to TEXT_PATCH_DEBOUNCE_MS with no one left typing to
-  // eventually trigger it, same reasoning as onMouseUp's throttle bypass
-  // for move/resize. A no-op if nothing's pending (e.g. blur with no edits
-  // made this session). Public: also called from the sidebar's text
-  // textarea on blur (see main.ts), not just the canvas's own inline editor.
-  flushPendingTextPatch(assetId: string): void {
-    const timer = this.textPatchTimers.get(assetId);
-    if (timer === undefined) return;
-    clearTimeout(timer);
-    this.sendPendingTextPatch(assetId);
+    // Text content edits fire on every keystroke (no throttle -- typing
+    // needs to look live for collaborators, unlike a dragged move/resize).
+    // That volume of independent asset:update sends made this one specific
+    // field far more exposed than any other to a genuine race: every patch
+    // for the same asset shares one seq-gated conditional write on the
+    // server (roomState.ts's updateAsset), and a patch that only carries
+    // the field(s) that changed loses that data *permanently* if it loses
+    // the race and gets rejected as stale (message.ts's silent "stale"
+    // drop, no retry). Sending the asset's entire current patchable state
+    // instead of just `patch` on a text edit means a rejected send is truly
+    // redundant -- whichever patch actually wins the seq race for this
+    // asset already carries every field's up-to-date value, so nothing is
+    // ever lost, only occasionally resent.
+    const outgoingPatch = "text" in patch ? fullAssetPatch(entry.asset) : patch;
+    this.callbacks.onAssetPatch(assetId, outgoingPatch, seq);
   }
 
   // Text assets size themselves to fit their own rendered content (see
@@ -724,10 +717,7 @@ export class CanvasView {
       content.removeEventListener("blur", onBlur);
       content.removeEventListener("keydown", onKeyDown);
     };
-    const onBlur = () => {
-      stopEditing();
-      this.flushPendingTextPatch(assetId);
-    };
+    const onBlur = () => stopEditing();
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
