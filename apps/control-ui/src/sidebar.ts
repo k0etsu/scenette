@@ -21,6 +21,7 @@ export interface SidebarCallbacks {
   onDelete: (assetId: string) => void;
   onDuplicate: (assetId: string) => void;
   onPatch: (assetId: string, patch: AssetPatch) => void;
+  onTextEditBlur: (assetId: string) => void;
   onMove: (assetId: string, x: number, y: number) => void;
   onResize: (assetId: string, width: number, height: number) => void;
   onCreateClick: () => void;
@@ -322,6 +323,12 @@ export class Sidebar {
       // matching the canvas's own inline double-click editor.
       const textArea = el<HTMLTextAreaElement>("text-content");
       textArea.addEventListener("input", () => patch({ text: textArea.value }));
+      // Flushes the debounced network send (see CanvasView.patchAsset)
+      // immediately on blur, same as the canvas's own inline editor --
+      // otherwise the last few keystrokes before clicking away could sit
+      // unsent for up to the debounce window with no one left typing to
+      // eventually trigger it.
+      textArea.addEventListener("blur", () => this.callbacks.onTextEditBlur(assetId));
 
       el<HTMLInputElement>("font-size").addEventListener("change", (e) =>
         patch({ fontSize: Number((e.target as HTMLInputElement).value) })

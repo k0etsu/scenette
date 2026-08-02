@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Asset } from "@scenette/protocol";
 import { CanvasView, CanvasCallbacks } from "../src/canvas";
 
@@ -312,6 +312,87 @@ describe("setAssetPosition / setAssetSize / patchAsset", () => {
   });
 });
 
+describe("patchAsset -- text content debouncing", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("applies text patches locally on every call but doesn't send until the debounce settles", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "" }));
+
+    canvas.patchAsset("a1", { text: "h" });
+    canvas.patchAsset("a1", { text: "he" });
+    canvas.patchAsset("a1", { text: "hel" });
+
+    // Local state reflects the very latest keystroke immediately.
+    expect(canvas.get("a1")?.text).toBe("hel");
+    // But nothing has gone over the wire yet -- still debouncing.
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(250);
+
+    // Exactly one send, carrying the final text, once the debounce settles.
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("a1", { text: "hel" }, expect.any(Number));
+  });
+
+  it("restarts the debounce window on every new keystroke", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "" }));
+
+    canvas.patchAsset("a1", { text: "h" });
+    vi.advanceTimersByTime(200);
+    canvas.patchAsset("a1", { text: "he" });
+    vi.advanceTimersByTime(200);
+
+    // Never idle for a full debounce window, so still nothing sent.
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(200);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("a1", { text: "he" }, expect.any(Number));
+  });
+
+  it("flushPendingTextPatch sends immediately and cancels the pending timer", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "" }));
+
+    canvas.patchAsset("a1", { text: "hi" });
+    canvas.flushPendingTextPatch("a1");
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("a1", { text: "hi" }, expect.any(Number));
+
+    vi.advanceTimersByTime(250);
+    // Nothing further fires later -- the timer was actually cancelled, not
+    // just raced by an earlier send.
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("flushPendingTextPatch is a no-op when nothing is pending", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "" }));
+    canvas.flushPendingTextPatch("a1");
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+  });
+
+  it("non-text patches are unaffected and still send immediately", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ type: "text", text: "", hidden: false }));
+
+    canvas.patchAsset("a1", { text: "typing..." });
+    canvas.patchAsset("a1", { hidden: true });
+
+    // The hidden toggle sends right away, independent of the still-pending
+    // debounced text patch.
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("a1", { hidden: true }, expect.any(Number));
+
+    vi.advanceTimersByTime(250);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(2);
+    expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("a1", { text: "typing..." }, expect.any(Number));
+  });
+});
+
 describe("remove", () => {
   it("clears selection and fires onSelectionChange(undefined) when the selected asset is removed", () => {
     const { canvas, callbacks } = setup();
@@ -464,7 +545,7 @@ describe("double-click to edit text inline", () => {
     expect(div.contentEditable).toBe("true");
   });
 
-  it("patches text live on every input event, not just on blur", () => {
+  it("updates the local asset immediately on every input event, but debounces the network send", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
@@ -472,12 +553,14 @@ describe("double-click to edit text inline", () => {
     div.textContent = "edited";
     div.dispatchEvent(new Event("input"));
 
-    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { text: "edited" }, expect.any(Number));
+    expect(canvas.get("t1")?.text).toBe("edited");
+    // Not sent yet -- still debouncing (see patchAsset's TEXT_PATCH_DEBOUNCE_MS).
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
     // Still mid-edit -- blur (not this input event) is what ends editing.
     expect(div.contentEditable).toBe("true");
   });
 
-  it("patches a multi-line edit as a single string with real newline characters preserved", () => {
+  it("patches a multi-line edit as a single string with real newline characters preserved, once the debounce flushes", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
@@ -487,6 +570,7 @@ describe("double-click to edit text inline", () => {
     // <div> boundary.
     div.textContent = "hellow\nthere\nwhy isn't this working";
     div.dispatchEvent(new Event("input"));
+    div.dispatchEvent(new FocusEvent("blur")); // flush the debounced send
 
     expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
       "t1",
@@ -504,25 +588,27 @@ describe("double-click to edit text inline", () => {
     expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
   });
 
-  it("blur ends editing without sending an additional patch (the text is already saved from the input listener)", () => {
+  it("blur flushes the still-pending debounced patch exactly once", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
     div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     div.textContent = "edited";
     div.dispatchEvent(new Event("input"));
-    vi.mocked(callbacks.onAssetPatch).mockClear();
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled(); // still debouncing
 
     div.dispatchEvent(new FocusEvent("blur"));
     expect(div.contentEditable).not.toBe("true");
-    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { text: "edited" }, expect.any(Number));
   });
 
-  it("Escape blurs to end editing without reverting the (already-saved) text or sending a further patch", () => {
+  it("Escape blurs to end editing without reverting the (already-saved) text", () => {
     // Regression: previously reverted to the pre-edit text on Escape, back
     // when edits only committed on blur/Enter -- now that every keystroke
-    // already patches in real time, there's nothing to revert to; Escape
-    // just ends the editing session.
+    // already patches (debounced) in real time, there's nothing to revert
+    // to; Escape just ends the editing session by calling .blur(), same as
+    // clicking away does.
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello" }));
     const div = document.querySelector('[data-asset-type="text"]') as HTMLElement;
@@ -536,7 +622,7 @@ describe("double-click to edit text inline", () => {
 
     expect(blurSpy).toHaveBeenCalled();
     expect(div.textContent).toBe("edited");
-    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+    expect(canvas.get("t1")?.text).toBe("edited");
   });
 
   it("Enter inserts a literal newline character rather than committing/blurring or letting the browser insert a <div>/<br>", () => {
@@ -590,7 +676,10 @@ describe("double-click to edit text inline", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(document.execCommand).toHaveBeenCalledWith("insertText", false, "\n");
     expect(div.textContent).toBe("hello\n");
-    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { text: "hello\n" }, expect.any(Number));
+    // Applied locally right away; the network send is still debounced since
+    // this didn't blur.
+    expect(canvas.get("t1")?.text).toBe("hello\n");
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
     expect(blurSpy).not.toHaveBeenCalled();
     expect(div.contentEditable).toBe("true");
   });
