@@ -35,6 +35,16 @@ function embedUrl(settings: StreamPreviewSettings): string | undefined {
     // parent must match the actual serving hostname exactly or Twitch
     // refuses to render the embed -- read live rather than hardcoded so
     // this works the same on dev.hanzomon.co, hanzomon.co, and localhost.
+    //
+    // Known Twitch-side limitation, not fixable here: channels streaming at
+    // the 1440p "Enhanced Broadcasting" tier can fail inside this embed with
+    // "Player stopping playback - error MasterPlaylist:4 (ErrorInvalidData
+    // code 0 - Failed to parse HLS master playlist)", thrown from Twitch's
+    // own amazon-ivs-wasmworker. Confirmed this isn't about our iframe/
+    // parent/URL construction -- the same channel fails identically when
+    // player.twitch.tv is opened directly in a bare tab, while a channel
+    // streaming at a lower resolution works fine through the exact same
+    // embed. Nothing to do on our end until Twitch fixes their embed player.
     return `https://player.twitch.tv/?channel=${encodeURIComponent(settings.twitchChannel)}&parent=${window.location.hostname}&muted=true`;
   }
   if (!settings.youtubeChannelId) return undefined;
