@@ -5,32 +5,33 @@ import {
   PutCommand,
   DeleteCommand,
   QueryCommand,
+  ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
+import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { randomUUID } from "crypto";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const s3 = new S3Client({});
 
 const ACCOUNTS_TABLE = process.env.ACCOUNTS_TABLE!;
 const SESSIONS_TABLE = process.env.SESSIONS_TABLE!;
 const MEMBERSHIPS_TABLE = process.env.MEMBERSHIPS_TABLE!;
-const EMAIL_VERIFICATIONS_TABLE = process.env.EMAIL_VERIFICATIONS_TABLE!;
 const INVITES_TABLE = process.env.INVITES_TABLE!;
+const ROOMS_TABLE = process.env.ROOMS_TABLE!;
+const ASSETS_TABLE = process.env.ASSETS_TABLE!;
+const ASSETS_BUCKET = process.env.ASSETS_BUCKET!;
 
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
-const VERIFICATION_TTL_SECONDS = 24 * 60 * 60; // 24 hours -- a stale link just needs a resend, not indefinite validity
 
 export interface Account {
   username: string;
   passwordHash: string;
   passwordSalt: string;
-  email: string;
-  // Explicitly false (not just falsy) for a brand-new registration; a
-  // pre-existing account from before email verification existed has no
-  // `emailVerified` attribute at all (undefined), which login.ts treats as
-  // grandfathered-in rather than locking out every account that predates
-  // this feature.
-  emailVerified: boolean;
+  // Optional -- email verification (and the requirement to provide one at
+  // all) has been removed to keep registration/testing simple without
+  // needing SES set up. Kept purely as an optional contact field.
+  email?: string;
   personalRoomId: string;
   createdAt: string;
 }
@@ -85,42 +86,61 @@ export async function deleteSession(sessionToken: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: SESSIONS_TABLE, Key: { sessionToken } }));
 }
 
-// Opaque token, not signed -- same rationale as session tokens (see
-// SessionsTable's CDK comment): validity is just "does this row still
-// exist", so nothing to verify cryptographically and nothing to rotate a
-// signing secret for.
-export async function createVerification(username: string): Promise<string> {
-  const token = randomUUID();
-  const now = Math.floor(Date.now() / 1000);
-  await ddb.send(
-    new PutCommand({
-      TableName: EMAIL_VERIFICATIONS_TABLE,
-      Item: { token, username, ttl: now + VERIFICATION_TTL_SECONDS },
-    })
-  );
-  return token;
+// No index by username -- sessions are looked up by token on every other
+// path, so a GSI just for this one (account-deletion) cascade wasn't worth
+// the extra table cost. A full-table Scan is fine at this system's scale
+// and this only ever runs once, on account deletion, not a hot path.
+export async function deleteAllSessionsForUser(username: string): Promise<void> {
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const { Items = [], LastEvaluatedKey } = await ddb.send(
+      new ScanCommand({
+        TableName: SESSIONS_TABLE,
+        FilterExpression: "username = :u",
+        ExpressionAttributeValues: { ":u": username },
+        ExclusiveStartKey,
+      })
+    );
+    for (const item of Items) {
+      await ddb.send(new DeleteCommand({ TableName: SESSIONS_TABLE, Key: { sessionToken: item.sessionToken } }));
+    }
+    ExclusiveStartKey = LastEvaluatedKey;
+  } while (ExclusiveStartKey);
 }
 
-export async function getVerificationUsername(token: string): Promise<string | undefined> {
-  const { Item } = await ddb.send(
-    new GetCommand({ TableName: EMAIL_VERIFICATIONS_TABLE, Key: { token } })
-  );
-  return Item?.username;
-}
-
-export async function deleteVerification(token: string): Promise<void> {
-  await ddb.send(new DeleteCommand({ TableName: EMAIL_VERIFICATIONS_TABLE, Key: { token } }));
-}
-
-export async function markEmailVerified(username: string): Promise<void> {
+export async function updateAccountPassword(username: string, passwordHash: string, passwordSalt: string): Promise<void> {
   await ddb.send(
     new UpdateCommand({
       TableName: ACCOUNTS_TABLE,
       Key: { username },
-      UpdateExpression: "SET emailVerified = :v",
-      ExpressionAttributeValues: { ":v": true },
+      UpdateExpression: "SET passwordHash = :h, passwordSalt = :s",
+      ExpressionAttributeValues: { ":h": passwordHash, ":s": passwordSalt },
     })
   );
+}
+
+// email omitted (not `undefined`) clears the stored field entirely --
+// DynamoDB rejects `undefined` attribute values outright, and an explicit
+// "REMOVE" keeps a since-cleared email from lingering as a stale value.
+export async function updateAccountEmail(username: string, email: string | undefined): Promise<void> {
+  await ddb.send(
+    email
+      ? new UpdateCommand({
+          TableName: ACCOUNTS_TABLE,
+          Key: { username },
+          UpdateExpression: "SET email = :e",
+          ExpressionAttributeValues: { ":e": email },
+        })
+      : new UpdateCommand({
+          TableName: ACCOUNTS_TABLE,
+          Key: { username },
+          UpdateExpression: "REMOVE email",
+        })
+  );
+}
+
+export async function deleteAccountRow(username: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: ACCOUNTS_TABLE, Key: { username } }));
 }
 
 export async function putMembership(membership: Membership): Promise<void> {
@@ -227,4 +247,57 @@ export async function listPendingInvites(roomId: string): Promise<Invite[]> {
     })
   );
   return Items as Invite[];
+}
+
+// Unlike listPendingInvites, includes already-redeemed ones too -- used
+// only for wiping every trace of a room being deleted, not for showing a
+// still-usable invite list.
+export async function listAllInvitesForRoom(roomId: string): Promise<Invite[]> {
+  const { Items = [] } = await ddb.send(
+    new QueryCommand({
+      TableName: INVITES_TABLE,
+      IndexName: "byRoom",
+      KeyConditionExpression: "roomId = :roomId",
+      ExpressionAttributeValues: { ":roomId": roomId },
+    })
+  );
+  return Items as Invite[];
+}
+
+// ---- Room/asset cascade helpers, for deleting an account's owned room(s)
+// entirely (see index.ts's DELETE /auth/account). Deliberately minimal --
+// only the fields this cascade actually needs, not the full Asset shape
+// websocket-handlers works with.
+interface CascadeAssetRow {
+  assetId: string;
+  s3Key?: string;
+}
+
+export async function listRoomAssetsForCascade(roomId: string): Promise<CascadeAssetRow[]> {
+  const { Items = [] } = await ddb.send(
+    new QueryCommand({
+      TableName: ASSETS_TABLE,
+      KeyConditionExpression: "roomId = :roomId",
+      ExpressionAttributeValues: { ":roomId": roomId },
+    })
+  );
+  return Items as CascadeAssetRow[];
+}
+
+export async function deleteAssetRow(roomId: string, assetId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: ASSETS_TABLE, Key: { roomId, assetId } }));
+}
+
+export async function deleteRoomRow(roomId: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: ROOMS_TABLE, Key: { roomId } }));
+}
+
+// Best-effort -- called once per distinct s3Key while wiping a whole room,
+// so a stray object left behind on a transient S3 failure is a
+// retention-job cleanup problem, not a reason to fail the entire account
+// deletion for the user (same rationale as message.ts's asset:delete path).
+export async function deleteS3Object(s3Key: string): Promise<void> {
+  await s3.send(new DeleteObjectCommand({ Bucket: ASSETS_BUCKET, Key: s3Key })).catch((err) => {
+    console.error("Failed to delete S3 object during account deletion cascade", err);
+  });
 }

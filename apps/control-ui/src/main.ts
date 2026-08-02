@@ -8,6 +8,7 @@ import { VariablesPanel } from "./variablesPanel";
 import { uploadFile } from "./upload";
 import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
+import { SettingsModal } from "./settingsModal";
 import { RoomPicker } from "./roomPicker";
 import { StreamPreviewPanel } from "./streamPreview";
 import { measureTextBoxSize } from "./textMeasure";
@@ -18,9 +19,7 @@ import {
   logout,
   redeemInvite,
   getStoredToken,
-  resendVerification,
   listRooms,
-  UnverifiedEmailError,
   SessionInfo,
 } from "./auth";
 
@@ -33,7 +32,6 @@ const passwordInput = document.getElementById("login-password") as HTMLInputElem
 const registerButton = document.getElementById("register-button");
 const loginError = document.getElementById("login-error");
 const loginMessage = document.getElementById("login-message");
-const resendVerificationButton = document.getElementById("resend-verification-button");
 const roomPickerViewEl = document.getElementById("room-picker-view");
 
 const canvasContainer = document.getElementById("canvas-container");
@@ -50,6 +48,7 @@ const variablesPanelEl = document.getElementById("variables-panel");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
 const manageAccessButton = document.getElementById("manage-access-button");
 const accessModalEl = document.getElementById("access-modal");
+const settingsModalEl = document.getElementById("settings-modal");
 const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
 const dashboardButton = document.getElementById("dashboard-button");
 const statusEl = document.getElementById("status");
@@ -60,10 +59,10 @@ const contextMenuMediaButton = document.getElementById("context-menu-media");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !registerButton ||
-  !loginError || !loginMessage || !resendVerificationButton || !roomPickerViewEl ||
+  !loginError || !loginMessage || !roomPickerViewEl ||
   !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
-  !variablesPanelEl || !uploadInput || !manageAccessButton || !accessModalEl ||
+  !variablesPanelEl || !uploadInput || !manageAccessButton || !accessModalEl || !settingsModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
   !contextMenuTextButton || !contextMenuMediaButton
 ) {
@@ -133,6 +132,8 @@ async function main(): Promise<void> {
 
   loginView!.style.display = "none";
 
+  const settingsModal = new SettingsModal(settingsModalEl!);
+
   function setUrl(roomId: string | undefined, push: boolean): void {
     const next = new URLSearchParams();
     if (roomId) next.set("roomId", roomId);
@@ -170,6 +171,7 @@ async function main(): Promise<void> {
           window.location.href = window.location.pathname;
         });
       },
+      onSettings: () => settingsModal.open(httpApiUrl, session!.email),
     });
     const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId);
     // The user just made an explicit choice -- push so that a later "back"
@@ -321,20 +323,17 @@ async function main(): Promise<void> {
     void goToDashboard(true);
   });
 
-  // ---- Initial render: no explicit room requested (a bare visit, not a
-  // bookmarked/shared link and not an invite redemption just above)
-  // defaults straight into the account's own room UNLESS it also has
-  // access to other rooms, in which case there's an actual choice to make.
+  // ---- Initial render: an explicit room requested (a bookmarked/shared
+  // link, or the roomId just set after an invite redemption above) goes
+  // straight there. Otherwise -- every bare login/visit -- always lands on
+  // the dashboard first, regardless of how many rooms the account has, so
+  // there's a consistent, predictable landing spot rather than sometimes
+  // skipping straight into a room.
   const explicitRoomId = params.get("roomId");
   if (explicitRoomId) {
     goToRoom(explicitRoomId, false);
   } else {
-    const rooms = await listRooms(httpApiUrl);
-    if (rooms.length > 1) {
-      await showDashboardView();
-    } else {
-      goToRoom(session.personalRoomId, false);
-    }
+    await showDashboardView();
   }
 }
 
@@ -345,16 +344,10 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
       try {
         loginError!.textContent = "";
         loginMessage!.textContent = "";
-        resendVerificationButton!.style.display = "none";
         const session = await login(httpApiUrl, usernameInput!.value, passwordInput!.value);
         resolve(session);
       } catch (err) {
-        if (err instanceof UnverifiedEmailError) {
-          loginError!.textContent = "Check your email and click the verification link before logging in.";
-          resendVerificationButton!.style.display = "block";
-        } else {
-          loginError!.textContent = err instanceof Error ? err.message : String(err);
-        }
+        loginError!.textContent = err instanceof Error ? err.message : String(err);
       }
     });
 
@@ -362,23 +355,14 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
       try {
         loginError!.textContent = "";
         loginMessage!.textContent = "";
-        resendVerificationButton!.style.display = "none";
-        const result = await register(httpApiUrl, usernameInput!.value, emailInput!.value, passwordInput!.value);
-        // Deliberately does NOT resolve() -- registering no longer logs you
-        // in. The account exists but login stays blocked until the
-        // verification email's link is clicked.
-        loginMessage!.textContent = result.message;
-        passwordInput!.value = "";
-      } catch (err) {
-        loginError!.textContent = err instanceof Error ? err.message : String(err);
-      }
-    });
-
-    resendVerificationButton!.addEventListener("click", async () => {
-      try {
-        loginError!.textContent = "";
-        await resendVerification(httpApiUrl, usernameInput!.value);
-        loginMessage!.textContent = "Verification email sent. Check your inbox.";
+        // Registering logs straight in now -- no email verification step.
+        const session = await register(
+          httpApiUrl,
+          usernameInput!.value,
+          emailInput!.value || undefined,
+          passwordInput!.value
+        );
+        resolve(session);
       } catch (err) {
         loginError!.textContent = err instanceof Error ? err.message : String(err);
       }
