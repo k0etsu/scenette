@@ -29,7 +29,10 @@ const loginForm = document.getElementById("login-form") as HTMLFormElement | nul
 const usernameInput = document.getElementById("login-username") as HTMLInputElement | null;
 const emailInput = document.getElementById("login-email") as HTMLInputElement | null;
 const passwordInput = document.getElementById("login-password") as HTMLInputElement | null;
-const registerButton = document.getElementById("register-button");
+const loginHint = document.getElementById("login-hint");
+const loginSubmitButton = document.getElementById("login-submit-button");
+const loginModeToggle = document.getElementById("login-mode-toggle");
+const loginToggleText = document.getElementById("login-toggle-text");
 const loginError = document.getElementById("login-error");
 const loginMessage = document.getElementById("login-message");
 const roomPickerViewEl = document.getElementById("room-picker-view");
@@ -58,7 +61,8 @@ const contextMenuTextButton = document.getElementById("context-menu-text");
 const contextMenuMediaButton = document.getElementById("context-menu-media");
 
 if (
-  !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !registerButton ||
+  !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !loginHint ||
+  !loginSubmitButton || !loginModeToggle || !loginToggleText ||
   !loginError || !loginMessage || !roomPickerViewEl ||
   !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
@@ -337,31 +341,45 @@ async function main(): Promise<void> {
   }
 }
 
+// Single form, toggled between "log in" and "create an account" rather than
+// two always-visible buttons -- with both visible at once, pressing Enter
+// in the password field was ambiguous (which one does it trigger?), and the
+// register-only email field sitting between username and password broke
+// the username -> password tab order for the far more common login case.
+// Only the toggle link's click handler ever switches `mode`; the form's own
+// submit handler just reads whatever `mode` currently is.
 function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
   return new Promise((resolve) => {
+    let mode: "login" | "register" = "login";
+
+    function applyMode(): void {
+      const isRegister = mode === "register";
+      emailInput!.style.display = isRegister ? "block" : "none";
+      loginHint!.style.display = isRegister ? "block" : "none";
+      loginSubmitButton!.textContent = isRegister ? "Create account" : "Log in";
+      loginToggleText!.textContent = isRegister ? "Already have an account?" : "Don't have an account?";
+      loginModeToggle!.textContent = isRegister ? "Log in" : "Create one";
+      loginError!.textContent = "";
+      loginMessage!.textContent = "";
+    }
+
+    applyMode(); // sync with mode's initial value, independent of the HTML's own static defaults
+
+    loginModeToggle!.addEventListener("click", () => {
+      mode = mode === "login" ? "register" : "login";
+      applyMode();
+    });
+
     loginForm!.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         loginError!.textContent = "";
         loginMessage!.textContent = "";
-        const session = await login(httpApiUrl, usernameInput!.value, passwordInput!.value);
-        resolve(session);
-      } catch (err) {
-        loginError!.textContent = err instanceof Error ? err.message : String(err);
-      }
-    });
-
-    registerButton!.addEventListener("click", async () => {
-      try {
-        loginError!.textContent = "";
-        loginMessage!.textContent = "";
-        // Registering logs straight in now -- no email verification step.
-        const session = await register(
-          httpApiUrl,
-          usernameInput!.value,
-          emailInput!.value || undefined,
-          passwordInput!.value
-        );
+        const session =
+          mode === "login"
+            ? await login(httpApiUrl, usernameInput!.value, passwordInput!.value)
+            : // Registering logs straight in now -- no email verification step.
+              await register(httpApiUrl, usernameInput!.value, emailInput!.value || undefined, passwordInput!.value);
         resolve(session);
       } catch (err) {
         loginError!.textContent = err instanceof Error ? err.message : String(err);

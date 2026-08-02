@@ -645,12 +645,31 @@
         background: #1e1f24;
         color: #eee;
       }
-      #login-form .buttons {
-        display: flex;
-        gap: 8px;
+      #login-form .toolbar-button {
+        width: 100%;
+        justify-content: center;
       }
-      #login-form .buttons button {
-        flex: 1;
+      .login-divider {
+        border-top: 1px solid #383838;
+        margin: 4px 0 0;
+      }
+      .login-toggle-row {
+        text-align: center;
+        font-size: 13px;
+        color: #999;
+      }
+      .login-link-button {
+        background: none;
+        border: none;
+        color: #4da3ff;
+        font-family: inherit;
+        font-size: 13px;
+        cursor: pointer;
+        padding: 0;
+        margin-left: 4px;
+      }
+      .login-link-button:hover {
+        text-decoration: underline;
       }
       #login-error {
         color: #ff6b6b;
@@ -755,14 +774,16 @@
     <div id="login-view">
       <form id="login-form">
         <input id="login-username" type="text" placeholder="Username" autocomplete="username" minlength="3" />
-        <input id="login-email" type="email" placeholder="Email (optional)" autocomplete="email" />
         <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" minlength="8" />
-        <div id="login-hint">Registering requires a username of 3+ characters and a password of 8+ characters. Email is optional.</div>
+        <input id="login-email" type="email" placeholder="Email (optional)" autocomplete="email" style="display: none" />
+        <div id="login-hint" style="display: none">Registering requires a username of 3+ characters and a password of 8+ characters. Email is optional.</div>
         <div id="login-error"></div>
         <div id="login-message"></div>
-        <div class="buttons">
-          <button id="login-button" type="submit">Log in</button>
-          <button id="register-button" type="button">Register</button>
+        <button id="login-submit-button" type="submit" class="toolbar-button">Log in</button>
+        <div class="login-divider"></div>
+        <div class="login-toggle-row">
+          <span id="login-toggle-text">Don't have an account?</span>
+          <button type="button" id="login-mode-toggle" class="login-link-button">Create one</button>
         </div>
       </form>
     </div>
