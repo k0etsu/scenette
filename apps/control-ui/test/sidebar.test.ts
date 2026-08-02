@@ -341,6 +341,14 @@ describe("editable name field", () => {
 });
 
 describe("text settings section", () => {
+  it("defaults the text textarea to 3 rows tall (not the old cramped 2)", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text" })]);
+    sidebar.setSelected("a1");
+    const textArea = propertiesPanel.querySelector('[data-role="text-content"]') as HTMLTextAreaElement;
+    expect(textArea.rows).toBe(3);
+  });
+
   it("is only shown for text assets", () => {
     const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
     sidebar.setAssets([makeAsset({ type: "image" })]);

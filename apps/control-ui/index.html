@@ -115,6 +115,26 @@
         display: flex;
         flex-direction: column;
       }
+      /* The default scrollbar (esp. Chromium's ~17px-wide one) ate a
+         noticeable chunk of this sidebar's narrow 280px width -- a slim,
+         theme-colored one instead of the OS default in every scrollable
+         region here (the two halves, plus the objects list's own internal
+         scroll). scrollbar-width covers Firefox; the ::-webkit- rules cover
+         Chromium/WebKit (OBS's browser source and most users' browsers). */
+      #sidebar-top, #sidebar-bottom, .objects-list {
+        scrollbar-width: thin;
+        scrollbar-color: #454650 #24252b;
+      }
+      #sidebar-top::-webkit-scrollbar, #sidebar-bottom::-webkit-scrollbar, .objects-list::-webkit-scrollbar {
+        width: 6px;
+      }
+      #sidebar-top::-webkit-scrollbar-track, #sidebar-bottom::-webkit-scrollbar-track, .objects-list::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      #sidebar-top::-webkit-scrollbar-thumb, #sidebar-bottom::-webkit-scrollbar-thumb, .objects-list::-webkit-scrollbar-thumb {
+        background: #454650;
+        border-radius: 3px;
+      }
       #sidebar-top {
         border-bottom: 1px solid #333;
       }
@@ -278,6 +298,13 @@
         border-radius: 4px;
         padding: 4px 6px;
         font-size: 13px;
+      }
+      #properties-panel textarea {
+        /* Only vertical growth -- the field already spans the sidebar's
+           full width (see width: 100% above), so letting the user also
+           drag it wider would just overflow the card/sidebar. */
+        resize: vertical;
+        min-height: 4.5em;
       }
       #properties-panel input[type="range"],
       #sound-panel input[type="range"] {

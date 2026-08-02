@@ -501,7 +501,7 @@ function textSettingsHtml(asset: Asset): string {
   return `
     <div class="sidebar-header"><span>text settings</span></div>
     <label class="prop-label">Text</label>
-    <textarea data-role="text-content" rows="2">${escapeHtml(asset.text ?? "")}</textarea>
+    <textarea data-role="text-content" rows="3">${escapeHtml(asset.text ?? "")}</textarea>
     <div class="prop-row-pair">
       <div>
         <label class="prop-label">Size:</label>
