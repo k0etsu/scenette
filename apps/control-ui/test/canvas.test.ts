@@ -608,6 +608,26 @@ describe("text assets size themselves to fit their content", () => {
     expect(canvas.get("t1")).toMatchObject({ width: 40, height: 30 });
   });
 
+  it("sends the resize with a strictly newer seq than the patch that caused it (regression)", () => {
+    // A font-family/size/weight change's resize is a *consequence* of that
+    // patch, sharing the same per-asset seq gate server-side -- if the
+    // resize's seq isn't guaranteed strictly newer, the two separate
+    // WebSocket messages could get processed out of order and the resize
+    // silently rejected as stale, permanently losing the size correction
+    // (browser-source's box then never actually grows/shrinks to match).
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 999, height: 999 }));
+    const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    Object.defineProperty(content, "offsetWidth", { value: 40, configurable: true });
+    Object.defineProperty(content, "offsetHeight", { value: 30, configurable: true });
+
+    canvas.patchAsset("t1", { fontSize: 32 });
+
+    const patchSeq = vi.mocked(callbacks.onAssetPatch).mock.calls[0][2];
+    const resizeSeq = vi.mocked(callbacks.onAssetResize).mock.calls[0][5];
+    expect(resizeSeq).toBeGreaterThan(patchSeq);
+  });
+
   it("does not re-trigger a resize when the measured size hasn't actually changed", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));

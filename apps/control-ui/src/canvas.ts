@@ -673,20 +673,14 @@ export class CanvasView {
       this.applyTransform(entry, entry.asset);
     }
     if (assetId === this.selectedAssetId) this.positionHandles();
-    // A font/size/weight change (from the sidebar's text-settings controls)
-    // can change the rendered box's natural size just as much as an actual
-    // text edit -- re-measure after any local patch on a text asset, not
-    // just from the inline-edit path. Safe to call unconditionally: this
-    // method is only ever invoked for *local* edits (remote/collaborator
-    // changes go through applyRemoteUpdate -> upsert instead), so there's
-    // no risk of every connected client redundantly re-measuring and
-    // re-broadcasting on someone else's edit. Deferred (see autoSizeText's
-    // own doc) only while actively typing -- a one-off font-size/family
-    // change isn't part of the text throttle at all, so it still resizes
-    // and sends immediately, same as ever.
-    if (entry.asset.type === "text") this.autoSizeText(assetId, { deferNetworkSend: "text" in patch });
 
     if ("text" in patch) {
+      // Always deferred here (see autoSizeText's own doc) -- the throttled
+      // flush (sendFullTextPatch) sends the text update first and any
+      // resulting resize correction second, with a strictly later seq, so
+      // the resize can never lose a race against the text change that
+      // caused it.
+      if (entry.asset.type === "text") this.autoSizeText(assetId, { deferNetworkSend: true });
       this.sendTextPatchThrottled(assetId);
       return;
     }
@@ -694,6 +688,30 @@ export class CanvasView {
     const seq = this.nextSeq();
     entry.asset = { ...entry.asset, seq };
     this.callbacks.onAssetPatch(assetId, patch, seq);
+
+    // A font/size/weight change (from the sidebar's text-settings controls)
+    // can change the rendered box's natural size just as much as an actual
+    // text edit -- re-measure after any local patch on a text asset, not
+    // just from the inline-edit path. Safe to call unconditionally: this
+    // method is only ever invoked for *local* edits (remote/collaborator
+    // changes go through applyRemoteUpdate -> upsert instead), so there's
+    // no risk of every connected client redundantly re-measuring and
+    // re-broadcasting on someone else's edit.
+    //
+    // Deliberately measured/sent AFTER the patch above (regression -- this
+    // used to run before, which gave the resize a LOWER seq than the patch
+    // send immediately following it). The resize is a *consequence* of this
+    // patch (e.g. a font-size change widening the box), so it needs a
+    // strictly later seq than the patch that caused it. With the old
+    // ordering, if the two separate WebSocket messages got processed out of
+    // order server-side (no ordering guarantee across them), the
+    // lower-seq'd resize could commit-check against a row the higher-seq'd
+    // patch had already updated and get silently rejected as stale under
+    // the same shared per-asset seq gate (roomState.ts) -- permanently
+    // losing the size correction with no retry. Same race this file already
+    // fixed once for the text-typing path; this was the same bug in the
+    // non-typing (font-family/size/weight dropdown) path.
+    if (entry.asset.type === "text") this.autoSizeText(assetId);
   }
 
   // Keyed by assetId (not a single shared record) so throttled edits to two
@@ -1012,8 +1030,15 @@ export class CanvasView {
 
     const onInput = () => {
       const next = content.textContent ?? "";
+      // patchAsset already re-measures/resizes internally for a text-type
+      // asset on every call (deferred while typing -- see its own doc) --
+      // a second direct autoSizeText() call here used to be harmless (its
+      // measurement was always identical to the one patchAsset had just
+      // taken, so the epsilon guard made it a no-op), but calling it
+      // undeferred risked sending a second, out-of-order resize outside the
+      // throttled flush if that assumption ever broke. Removed as dead
+      // weight rather than left as a landmine.
       if (next !== entry.asset.text) this.patchAsset(assetId, { text: next });
-      this.autoSizeText(assetId);
     };
     const stopEditing = (): void => {
       content.contentEditable = "false";
