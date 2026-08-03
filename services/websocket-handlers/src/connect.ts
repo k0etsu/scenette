@@ -11,6 +11,7 @@ import { ApiGatewayManagementApiClient } from "@aws-sdk/client-apigatewaymanagem
 // service's src works fine without needing to turn accounts into a real
 // published package.
 import { getSessionUsername, getMembership } from "../../accounts/src/store";
+import { readSessionToken } from "../../accounts/src/cookies";
 import { broadcastToRoom } from "./connections";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -26,12 +27,18 @@ const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE!;
 export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   const connectionId = event.requestContext.connectionId;
   const roomId = event.queryStringParameters?.roomId;
-  const token = event.queryStringParameters?.token;
 
   if (!roomId) {
     return { statusCode: 400, body: "Missing roomId query parameter" };
   }
 
+  // The browser sends the HttpOnly session cookie on the WS upgrade request
+  // (same-site, so it's included) -- read it from the $connect request
+  // headers rather than a query param, so the token is never exposed in a URL
+  // or to page JS. $connect events carry headers at runtime even though the
+  // minimal handler event type doesn't surface them.
+  const headers = (event as { headers?: Record<string, string | undefined> }).headers ?? {};
+  const token = readSessionToken(headers);
   const username = token ? await getSessionUsername(token) : undefined;
 
   // An authenticated connection must actually be a member (owner or mod)

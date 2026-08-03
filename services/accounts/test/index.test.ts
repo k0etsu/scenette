@@ -53,7 +53,7 @@ function authedEvent(
   opts: Partial<APIGatewayProxyEventV2> = {}
 ): APIGatewayProxyEventV2 {
   vi.mocked(store.getSessionUsername).mockResolvedValue(username);
-  return event(routeKey, { headers: { authorization: "Bearer faketoken" }, ...opts });
+  return event(routeKey, { headers: { cookie: "scenette_session=faketoken" }, ...opts });
 }
 
 function jsonBody(res: Awaited<ReturnType<typeof handler>>): any {
@@ -160,7 +160,10 @@ describe("POST /auth/register", () => {
     );
     expect(res.statusCode).toBe(201);
     const body = jsonBody(res);
-    expect(body.sessionToken).toBe("session-token");
+    // The token is set as an HttpOnly cookie, never returned in the body.
+    expect(body.sessionToken).toBeUndefined();
+    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=session-token")]);
+    expect(res.cookies[0]).toContain("HttpOnly");
     expect(body.username).toBe("alice");
     expect(body.personalRoomId).toBeUndefined();
   });
@@ -196,7 +199,8 @@ describe("POST /auth/login", () => {
 
     const res: any = await handler(event("POST /auth/login", { body: loginBody }), {} as any, undefined as any);
     expect(res.statusCode).toBe(200);
-    expect(jsonBody(res).sessionToken).toBe("session-token");
+    expect(jsonBody(res).sessionToken).toBeUndefined();
+    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=session-token")]);
   });
 
   it("logs in an account with no email at all", async () => {
@@ -297,7 +301,8 @@ describe("POST /auth/change-password", () => {
     // Every prior session is revoked (a stolen token dies), then a new one is
     // minted so the initiating device stays logged in.
     expect(store.deleteAllSessionsForUser).toHaveBeenCalledWith("alice");
-    expect(jsonBody(res).sessionToken).toBe("fresh-token");
+    // The fresh session is delivered as a cookie, keeping this device logged in.
+    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=fresh-token")]);
   });
 });
 
@@ -400,6 +405,30 @@ describe("DELETE /auth/account", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(cascade.deleteAccountCascade).toHaveBeenCalledWith("alice");
+    // The session cookie is cleared (Max-Age=0) on the way out.
+    expect(res.cookies[0]).toContain("scenette_session=;");
+    expect(res.cookies[0]).toContain("Max-Age=0");
+  });
+});
+
+describe("POST /auth/logout", () => {
+  it("deletes the presented session and clears the cookie", async () => {
+    const res: any = await handler(
+      event("POST /auth/logout", { headers: { cookie: "scenette_session=tok" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(store.deleteSession).toHaveBeenCalledWith("tok");
+    expect(res.cookies[0]).toContain("scenette_session=;");
+    expect(res.cookies[0]).toContain("Max-Age=0");
+  });
+
+  it("still clears the cookie (and 200s) when no session cookie is present", async () => {
+    const res: any = await handler(event("POST /auth/logout"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(200);
+    expect(store.deleteSession).not.toHaveBeenCalled();
+    expect(res.cookies[0]).toContain("Max-Age=0");
   });
 });
 

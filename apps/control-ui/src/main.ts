@@ -19,7 +19,6 @@ import {
   logout,
   redeemInvite,
   resendVerification,
-  getStoredToken,
   listRooms,
   SessionInfo,
 } from "./auth";
@@ -579,7 +578,8 @@ function enterRoom(
   const connection = new ResilientConnection({
     wsUrl,
     roomId,
-    token: getStoredToken() ?? undefined,
+    // No token in the URL -- the browser sends the HttpOnly session cookie on
+    // the WS upgrade handshake, and $connect reads it from there.
     onOpen: () => {
       connection.send({ action: "room:snapshot:request", roomId });
 

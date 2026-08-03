@@ -36,6 +36,32 @@ describe("HTTP API CORS", () => {
       }),
     });
   });
+
+  it("uses credentialed CORS pinned to the control-ui origin (not '*')", () => {
+    devTemplate.hasResourceProperties("AWS::ApiGatewayV2::Api", {
+      CorsConfiguration: Match.objectLike({
+        AllowCredentials: true,
+        AllowOrigins: ["https://dev.hanzomon.co"],
+      }),
+    });
+  });
+});
+
+describe("cookie-based auth", () => {
+  it("gives the HTTP and WS APIs custom domains under the zone (for a shared cookie)", () => {
+    const domains = devTemplate.findResources("AWS::ApiGatewayV2::DomainName");
+    const names = Object.values(domains).map((d: any) => d.Properties?.DomainName);
+    expect(names).toContain("dev-api.hanzomon.co");
+    expect(names).toContain("dev-ws.hanzomon.co");
+  });
+
+  it("scopes the session cookie to the whole zone via COOKIE_DOMAIN", () => {
+    const functions = devTemplate.findResources("AWS::Lambda::Function");
+    const accountsFn = Object.values(functions).find(
+      (fn: any) => fn.Properties?.Environment?.Variables?.ACCOUNTS_TABLE
+    ) as any;
+    expect(accountsFn.Properties.Environment.Variables.COOKIE_DOMAIN).toBe(".hanzomon.co");
+  });
 });
 
 describe("email verification (SES)", () => {

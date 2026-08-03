@@ -3,6 +3,7 @@ import { randomUUID } from "crypto";
 import { hashPassword, verifyPassword } from "./passwords";
 import { deleteAccountCascade } from "./cascade";
 import { sendVerificationEmail } from "./email";
+import { setSessionCookie, clearSessionCookie, readSessionToken } from "./cookies";
 import {
   getAccount,
   createAccount,
@@ -40,13 +41,17 @@ const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,30}$/;
 // optional contact field, not a required/verified one.
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
-  return { statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+function json(statusCode: number, body: unknown, cookies?: string[]): APIGatewayProxyResultV2 {
+  return {
+    statusCode,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    ...(cookies ? { cookies } : {}),
+  };
 }
 
 async function requireSession(headers: Record<string, string | undefined>): Promise<string | undefined> {
-  const auth = headers.authorization ?? headers.Authorization;
-  const token = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
+  const token = readSessionToken(headers);
   if (!token) return undefined;
   return getSessionUsername(token);
 }
@@ -128,13 +133,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       const sessionToken = await createSession(username);
-      return json(201, {
-        sessionToken,
-        username,
-        email: email || undefined,
-        emailVerified: false,
-        personalRoomId: undefined,
-      });
+      return json(
+        201,
+        { username, email: email || undefined, emailVerified: false, personalRoomId: undefined },
+        [setSessionCookie(sessionToken)]
+      );
     }
 
     case "POST /auth/login": {
@@ -151,13 +154,16 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (!valid) return json(401, { error: "Invalid username or password" });
 
       const sessionToken = await createSession(username);
-      return json(200, {
-        sessionToken,
-        username,
-        personalRoomId: account.personalRoomId,
-        email: account.email,
-        emailVerified: account.emailVerified ?? false,
-      });
+      return json(
+        200,
+        {
+          username,
+          personalRoomId: account.personalRoomId,
+          email: account.email,
+          emailVerified: account.emailVerified ?? false,
+        },
+        [setSessionCookie(sessionToken)]
+      );
     }
 
     case "GET /auth/session": {
@@ -176,10 +182,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "POST /auth/logout": {
-      const auth = (event.headers ?? {}).authorization ?? (event.headers ?? {}).Authorization;
-      const token = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
+      const token = readSessionToken(event.headers ?? {});
       if (token) await deleteSession(token);
-      return json(200, { ok: true });
+      return json(200, { ok: true }, [clearSessionCookie()]);
     }
 
     case "POST /auth/change-password": {
@@ -210,7 +215,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       // this device only.
       await deleteAllSessionsForUser(username);
       const sessionToken = await createSession(username);
-      return json(200, { ok: true, sessionToken });
+      return json(200, { ok: true }, [setSessionCookie(sessionToken)]);
     }
 
     case "POST /auth/change-email": {
@@ -291,7 +296,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (!valid) return json(401, { error: "Incorrect password" });
 
       await deleteAccountCascade(username);
-      return json(200, { ok: true });
+      return json(200, { ok: true }, [clearSessionCookie()]);
     }
 
     case "GET /auth/rooms": {

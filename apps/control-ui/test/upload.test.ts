@@ -1,11 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("../src/auth", () => ({
-  getStoredToken: vi.fn(),
-}));
-
-import { getStoredToken } from "../src/auth";
 import { uploadFile } from "../src/upload";
 
 function makeFile(): File {
@@ -33,19 +28,11 @@ beforeEach(() => {
 });
 
 describe("uploadFile -- auth", () => {
-  it("sends the stored session token as a Bearer header when requesting the presigned URL", async () => {
-    vi.mocked(getStoredToken).mockReturnValue("tok123");
-
+  it("requests the presigned URL with credentials so the session cookie is sent (no Bearer header)", async () => {
     await uploadFile("https://api.example.com", "room1", makeFile());
 
     const presignCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url).includes("/assets/upload-url"));
-    expect(presignCall?.[1]).toMatchObject({ headers: { Authorization: "Bearer tok123" } });
-  });
-
-  it("throws without calling fetch at all when there is no stored session", async () => {
-    vi.mocked(getStoredToken).mockReturnValue(null);
-
-    await expect(uploadFile("https://api.example.com", "room1", makeFile())).rejects.toThrow("Not logged in");
-    expect(fetch).not.toHaveBeenCalled();
+    expect(presignCall?.[1]).toMatchObject({ credentials: "include" });
+    expect((presignCall?.[1] as RequestInit | undefined)?.headers).toBeUndefined();
   });
 });

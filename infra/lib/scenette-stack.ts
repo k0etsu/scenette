@@ -185,6 +185,13 @@ export class ScenetteStack extends cdk.Stack {
     const controlUiDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
     const browserSourceDomain =
       envName === "prod" ? `obs.${HANZOMON_ZONE_NAME}` : `dev-obs.${HANZOMON_ZONE_NAME}`;
+    // The HTTP and WS APIs get custom domains under the same zone so a single
+    // Domain=.hanzomon.co session cookie is shared by all three (control-ui +
+    // both APIs) -- default execute-api domains are on the public suffix list
+    // and can't share cookies.
+    const apiDomain = envName === "prod" ? `api.${HANZOMON_ZONE_NAME}` : `dev-api.${HANZOMON_ZONE_NAME}`;
+    const wsDomain = envName === "prod" ? `ws.${HANZOMON_ZONE_NAME}` : `dev-ws.${HANZOMON_ZONE_NAME}`;
+    const cookieDomain = `.${HANZOMON_ZONE_NAME}`;
 
     const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, "HostedZone", {
       hostedZoneId: HANZOMON_ZONE_ID,
@@ -304,16 +311,18 @@ export class ScenetteStack extends cdk.Stack {
     const httpApi = new apigwv2.HttpApi(this, "HttpApi", {
       apiName: `scenette-${envName}-http`,
       corsPreflight: {
-        // TODO: same as the S3 bucket's CORS above — restrict to the deployed
-        // control-ui origin once it's hosted somewhere with a known domain.
-        allowOrigins: ["*"],
+        // Cookie-based auth requires credentialed CORS, which is incompatible
+        // with a "*" origin -- so this is pinned to exactly the control-ui
+        // origin for this env.
+        allowOrigins: [`https://${controlUiDomain}`],
+        allowCredentials: true,
         // DELETE (revoke invite/member) is a non-"simple" cross-origin
         // method -- the browser always preflights it first, and without it
         // listed here that preflight fails, silently blocking every revoke
         // request client-side with a CORS error before it ever reaches API
         // Gateway.
         allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.DELETE],
-        allowHeaders: ["*"],
+        allowHeaders: ["content-type"],
       },
     });
 
@@ -388,6 +397,9 @@ export class ScenetteStack extends cdk.Stack {
         ASSETS_BUCKET: assetsBucket.bucketName,
         EMAIL_VERIFICATIONS_TABLE: emailVerificationsTable.tableName,
         VERIFICATION_FROM_ADDRESS: verificationFromAddress,
+        // Scopes the session cookie to the whole zone so control-ui and both
+        // APIs (all same-site subdomains) share it.
+        COOKIE_DOMAIN: cookieDomain,
       },
     });
     accountsTable.grantReadWriteData(accountsFn);
@@ -519,9 +531,37 @@ export class ScenetteStack extends cdk.Stack {
     // deploys, so no cross-region certificate construct is needed.
     const certificate = new acm.Certificate(this, "FrontendCertificate", {
       domainName: controlUiDomain,
-      subjectAlternativeNames: [browserSourceDomain],
+      subjectAlternativeNames: [browserSourceDomain, apiDomain, wsDomain],
       validation: acm.CertificateValidation.fromDns(hostedZone),
     });
+
+    // ---- API custom domains ----
+    // Regional custom domains for the HTTP + WS APIs under the same zone, so
+    // the session cookie (Domain=.hanzomon.co) is shared with control-ui. The
+    // cert lives in this stack's region (us-east-1), which regional API
+    // Gateway domains require.
+    const apiDomainName = new apigwv2.DomainName(this, "ApiDomainName", { domainName: apiDomain, certificate });
+    new apigwv2.ApiMapping(this, "ApiMapping", {
+      api: httpApi,
+      domainName: apiDomainName,
+      stage: httpApi.defaultStage,
+    });
+    const wsDomainName = new apigwv2.DomainName(this, "WsDomainName", { domainName: wsDomain, certificate });
+    new apigwv2.ApiMapping(this, "WsApiMapping", {
+      api: webSocketApi,
+      domainName: wsDomainName,
+      stage: webSocketStage,
+    });
+    for (const [id, recordName, dn] of [
+      ["Api", apiDomain, apiDomainName],
+      ["Ws", wsDomain, wsDomainName],
+    ] as const) {
+      const target = route53.RecordTarget.fromAlias(
+        new route53Targets.ApiGatewayv2DomainProperties(dn.regionalDomainName, dn.regionalHostedZoneId)
+      );
+      new route53.ARecord(this, `${id}AliasRecordA`, { zone: hostedZone, recordName, target });
+      new route53.AaaaRecord(this, `${id}AliasRecordAAAA`, { zone: hostedZone, recordName, target });
+    }
 
     const controlUiBucket = new s3.Bucket(this, "ControlUiBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -555,8 +595,10 @@ export class ScenetteStack extends cdk.Stack {
       sources: [
         s3deploy.Source.asset(path.join(__dirname, "../../apps/control-ui/dist")),
         s3deploy.Source.jsonData("config.json", {
-          wsUrl: webSocketStage.url,
-          httpApiUrl: httpApi.apiEndpoint,
+          // Custom domains (not the raw execute-api URLs) so the session
+          // cookie is same-site with control-ui and gets sent along.
+          wsUrl: `wss://${wsDomain}`,
+          httpApiUrl: `https://${apiDomain}`,
           assetsDomain: assetsDistribution.distributionDomainName,
           browserSourceUrl: `https://${browserSourceDomain}`,
         }),
@@ -585,7 +627,7 @@ export class ScenetteStack extends cdk.Stack {
       sources: [
         s3deploy.Source.asset(path.join(__dirname, "../../apps/browser-source/dist")),
         s3deploy.Source.jsonData("config.json", {
-          wsUrl: webSocketStage.url,
+          wsUrl: `wss://${wsDomain}`,
           assetsDomain: assetsDistribution.distributionDomainName,
         }),
       ],
