@@ -76,6 +76,15 @@ if (
 // Everything that lives for exactly one room at a time -- torn down and
 // rebuilt on every room switch (Dashboard button, picking a different room,
 // browser back/forward). Kept in one mutable holder rather than scattered
+// Deliberately more conservative than browser-source's own poll (see that
+// app's main.ts) -- cost here scales with concurrent collaborator tabs per
+// room, not just one OBS source, and (unlike browser-source) a poll landing
+// mid-edit carries real correctness risk without the guards in canvas.ts's
+// setAssets. This is a slower defense-in-depth safety net for a
+// *collaborator's* drift, not the primary (already near-real-time) sync
+// path for this browser's own edits.
+const SNAPSHOT_POLL_INTERVAL_MS = 5000;
+
 // module-level `let`s so teardownCurrentRoom() has one thing to null out
 // and the toolbar/context-menu handlers below (bound once, not per room)
 // have one thing to read the *current* room's state from.
@@ -89,6 +98,12 @@ interface RoomSession {
   // land -- world coords from a right-click, or undefined to default to
   // the viewport center.
   createPosition?: { x: number; y: number };
+  // Periodic room:snapshot:request poll (see the connection's onOpen below)
+  // -- self-heals any delta that lost its seq race against another message
+  // and got silently dropped server-side. Cleared in teardownCurrentRoom()
+  // so switching rooms doesn't leave a timer still polling a room this
+  // connection has left.
+  pollTimer?: ReturnType<typeof setInterval>;
 }
 
 let current: RoomSession | undefined;
@@ -148,6 +163,7 @@ async function main(): Promise<void> {
 
   function teardownCurrentRoom(): void {
     if (!current) return;
+    if (current.pollTimer) clearInterval(current.pollTimer);
     current.connection.stop();
     current.canvas.dispose();
     current.sidebar.dispose();
@@ -554,13 +570,30 @@ function enterRoom(
     token: getStoredToken() ?? undefined,
     onOpen: () => {
       connection.send({ action: "room:snapshot:request", roomId });
+
+      // (Re-)armed here rather than started once outside onOpen -- onOpen
+      // already fires on every reconnect (proactive swap or drop/retry), so
+      // arming from inside it guarantees no two overlapping intervals can
+      // ever run across a reconnect. Self-heals any delta that lost its seq
+      // race against another message and got silently dropped server-side
+      // (see roomState.ts's per-asset conditional write) -- see
+      // canvas.ts's setAssets for the guards that keep this from clobbering
+      // an in-progress local edit.
+      if (room.pollTimer) clearInterval(room.pollTimer);
+      room.pollTimer = setInterval(() => {
+        connection.send({ action: "room:snapshot:request", roomId });
+      }, SNAPSHOT_POLL_INTERVAL_MS);
     },
     onMessage: (message: ServerMessage) => {
       switch (message.type) {
         case "room:snapshot":
           canvas.setViewport({ roomId, ...message.viewport });
           canvas.setAssets(message.assets);
-          sidebar.setAssets(message.assets);
+          // canvas.getAllAssets() (not message.assets directly) -- the
+          // sidebar should only ever see whatever canvas actually decided
+          // to accept after its own seq/dragging/inline-edit guards, not
+          // the raw (potentially stale-for-an-in-flight-edit) snapshot.
+          sidebar.setAssets(canvas.getAllAssets());
           soundPanel.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
           // enterRoom (not applySettings) -- this panel is a singleton that
           // survives every room switch, so a plain seq-guarded apply here

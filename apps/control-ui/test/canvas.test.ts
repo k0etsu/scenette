@@ -282,6 +282,88 @@ describe("applyRemoteMove / applyRemoteResize / applyRemoteUpdate (seq guard)", 
   });
 });
 
+describe("setAssets -- guarded reconciliation (regression: periodic/manual full-state resync)", () => {
+  it("ignores an incoming entry whose seq is older than what's already applied", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ x: 0, y: 0, seq: 10 }));
+    canvas.setAssets([makeAsset({ x: 999, y: 999, seq: 5 })]);
+    expect(canvas.get("a1")).toMatchObject({ x: 0, y: 0, seq: 10 });
+  });
+
+  it("applies an incoming entry whose seq is newer (or equal) to what's already applied", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ x: 0, y: 0, seq: 5 }));
+    canvas.setAssets([makeAsset({ x: 50, y: 60, seq: 10 })]);
+    expect(canvas.get("a1")).toMatchObject({ x: 50, y: 60, seq: 10 });
+  });
+
+  it("always adds a brand-new assetId regardless of seq -- nothing local to protect", () => {
+    const { canvas } = setup();
+    canvas.setAssets([makeAsset({ assetId: "a1", seq: 1 })]);
+    expect(canvas.get("a1")).toMatchObject({ seq: 1 });
+  });
+
+  it("skips an asset currently being dragged, even if the incoming seq is newer", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ x: 0, y: 0, seq: 5 }));
+    const el = container.querySelector('[data-asset-id="a1"]') as HTMLElement;
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+
+    canvas.setAssets([makeAsset({ x: 999, y: 999, seq: 999 })]);
+
+    expect(canvas.get("a1")).toMatchObject({ x: 0, y: 0, seq: 5 });
+  });
+
+  it("skips an asset currently being resized, even if the incoming seq is newer", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ width: 100, height: 100, seq: 5 }));
+    canvas.selectAsset("a1");
+    const handle = container.querySelector('[data-role="resize-handle"][data-corner="nw"]') as HTMLElement;
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+
+    canvas.setAssets([makeAsset({ width: 5, height: 5, seq: 999 })]);
+
+    expect(canvas.get("a1")).toMatchObject({ width: 100, height: 100, seq: 5 });
+  });
+
+  it("skips an asset currently being inline-text-edited, even if the incoming seq is newer", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello", seq: 5 }));
+    const div = container.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+
+    canvas.setAssets([makeAsset({ assetId: "t1", type: "text", text: "reverted!", seq: 999 })]);
+
+    expect(canvas.get("t1")?.text).toBe("hello");
+  });
+
+  it("resumes accepting resync entries for that asset once inline editing ends (blur)", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello", seq: 5 }));
+    const div = container.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    div.dispatchEvent(new FocusEvent("blur"));
+
+    canvas.setAssets([makeAsset({ assetId: "t1", type: "text", text: "synced", seq: 999 })]);
+
+    expect(canvas.get("t1")?.text).toBe("synced");
+  });
+
+  it("still removes an asset absent from the incoming list even though the guard skipped applying it", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "a1", x: 0, y: 0, seq: 5 }));
+    const el = container.querySelector('[data-asset-id="a1"]') as HTMLElement;
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+
+    // a1 isn't in this snapshot at all -- the drag guard only protects
+    // against *overwriting* it with stale data, not against a legitimate
+    // deletion, so removal still proceeds independent of the guard above.
+    canvas.setAssets([]);
+
+    expect(canvas.get("a1")).toBeUndefined();
+  });
+});
+
 describe("setAssetPosition / setAssetSize / patchAsset", () => {
   it("setAssetPosition applies optimistically and calls onAssetMove with a fresh seq", () => {
     const { canvas, callbacks } = setup();

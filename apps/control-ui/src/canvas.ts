@@ -147,6 +147,11 @@ export class CanvasView {
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
   private lastMoveSentAt = 0;
+  // Set for the duration of an active inline text edit (beginInlineTextEdit
+  // -> stopEditing), so a periodic/manual full-state resync (see setAssets)
+  // never reverts mid-edit content between keystrokes -- mirrors `dragging`
+  // above, which protects an active mouse gesture the same way.
+  private inlineEditingAssetId?: string;
 
   // Updated on every plain mousemove over the canvas (not just while
   // dragging) so a toolbar/paste-triggered upload -- which has no click
@@ -506,10 +511,31 @@ export class CanvasView {
     this.callbacks.onSelectionChange(assetId);
   }
 
+  // Also the entry point for a periodic/manual full-state resync (see
+  // main.ts) -- unlike asset:added or an already seq-checked
+  // applyRemoteMove/Resize/Update call, an incoming entry here represents a
+  // potentially-stale external snapshot, not a single pre-validated delta.
+  // A snapshot arriving mid-gesture is otherwise indistinguishable from a
+  // legitimate authoritative update, so this guards every way a local edit
+  // could be in flight before the corresponding network round-trip:
+  //   1. seq: never let a snapshot go backwards relative to what's already
+  //      displayed (same convention as applyRemoteMove/Resize/Update below).
+  //   2. an active drag/resize gesture: doesn't bump seq on every
+  //      mousemove tick (only on throttled sends), so seq alone can't tell
+  //      "stale" from "mid-gesture, not sent yet" -- must check `dragging`.
+  //   3. an active inline text edit: same idea, no seq bump per keystroke
+  //      until the (also throttled) text send actually flushes.
+  // Without all three, a poorly-timed resync could revert someone's own
+  // in-progress edit to a stale server copy out from under them.
   setAssets(assets: Asset[]): void {
     const seen = new Set<string>();
     for (const asset of assets) {
       seen.add(asset.assetId);
+      const entry = this.entries.get(asset.assetId);
+      if (entry && asset.seq < entry.asset.seq) continue;
+      if (this.dragging && "assetId" in this.dragging && this.dragging.assetId === asset.assetId) continue;
+      if (this.dragging && "resizing" in this.dragging && this.dragging.resizing.assetId === asset.assetId) continue;
+      if (this.inlineEditingAssetId === asset.assetId) continue;
       this.upsert(asset);
     }
     for (const [assetId, entry] of this.entries) {
@@ -966,6 +992,7 @@ export class CanvasView {
     event.stopPropagation();
     const entry = this.entries.get(assetId);
     if (!entry || entry.asset.locked) return;
+    this.inlineEditingAssetId = assetId;
 
     // Edit the raw template (with any {variable} placeholders intact), not
     // the interpolated display applyTransform normally shows -- otherwise
@@ -994,6 +1021,7 @@ export class CanvasView {
       content.removeEventListener("input", onInput);
       content.removeEventListener("blur", onBlur);
       content.removeEventListener("keydown", onKeyDown);
+      if (this.inlineEditingAssetId === assetId) this.inlineEditingAssetId = undefined;
     };
     const onBlur = () => {
       stopEditing();
