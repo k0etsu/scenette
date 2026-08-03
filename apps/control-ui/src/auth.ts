@@ -2,8 +2,11 @@ const SESSION_TOKEN_KEY = "scenette.sessionToken";
 
 export interface SessionInfo {
   username: string;
-  personalRoomId: string;
+  // Undefined until the account verifies an email -- an account only owns a
+  // room once verified. Mods on someone else's room never get one.
+  personalRoomId?: string;
   email?: string;
+  emailVerified: boolean;
 }
 
 export function getStoredToken(): string | null {
@@ -40,7 +43,12 @@ export async function register(
   });
   const data = await parseJsonOrThrow(res);
   storeToken(data.sessionToken);
-  return { username: data.username, personalRoomId: data.personalRoomId, email: data.email };
+  return {
+    username: data.username,
+    personalRoomId: data.personalRoomId,
+    email: data.email,
+    emailVerified: data.emailVerified ?? false,
+  };
 }
 
 export async function login(httpApiUrl: string, username: string, password: string): Promise<SessionInfo> {
@@ -51,7 +59,12 @@ export async function login(httpApiUrl: string, username: string, password: stri
   });
   const data = await parseJsonOrThrow(res);
   storeToken(data.sessionToken);
-  return { username: data.username, personalRoomId: data.personalRoomId, email: data.email };
+  return {
+    username: data.username,
+    personalRoomId: data.personalRoomId,
+    email: data.email,
+    emailVerified: data.emailVerified ?? false,
+  };
 }
 
 // Returns null (rather than throwing) on any invalid/expired/missing token —
@@ -68,7 +81,22 @@ export async function checkSession(httpApiUrl: string): Promise<SessionInfo | nu
     return null;
   }
   const data = await res.json();
-  return { username: data.username, personalRoomId: data.personalRoomId, email: data.email };
+  return {
+    username: data.username,
+    personalRoomId: data.personalRoomId,
+    email: data.email,
+    emailVerified: data.emailVerified ?? false,
+  };
+}
+
+// Re-sends the verification email for the account's current pending email
+// (responds 200 regardless, to avoid leaking account state).
+export async function resendVerification(httpApiUrl: string): Promise<void> {
+  const res = await fetch(`${httpApiUrl}/auth/resend-verification`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  await parseJsonOrThrow(res);
 }
 
 export async function logout(httpApiUrl: string): Promise<void> {

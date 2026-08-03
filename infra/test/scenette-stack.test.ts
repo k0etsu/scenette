@@ -38,19 +38,43 @@ describe("HTTP API CORS", () => {
   });
 });
 
-describe("email verification removed", () => {
-  // Email verification (and its SES dependency) was removed to keep
-  // registration/testing simple without needing SES set up -- neither the
-  // SES identity nor the email-verifications table should exist anymore.
-  it("creates no SES::EmailIdentity in either stack", () => {
+describe("email verification (SES)", () => {
+  // The SES domain identity is created only in the prod stack -- both envs
+  // send from the same hanzomon.co domain, and two stacks can't both own it.
+  it("creates the SES::EmailIdentity in prod only", () => {
+    expect(Object.keys(prodTemplate.findResources("AWS::SES::EmailIdentity"))).toHaveLength(1);
     expect(devTemplate.findResources("AWS::SES::EmailIdentity")).toEqual({});
-    expect(prodTemplate.findResources("AWS::SES::EmailIdentity")).toEqual({});
   });
 
-  it("creates no email-verifications DynamoDB table", () => {
-    const tables = devTemplate.findResources("AWS::DynamoDB::Table");
-    const names = Object.values(tables).map((t: any) => t.Properties?.TableName);
-    expect(names).not.toContain("scenette-dev-email-verifications");
+  it("creates the email-verifications DynamoDB table with a ttl", () => {
+    devTemplate.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "scenette-dev-email-verifications",
+      TimeToLiveSpecification: { AttributeName: "ttl", Enabled: true },
+    });
+  });
+
+  it("grants AccountsFn ses:SendEmail and wires the verifications table + from-address", () => {
+    const functions = devTemplate.findResources("AWS::Lambda::Function");
+    const accountsFn = Object.values(functions).find(
+      (fn: any) => fn.Properties?.Environment?.Variables?.ACCOUNTS_TABLE
+    ) as any;
+    const vars = accountsFn.Properties.Environment.Variables;
+    expect(vars.EMAIL_VERIFICATIONS_TABLE).toBeTruthy();
+    expect(vars.VERIFICATION_FROM_ADDRESS).toBe("dev-noreply@hanzomon.co");
+    devTemplate.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({ Action: Match.arrayWith(["ses:SendEmail", "ses:SendRawEmail"]) }),
+        ]),
+      }),
+    });
+  });
+
+  it("registers the /auth/verify and /auth/resend-verification routes", () => {
+    const routes = devTemplate.findResources("AWS::ApiGatewayV2::Route");
+    const routeKeys = Object.values(routes).map((r: any) => r.Properties?.RouteKey);
+    expect(routeKeys).toContain("GET /auth/verify");
+    expect(routeKeys).toContain("POST /auth/resend-verification");
   });
 });
 
@@ -117,13 +141,6 @@ describe("account-deletion cascade routes/permissions", () => {
     devTemplate.hasResourceProperties("AWS::ApiGatewayV2::Route", {
       RouteKey: "DELETE /auth/account",
     });
-  });
-
-  it("no longer registers the removed /auth/verify or /auth/resend-verification routes", () => {
-    const routes = devTemplate.findResources("AWS::ApiGatewayV2::Route");
-    const routeKeys = Object.values(routes).map((r: any) => r.Properties?.RouteKey);
-    expect(routeKeys).not.toContain("GET /auth/verify");
-    expect(routeKeys).not.toContain("POST /auth/resend-verification");
   });
 
   it("gives AccountsFn the ROOMS_TABLE/ASSETS_TABLE/ASSETS_BUCKET env vars its cascade needs", () => {

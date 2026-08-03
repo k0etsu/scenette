@@ -27,6 +27,10 @@ import {
   deleteAssetRow,
   deleteRoomRow,
   deleteS3Object,
+  createVerification,
+  getVerification,
+  deleteVerification,
+  markEmailVerified,
 } from "../src/store";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -167,23 +171,63 @@ describe("account mutation helpers (change password/email, delete account)", () 
     });
   });
 
-  it("updateAccountEmail sets the email when given a non-empty value", async () => {
+  it("updateAccountEmail sets the email and marks it unverified when given a non-empty value", async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await updateAccountEmail("alice", "new@example.com");
     const call = ddbMock.commandCalls(UpdateCommand)[0];
     expect(call.args[0].input).toMatchObject({
-      UpdateExpression: "SET email = :e",
-      ExpressionAttributeValues: { ":e": "new@example.com" },
+      UpdateExpression: "SET email = :e, emailVerified = :false",
+      ExpressionAttributeValues: { ":e": "new@example.com", ":false": false },
     });
   });
 
-  it("updateAccountEmail removes the attribute entirely when given undefined", async () => {
+  it("updateAccountEmail removes the attribute and clears verified status when given undefined", async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await updateAccountEmail("alice", undefined);
     const call = ddbMock.commandCalls(UpdateCommand)[0];
-    expect(call.args[0].input.UpdateExpression).toBe("REMOVE email");
+    expect(call.args[0].input.UpdateExpression).toBe("REMOVE email SET emailVerified = :false");
   });
 
+  it("createVerification writes a token row with an expiry and a ttl", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    const v = await createVerification("alice", "a@b.com");
+    expect(v.username).toBe("alice");
+    expect(v.email).toBe("a@b.com");
+    expect(typeof v.token).toBe("string");
+    expect(Date.parse(v.expiresAt)).toBeGreaterThan(Date.now());
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
+  });
+
+  it("getVerification returns undefined for an unknown token", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    await expect(getVerification("bogus")).resolves.toBeUndefined();
+  });
+
+  it("deleteVerification does not throw", async () => {
+    ddbMock.on(DeleteCommand).resolves({});
+    await expect(deleteVerification("tok")).resolves.toBeUndefined();
+  });
+
+  it("markEmailVerified assigns a new room on first verification", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const roomId = await markEmailVerified("alice", "new-room");
+    expect(roomId).toBe("new-room");
+    const call = ddbMock.commandCalls(UpdateCommand)[0];
+    // Guarded so a second click can't mint a second room.
+    expect(call.args[0].input.ConditionExpression).toBe("attribute_not_exists(personalRoomId)");
+  });
+
+  it("markEmailVerified keeps the existing room (no second room) when already verified", async () => {
+    // First update (the conditional room assignment) fails: a room exists.
+    ddbMock.on(UpdateCommand).rejectsOnce(conditionalCheckFailed).resolves({});
+    ddbMock.on(GetCommand).resolves({ Item: { username: "alice", personalRoomId: "existing-room" } });
+    const roomId = await markEmailVerified("alice", "ignored-new-room");
+    expect(roomId).toBe("existing-room");
+  });
+});
+
+describe("account row deletion", () => {
   it("deleteAccountRow does not throw", async () => {
     ddbMock.on(DeleteCommand).resolves({});
     await expect(deleteAccountRow("alice")).resolves.toBeUndefined();

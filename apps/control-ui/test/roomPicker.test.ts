@@ -68,6 +68,33 @@ describe("RoomPicker", () => {
     expect(rows()[1].querySelector(".room-picker-row-title")?.textContent).toBe("room2's room");
   });
 
+  it("shows a verify-email prompt (with resend) instead of an own room when unverified, and still lists mod rooms", () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    const onResend = vi.fn();
+    picker.pickRoom(
+      [{ roomId: "room2", role: "mod", ownerUsername: "carol" }],
+      undefined,
+      { hasEmail: true, onResend }
+    );
+
+    // No "Your room" row -- a verify prompt takes its place.
+    const prompt = root.querySelector('[data-role="verify-prompt"]');
+    expect(prompt).not.toBeNull();
+    const titles = rows().map((r) => r.querySelector(".room-picker-row-title")?.textContent);
+    expect(titles).toEqual(["carol's room"]);
+
+    (root.querySelector('[data-role="resend-verification"]') as HTMLButtonElement).click();
+    expect(onResend).toHaveBeenCalledOnce();
+  });
+
+  it("prompts to add an email (no resend button) when unverified and no email is set", () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    picker.pickRoom([], undefined, { hasEmail: false, onResend: vi.fn() });
+
+    expect(root.querySelector('[data-role="verify-prompt"]')).not.toBeNull();
+    expect(root.querySelector('[data-role="resend-verification"]')).toBeNull();
+  });
+
   it("shows a 'Rooms you moderate' divider above mod-access rooms, but not when there are none", () => {
     const picker = new RoomPicker(root, makeCallbacks());
     picker.pickRoom(

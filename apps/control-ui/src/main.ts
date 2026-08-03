@@ -18,6 +18,7 @@ import {
   checkSession,
   logout,
   redeemInvite,
+  resendVerification,
   getStoredToken,
   listRooms,
   SessionInfo,
@@ -193,7 +194,18 @@ async function main(): Promise<void> {
       },
       onSettings: () => settingsModal.open(httpApiUrl, session!.email),
     });
-    const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId);
+    const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId, {
+      hasEmail: Boolean(session!.email),
+      onResend: () => {
+        void resendVerification(httpApiUrl)
+          .then(() => {
+            statusEl!.textContent = "Verification email sent — check your inbox, then reload.";
+          })
+          .catch((err) => {
+            statusEl!.textContent = `Could not resend verification: ${err instanceof Error ? err.message : String(err)}`;
+          });
+      },
+    });
     // The user just made an explicit choice -- push so that a later "back"
     // returns to the dashboard rather than leaving the app entirely.
     setUrl(roomId, true);

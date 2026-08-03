@@ -16,7 +16,7 @@ Early scaffold — infrastructure and CI/CD are being stood up before feature co
 infra/                  CDK app (TypeScript) — defines all AWS resources, parameterized per environment (dev/prod)
 services/
   websocket-handlers/    Lambda handlers for the API Gateway WebSocket API ($connect / $disconnect / message routes)
-  accounts/              Username/password auth (HTTP API) — registration, login, email verification via SES, room membership grants
+  accounts/              Username/password auth (HTTP API) — registration, login, room membership grants, and email verification via SES (verifying an email is what creates a user's own room; mods on someone else's room don't need to)
   retention-job/         Scheduled Lambda that garbage-collects unused media assets
 apps/
   control-ui/            Streamer/mod-facing canvas editor

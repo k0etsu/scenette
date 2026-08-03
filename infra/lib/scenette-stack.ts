@@ -13,6 +13,8 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as route53Targets from "aws-cdk-lib/aws-route53-targets";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
+import * as ses from "aws-cdk-lib/aws-ses";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as path from "path";
 
@@ -104,11 +106,12 @@ export class ScenetteStack extends cdk.Stack {
     });
 
     // Username/password accounts (see AccountsFn below) -- the one and only
-    // auth path, not a stopgap for something else. No email verification
-    // step (kept intentionally simple to test without SES set up) --
-    // registering logs straight in. Session tokens are opaque
-    // (crypto.randomUUID, not signed) and looked up against this table, so
-    // logout/expiry is just a row delete/TTL — no signing secret to manage.
+    // auth path. Registration logs straight in, but an account only gets its
+    // own room once it verifies an email (see the email-verifications table +
+    // AccountsFn's /auth/verify); a mod on someone else's room never needs to.
+    // Session tokens are opaque (crypto.randomUUID, not signed) and looked up
+    // against the sessions table, so logout/expiry is just a row delete/TTL —
+    // no signing secret to manage.
     const accountsTable = new dynamodb.Table(this, "AccountsTable", {
       tableName: `scenette-${envName}-accounts`,
       partitionKey: { name: "username", type: dynamodb.AttributeType.STRING },
@@ -120,6 +123,17 @@ export class ScenetteStack extends cdk.Stack {
     const sessionsTable = new dynamodb.Table(this, "SessionsTable", {
       tableName: `scenette-${envName}-sessions`,
       partitionKey: { name: "sessionToken", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy,
+    });
+
+    // Pending email-verification tokens (see AccountsFn's /auth/verify).
+    // Short-lived: each row carries a 24h ttl for the sweep; the token is the
+    // key, looked up directly from the emailed link.
+    const emailVerificationsTable = new dynamodb.Table(this, "EmailVerificationsTable", {
+      tableName: `scenette-${envName}-email-verifications`,
+      partitionKey: { name: "token", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: "ttl",
       removalPolicy,
@@ -176,6 +190,23 @@ export class ScenetteStack extends cdk.Stack {
       hostedZoneId: HANZOMON_ZONE_ID,
       zoneName: HANZOMON_ZONE_NAME,
     });
+
+    // ---- Email (SES) ----
+    // A single domain identity for hanzomon.co, DKIM-signed against the hosted
+    // zone. Created only in the prod stack -- both envs send from the same
+    // domain (dev just uses a dev-noreply@ From-address), and two stacks can't
+    // both own the same SES domain identity. So dev's sending depends on the
+    // prod stack having been deployed at least once. (SES accounts also start
+    // in sandbox mode -- see README's deploy notes for the production-access
+    // step needed before real recipients can receive mail.)
+    if (envName === "prod") {
+      new ses.EmailIdentity(this, "MailIdentity", {
+        identity: ses.Identity.publicHostedZone(hostedZone),
+      });
+    }
+    const verificationFromAddress =
+      envName === "prod" ? `noreply@${HANZOMON_ZONE_NAME}` : `dev-noreply@${HANZOMON_ZONE_NAME}`;
+    const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${HANZOMON_ZONE_NAME}`;
 
     // ---- WebSocket API ----
 
@@ -355,6 +386,8 @@ export class ScenetteStack extends cdk.Stack {
         ROOMS_TABLE: roomsTable.tableName,
         ASSETS_TABLE: assetsTable.tableName,
         ASSETS_BUCKET: assetsBucket.bucketName,
+        EMAIL_VERIFICATIONS_TABLE: emailVerificationsTable.tableName,
+        VERIFICATION_FROM_ADDRESS: verificationFromAddress,
       },
     });
     accountsTable.grantReadWriteData(accountsFn);
@@ -363,6 +396,14 @@ export class ScenetteStack extends cdk.Stack {
     invitesTable.grantReadWriteData(accountsFn);
     roomsTable.grantReadWriteData(accountsFn);
     assetsTable.grantReadWriteData(accountsFn);
+    emailVerificationsTable.grantReadWriteData(accountsFn);
+    // Send-only, scoped to the hanzomon.co identity -- the verification email.
+    accountsFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [mailIdentityArn],
+      })
+    );
     // Delete only -- the cascade never reads/writes an asset's actual
     // object content, just removes it once the room it belongs to is gone.
     assetsBucket.grantDelete(accountsFn);
@@ -398,6 +439,16 @@ export class ScenetteStack extends cdk.Stack {
     });
     httpApi.addRoutes({
       path: "/auth/change-email",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/verify",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/resend-verification",
       methods: [apigwv2.HttpMethod.POST],
       integration: accountsIntegration,
     });

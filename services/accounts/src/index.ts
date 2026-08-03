@@ -2,6 +2,7 @@ import type { APIGatewayProxyHandlerV2, APIGatewayProxyResultV2 } from "aws-lamb
 import { randomUUID } from "crypto";
 import { hashPassword, verifyPassword } from "./passwords";
 import { deleteAccountCascade } from "./cascade";
+import { sendVerificationEmail } from "./email";
 import {
   getAccount,
   createAccount,
@@ -17,6 +18,10 @@ import {
   updateAccountPassword,
   deleteAllSessionsForUser,
   updateAccountEmail,
+  createVerification,
+  getVerification,
+  deleteVerification,
+  markEmailVerified,
   createInvite,
   getInvite,
   redeemInvite,
@@ -46,6 +51,39 @@ async function requireSession(headers: Record<string, string | undefined>): Prom
   return getSessionUsername(token);
 }
 
+// A minimal self-contained confirmation page for the emailed verify link
+// (which is opened directly in a browser, not via the SPA). Only static,
+// non-user-controlled text is interpolated -- no XSS surface.
+function html(statusCode: number, title: string, message: string): APIGatewayProxyResultV2 {
+  return {
+    statusCode,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+    body:
+      `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+      `<meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>` +
+      `<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;text-align:center">` +
+      `<h1>${title}</h1><p>${message}</p></body></html>`,
+  };
+}
+
+// The origin this API is reached at, taken from the request itself so the
+// verify link is correct on both the execute-api domain and the custom
+// api.<zone> domain without a config value to keep in sync.
+function apiBaseUrl(event: Parameters<APIGatewayProxyHandlerV2>[0]): string {
+  return `https://${event.requestContext.domainName}`;
+}
+
+async function startEmailVerification(username: string, email: string, baseUrl: string): Promise<void> {
+  const verification = await createVerification(username, email);
+  try {
+    await sendVerificationEmail(email, username, verification.token, baseUrl);
+  } catch (err) {
+    // A send failure must not fail the user's request -- the token row is
+    // already written, so the user can just resend. Logged for visibility.
+    console.error("Failed to send verification email", err);
+  }
+}
+
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
   const body = event.body ? (JSON.parse(event.body) as Record<string, unknown>) : {};
 
@@ -68,25 +106,35 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       const { hash, salt } = await hashPassword(password);
-      const personalRoomId = randomUUID();
       const created = await createAccount({
         username,
         passwordHash: hash,
         passwordSalt: salt,
         email: email || undefined,
-        personalRoomId,
+        emailVerified: false,
         createdAt: new Date().toISOString(),
       });
       if (!created) {
         return json(409, { error: "username already taken" });
       }
 
-      await putMembership({ accountId: username, roomId: personalRoomId, role: "owner" });
+      // No personal room yet -- a room (and its owner membership) is created
+      // only when an email is verified (see GET /auth/verify). Registration
+      // logs straight in so an unverified user can still act as a mod on
+      // rooms they're invited to. If an email was supplied now, kick off
+      // verification immediately.
+      if (email) {
+        await startEmailVerification(username, email as string, apiBaseUrl(event));
+      }
 
-      // No email verification step anymore -- log straight in, same
-      // response shape as POST /auth/login.
       const sessionToken = await createSession(username);
-      return json(201, { sessionToken, username, personalRoomId, email: email || undefined });
+      return json(201, {
+        sessionToken,
+        username,
+        email: email || undefined,
+        emailVerified: false,
+        personalRoomId: undefined,
+      });
     }
 
     case "POST /auth/login": {
@@ -103,7 +151,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (!valid) return json(401, { error: "Invalid username or password" });
 
       const sessionToken = await createSession(username);
-      return json(200, { sessionToken, username, personalRoomId: account.personalRoomId, email: account.email });
+      return json(200, {
+        sessionToken,
+        username,
+        personalRoomId: account.personalRoomId,
+        email: account.email,
+        emailVerified: account.emailVerified ?? false,
+      });
     }
 
     case "GET /auth/session": {
@@ -113,7 +167,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const account = await getAccount(username);
       if (!account) return json(401, { error: "Account no longer exists" });
 
-      return json(200, { username, personalRoomId: account.personalRoomId, email: account.email });
+      return json(200, {
+        username,
+        personalRoomId: account.personalRoomId,
+        email: account.email,
+        emailVerified: account.emailVerified ?? false,
+      });
     }
 
     case "POST /auth/logout": {
@@ -165,6 +224,52 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       await updateAccountEmail(username, (email as string | undefined) || undefined);
+      // Setting a (non-empty) email starts verification -- the address is
+      // unverified until the mailed link is clicked, which is what unlocks
+      // the account's own room.
+      if (email) {
+        await startEmailVerification(username, email as string, apiBaseUrl(event));
+      }
+      return json(200, { ok: true });
+    }
+
+    // Opened directly from the emailed link (a browser GET, not an SPA fetch)
+    // -- responds with a small HTML confirmation page. Verifying an email is
+    // what first creates the account's personal room + owner membership.
+    case "GET /auth/verify": {
+      const token = event.queryStringParameters?.token;
+      if (!token) return html(400, "Invalid link", "This verification link is missing its token.");
+
+      const verification = await getVerification(token);
+      if (!verification || Date.parse(verification.expiresAt) < Date.now()) {
+        return html(400, "Link expired", "This verification link is invalid or has expired. Request a new one from scenette.");
+      }
+
+      const account = await getAccount(verification.username);
+      if (!account) return html(400, "Invalid link", "That account no longer exists.");
+      // Guard a stale link left over from before the user changed their email
+      // again -- only the current pending address can be verified.
+      if (account.email !== verification.email) {
+        await deleteVerification(token);
+        return html(400, "Link expired", "This link was for a different email address. Request a new one from scenette.");
+      }
+
+      const roomId = await markEmailVerified(verification.username, randomUUID());
+      await putMembership({ accountId: verification.username, roomId, role: "owner" });
+      await deleteVerification(token);
+      return html(200, "Email verified", "Your email is verified and your room is ready. Head back to scenette to start using it.");
+    }
+
+    case "POST /auth/resend-verification": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const account = await getAccount(username);
+      // Deliberately generic response whether or not a resend actually
+      // happened -- never reveals whether an account has a pending email.
+      if (account?.email && !account.emailVerified) {
+        await startEmailVerification(username, account.email, apiBaseUrl(event));
+      }
       return json(200, { ok: true });
     }
 
