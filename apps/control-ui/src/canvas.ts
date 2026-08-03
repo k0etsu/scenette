@@ -63,6 +63,13 @@ function fullAssetPatch(asset: Asset): AssetPatch {
     muted: asset.muted,
     volume: asset.volume,
     paused: asset.paused,
+    // Text auto-fit's current box size -- see AssetPatch's own doc comment
+    // for why this rides along in the same patch/seq as whatever edit
+    // caused it, rather than a separate asset:resize message. Harmless to
+    // include for a non-text asset (unused there) or when unchanged
+    // (redundant re-send of the same value already stored).
+    width: asset.width,
+    height: asset.height,
     fontFamily: asset.fontFamily,
     fontSize: asset.fontSize,
     fontWeight: asset.fontWeight,
@@ -674,44 +681,35 @@ export class CanvasView {
     }
     if (assetId === this.selectedAssetId) this.positionHandles();
 
+    // A font/size/weight/text-content change can change the rendered box's
+    // natural size just as much (or more) -- re-measure after any local
+    // patch on a text asset. Folded directly into the SAME outgoing patch
+    // below (as width/height -- see AssetPatch's own doc comment) rather
+    // than sent as a separate asset:resize message with its own seq.
+    //
+    // Regression history: this used to be two separate messages under one
+    // shared per-asset seq gate (roomState.ts), and EITHER ordering was
+    // unsafe -- sending the resize first (an older design) gave it a lower
+    // seq than the patch immediately following it, so an out-of-order
+    // Lambda invocation could let the patch commit first and reject the
+    // resize as stale, permanently losing the size correction. The
+    // "obvious" fix of just swapping the order (resize after patch, so
+    // resize gets the later seq) only moved the bug: now the *patch* had
+    // the lower seq, so the *font/text change itself* could lose to its own
+    // resize correction and silently revert. Two messages sharing one seq
+    // gate with no cross-message ordering guarantee can't be made safe by
+    // choosing an order -- only combining them into one atomic write fixes
+    // it for real, which is what this does.
+    const sizePatch = entry.asset.type === "text" ? this.measureTextAutoFit(assetId) : undefined;
+
     if ("text" in patch) {
-      // Always deferred here (see autoSizeText's own doc) -- the throttled
-      // flush (sendFullTextPatch) sends the text update first and any
-      // resulting resize correction second, with a strictly later seq, so
-      // the resize can never lose a race against the text change that
-      // caused it.
-      if (entry.asset.type === "text") this.autoSizeText(assetId, { deferNetworkSend: true });
       this.sendTextPatchThrottled(assetId);
       return;
     }
 
     const seq = this.nextSeq();
     entry.asset = { ...entry.asset, seq };
-    this.callbacks.onAssetPatch(assetId, patch, seq);
-
-    // A font/size/weight change (from the sidebar's text-settings controls)
-    // can change the rendered box's natural size just as much as an actual
-    // text edit -- re-measure after any local patch on a text asset, not
-    // just from the inline-edit path. Safe to call unconditionally: this
-    // method is only ever invoked for *local* edits (remote/collaborator
-    // changes go through applyRemoteUpdate -> upsert instead), so there's
-    // no risk of every connected client redundantly re-measuring and
-    // re-broadcasting on someone else's edit.
-    //
-    // Deliberately measured/sent AFTER the patch above (regression -- this
-    // used to run before, which gave the resize a LOWER seq than the patch
-    // send immediately following it). The resize is a *consequence* of this
-    // patch (e.g. a font-size change widening the box), so it needs a
-    // strictly later seq than the patch that caused it. With the old
-    // ordering, if the two separate WebSocket messages got processed out of
-    // order server-side (no ordering guarantee across them), the
-    // lower-seq'd resize could commit-check against a row the higher-seq'd
-    // patch had already updated and get silently rejected as stale under
-    // the same shared per-asset seq gate (roomState.ts) -- permanently
-    // losing the size correction with no retry. Same race this file already
-    // fixed once for the text-typing path; this was the same bug in the
-    // non-typing (font-family/size/weight dropdown) path.
-    if (entry.asset.type === "text") this.autoSizeText(assetId);
+    this.callbacks.onAssetPatch(assetId, sizePatch ? { ...patch, ...sizePatch } : patch, seq);
   }
 
   // Keyed by assetId (not a single shared record) so throttled edits to two
@@ -767,6 +765,12 @@ export class CanvasView {
   private sendFullTextPatch(assetId: string, state: { lastSentAt: number }): void {
     const entry = this.entries.get(assetId);
     if (!entry) return;
+    // Re-measures right before sending (not just relying on whatever was
+    // last measured mid-keystroke) so the very latest content -- which may
+    // have changed again since the last measurement while this send sat in
+    // the throttle window -- is what actually determines the box size sent
+    // below.
+    if (entry.asset.type === "text") this.measureTextAutoFit(assetId);
     const seq = this.nextSeq();
     entry.asset = { ...entry.asset, seq };
     state.lastSentAt = performance.now();
@@ -775,20 +779,13 @@ export class CanvasView {
     // one seq-gated conditional write on the server (roomState.ts's
     // updateAsset), so a patch carrying only what changed would lose that
     // data permanently if it lost the seq race and got rejected as stale
-    // (message.ts's silent "stale" drop, no retry). Sending everything means
-    // a rejected/coalesced-away send is always truly redundant.
+    // (message.ts's silent "stale" drop, no retry). Sending everything --
+    // including the current width/height, folded in by fullAssetPatch --
+    // means a rejected/coalesced-away send is always truly redundant, and
+    // there's no separate asset:resize message that could itself lose a
+    // race against this one (see AssetPatch's own doc comment for why that
+    // used to be exactly the bug here).
     this.callbacks.onAssetPatch(assetId, fullAssetPatch(entry.asset), seq);
-
-    // Flushes any size correction autoSizeText deferred while this text was
-    // actively being typed (see its own doc comment) -- sent right after,
-    // with its own fresh (and therefore strictly newer) seq, rather than
-    // during the throttle window where it would race the text update above
-    // under the same shared per-asset seq gate.
-    if (this.pendingResizeSend.delete(assetId)) {
-      const resizeSeq = this.nextSeq();
-      entry.asset = { ...entry.asset, seq: resizeSeq };
-      this.callbacks.onAssetResize(assetId, entry.asset.x, entry.asset.y, entry.asset.width, entry.asset.height, resizeSeq);
-    }
   }
 
   // Bypasses the throttle to flush on session end (blur) -- otherwise the
@@ -809,55 +806,40 @@ export class CanvasView {
   // Text assets size themselves to fit their own rendered content (see
   // createElement/applyTransform's shrink-to-fit CSS) rather than being
   // manually resized -- this re-measures the already-repainted content
-  // element and syncs the stored width/height via the normal resize path,
-  // so browser-source and other collaborators' viewport-intersection checks
-  // see an accurate box even though they never run this measurement
-  // themselves.
+  // element and, if it changed, applies the corrected size locally right
+  // away (so it's always reflected instantly, same as any other local
+  // edit) and returns it for the caller to fold into whatever patch it's
+  // about to send. Returns undefined when nothing changed (nothing for the
+  // caller to add) -- purely local, sends nothing over the network itself.
   //
-  // deferNetworkSend: true (only ever passed while actively typing -- see
-  // patchAsset) applies the corrected size locally/optimistically same as
-  // always, but withholds the actual asset:resize send until the text
-  // throttle's own flush (see sendFullTextPatch) instead of sending one
-  // immediately per keystroke. Regression: an unthrottled resize per
-  // keystroke, sent alongside the (throttled) text content, raced it under
-  // the same shared per-asset seq gate every asset:move/resize/update
-  // shares server-side (roomState.ts) -- an in-flight resize for an
-  // earlier keystroke could arrive after a later-seq'd text update had
-  // already committed and get rejected as stale, permanently losing that
-  // resize with no retry. The box then never grew to fit the final text in
-  // browser-source/other collaborators, even though the text itself
-  // (always sent in full, not as a diff) still arrived correctly. Bundling
-  // both into the same flush removes the race the same way the text fix
-  // itself did: only the size that matters (the final one) ever actually
-  // gets sent.
-  private autoSizeText(assetId: string, opts: { deferNetworkSend?: boolean } = {}): void {
+  // Deliberately does NOT send its own asset:resize message (a previous
+  // design did, whether immediately or deferred to a throttled flush) --
+  // seq-guarding *which order* two separate messages for the same asset
+  // send in can't make them safe against each other, since server-side
+  // Lambda invocations for each have no ordering guarantee independent of
+  // send order. Whichever of the two got the "later" seq could still lose
+  // to the other committing first. Folding the size correction into the
+  // SAME patch/seq as whatever caused it (see callers) is what actually
+  // fixes that -- see AssetPatch's own doc comment for the full history.
+  private measureTextAutoFit(assetId: string): { width: number; height: number } | undefined {
     const entry = this.entries.get(assetId);
-    if (!entry || entry.asset.type !== "text") return;
+    if (!entry || entry.asset.type !== "text") return undefined;
     const { content, asset } = entry;
     const width = content.offsetWidth;
     const height = content.offsetHeight;
     // Epsilon guard: offsetWidth/Height are whole-pixel snapshots, so an
     // unchanged size can still round a pixel differently between renders --
-    // without this, every call would re-trigger setAssetSize -> applyTransform
-    // -> (no visual change, since text isn't sized from asset.width/height)
-    // for no reason.
-    if (Math.abs(width - asset.width) < 1 && Math.abs(height - asset.height) < 1) return;
+    // without this, every call would re-trigger applyTransform for no
+    // visual change (text isn't sized from asset.width/height).
+    if (Math.abs(width - asset.width) < 1 && Math.abs(height - asset.height) < 1) return undefined;
 
-    if (!opts.deferNetworkSend) {
-      this.setAssetSize(assetId, width, height);
-      return;
-    }
     const w = Math.max(MIN_ASSET_SIZE, width);
     const h = Math.max(MIN_ASSET_SIZE, height);
-    const seq = this.nextSeq();
-    entry.asset = { ...entry.asset, width: w, height: h, seq };
+    entry.asset = { ...entry.asset, width: w, height: h };
     this.applyTransform(entry, entry.asset);
     if (assetId === this.selectedAssetId) this.positionHandles();
-    this.pendingResizeSend.add(assetId);
+    return { width: w, height: h };
   }
-
-  // See autoSizeText's deferNetworkSend doc comment.
-  private readonly pendingResizeSend = new Set<string>();
 
   remove(assetId: string): void {
     const entry = this.entries.get(assetId);

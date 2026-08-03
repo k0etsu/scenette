@@ -215,11 +215,24 @@ describe("parseClientMessage", () => {
         outlineEnabled: true,
         outlineColor: "#ffffff",
         outlineWidth: 2,
+        width: 300,
+        height: 150,
         somethingUnknown: "ignored",
       };
       const result = send({ action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch });
       const { somethingUnknown: _ignored, ...expected } = patch;
       expect(result).toEqual({ action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch: expected });
+    });
+
+    it("parses width/height -- a text asset's auto-fit correction folded into the same patch as the edit that caused it", () => {
+      const msg = {
+        action: "asset:update",
+        roomId: "room1",
+        assetId: "a1",
+        seq: 1,
+        patch: { fontSize: 40, width: 200, height: 80 },
+      };
+      expect(send(msg)).toEqual(msg);
     });
 
     it("rejects an invalid textAlign value", () => {

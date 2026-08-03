@@ -496,7 +496,15 @@ describe("patchAsset -- text edits: throttled send + full-object patch", () => {
 
   it("a non-text patch still sends only the fields it actually changed, and isn't subject to the text throttle", () => {
     const { canvas, callbacks } = setup();
-    canvas.upsert(makeAsset({ type: "text", text: "hello", hidden: false }));
+    canvas.upsert(makeAsset({ type: "text", text: "hello", hidden: false, width: 100, height: 100 }));
+    // Matches the stored size (jsdom's real offsetWidth/Height default to 0
+    // otherwise) so patchAsset's own text-auto-fit re-measurement is a
+    // no-op here, same as it would be in a real browser where nothing
+    // text/font-related changed -- this test is about the hidden/locked
+    // fields specifically, not auto-fit.
+    const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    Object.defineProperty(content, "offsetWidth", { value: 100, configurable: true });
+    Object.defineProperty(content, "offsetHeight", { value: 100, configurable: true });
 
     canvas.patchAsset("a1", { hidden: true });
     now = 10;
@@ -593,7 +601,7 @@ describe("text assets size themselves to fit their content", () => {
     expect(div.style.width).toBe("100%"); // fills `el`, which carries the actual px size
   });
 
-  it("syncs the stored width/height to the measured content size once its natural size differs, via the normal resize path", () => {
+  it("syncs the stored width/height to the measured content size once its natural size differs, folded into the same patch (not a separate resize message)", () => {
     const { canvas, callbacks } = setup();
     // Starts with a stored size that's very unlikely to match jsdom's
     // actual (stubbed) layout box for "hi" -- see below.
@@ -604,31 +612,23 @@ describe("text assets size themselves to fit their content", () => {
 
     canvas.patchAsset("t1", { fontSize: 32 });
 
-    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 40, 30, expect.any(Number));
+    // Regression: this used to be a separate asset:resize message with its
+    // own seq -- two messages sharing one seq-gated conditional write per
+    // asset (roomState.ts) with no ordering guarantee across their own
+    // Lambda invocations meant EITHER message could lose a race against the
+    // other regardless of which was sent/generated "later". Folding the
+    // corrected size into the SAME patch/seq as the font change that caused
+    // it removes the race entirely -- see AssetPatch's own doc comment.
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ fontSize: 32, width: 40, height: 30 }),
+      expect.any(Number)
+    );
     expect(canvas.get("t1")).toMatchObject({ width: 40, height: 30 });
   });
 
-  it("sends the resize with a strictly newer seq than the patch that caused it (regression)", () => {
-    // A font-family/size/weight change's resize is a *consequence* of that
-    // patch, sharing the same per-asset seq gate server-side -- if the
-    // resize's seq isn't guaranteed strictly newer, the two separate
-    // WebSocket messages could get processed out of order and the resize
-    // silently rejected as stale, permanently losing the size correction
-    // (browser-source's box then never actually grows/shrinks to match).
-    const { canvas, callbacks } = setup();
-    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 999, height: 999 }));
-    const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
-    Object.defineProperty(content, "offsetWidth", { value: 40, configurable: true });
-    Object.defineProperty(content, "offsetHeight", { value: 30, configurable: true });
-
-    canvas.patchAsset("t1", { fontSize: 32 });
-
-    const patchSeq = vi.mocked(callbacks.onAssetPatch).mock.calls[0][2];
-    const resizeSeq = vi.mocked(callbacks.onAssetResize).mock.calls[0][5];
-    expect(resizeSeq).toBeGreaterThan(patchSeq);
-  });
-
-  it("does not re-trigger a resize when the measured size hasn't actually changed", () => {
+  it("does not fold width/height into the patch when the measured size hasn't actually changed", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
     const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
@@ -638,18 +638,24 @@ describe("text assets size themselves to fit their content", () => {
     canvas.patchAsset("t1", { fontSize: 32 });
 
     expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { fontSize: 32 }, expect.any(Number));
   });
 });
 
-describe("text asset auto-resize during active typing is deferred, not sent per keystroke (regression)", () => {
+describe("text asset auto-resize during active typing is folded into the same patch, not a separate resize message (regression)", () => {
   // Every asset:move/resize/update shares one seq-gated conditional write
-  // server-side (roomState.ts) -- an unthrottled resize sent alongside the
-  // (throttled) text content could arrive after a later-seq'd text update
-  // already committed and get rejected as stale, permanently losing that
-  // resize with no retry. The box then never actually grew to fit the
-  // final typed text for browser-source/other collaborators, even though
-  // the text itself still arrived correctly (see canvas.ts's
-  // autoSizeText/sendFullTextPatch doc comments).
+  // server-side (roomState.ts). A separate asset:resize message -- whether
+  // sent immediately, deferred to the text throttle's flush, or ordered
+  // before/after the text patch it accompanied -- always had a DIFFERENT
+  // seq than that patch, and no ordering guarantee exists between two
+  // separate WebSocket messages' own Lambda invocations. Whichever message
+  // ended up with the "earlier" seq could lose a race against the other
+  // and get silently rejected as stale, permanently losing either the size
+  // correction (box never grows in browser-source/other collaborators) or,
+  // worse, the edit itself (a font change silently reverting). Folding the
+  // size correction into the exact same patch/seq as whatever caused it is
+  // the only way to remove the race for real -- see canvas.ts's
+  // measureTextAutoFit/AssetPatch's own doc comments for the full history.
   let now = 0;
 
   beforeEach(() => {
@@ -668,13 +674,12 @@ describe("text asset auto-resize during active typing is deferred, not sent per 
     Object.defineProperty(content, "offsetHeight", { value: height, configurable: true });
   }
 
-  it("does not send a resize immediately for a keystroke within the throttle window", () => {
+  it("does not send anything for a keystroke within the throttle window", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
     stubMeasuredSize(40, 30);
     canvas.patchAsset("t1", { text: "hi" }); // leading send, t=0 -- no size change yet
     vi.mocked(callbacks.onAssetPatch).mockClear();
-    vi.mocked(callbacks.onAssetResize).mockClear();
 
     now = 30;
     stubMeasuredSize(90, 30); // grows on this keystroke
@@ -687,7 +692,7 @@ describe("text asset auto-resize during active typing is deferred, not sent per 
     expect(callbacks.onAssetResize).not.toHaveBeenCalled();
   });
 
-  it("sends the deferred resize alongside the text patch once the throttle flushes", () => {
+  it("sends the corrected width/height as part of the same text patch once the throttle flushes", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
     stubMeasuredSize(40, 30);
@@ -700,20 +705,21 @@ describe("text asset auto-resize during active typing is deferred, not sent per 
 
     vi.advanceTimersByTime(100); // past the trailing send's own window
 
-    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", expect.objectContaining({ text: "hi there" }), expect.any(Number));
-    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 90, 30, expect.any(Number));
-    // The resize's seq must be strictly newer than the text patch's --
-    // sent right after it in the same flush, not before.
-    const textSeq = vi.mocked(callbacks.onAssetPatch).mock.calls[0][2];
-    const resizeSeq = vi.mocked(callbacks.onAssetResize).mock.calls[0][5];
-    expect(resizeSeq).toBeGreaterThan(textSeq);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ text: "hi there", width: 90, height: 30 }),
+      expect.any(Number)
+    );
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
   });
 
-  it("flushPendingTextPatch (blur) also flushes the deferred resize immediately", () => {
+  it("flushPendingTextPatch (blur) also flushes the corrected size immediately, in the same patch", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
     stubMeasuredSize(40, 30);
     canvas.patchAsset("t1", { text: "hi" });
+    vi.mocked(callbacks.onAssetPatch).mockClear();
 
     now = 30;
     stubMeasuredSize(90, 30);
@@ -721,14 +727,43 @@ describe("text asset auto-resize during active typing is deferred, not sent per 
 
     canvas.flushPendingTextPatch("t1");
 
-    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 90, 30, expect.any(Number));
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ text: "hi there", width: 90, height: 30 }),
+      expect.any(Number)
+    );
   });
 
-  it("does not send a spurious resize on flush when the measured size never actually changed", () => {
+  it("re-measures right before the flush, not just whatever was last measured mid-keystroke", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
     stubMeasuredSize(40, 30);
     canvas.patchAsset("t1", { text: "hi" });
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    now = 30;
+    stubMeasuredSize(90, 30);
+    canvas.patchAsset("t1", { text: "hi there" });
+    // Content grows further after the last patchAsset call but before the
+    // throttle actually flushes (e.g. a re-render or late DOM settling) --
+    // sendFullTextPatch's own re-measure should pick this up too.
+    stubMeasuredSize(150, 30);
+
+    vi.advanceTimersByTime(100);
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ width: 150, height: 30 }),
+      expect.any(Number)
+    );
+  });
+
+  it("does not include width/height in the patch when the measured size never actually changed", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" });
+    vi.mocked(callbacks.onAssetPatch).mockClear();
 
     now = 30;
     canvas.patchAsset("t1", { text: "hi!" }); // measured size still 40x30 -- unchanged
@@ -736,16 +771,24 @@ describe("text asset auto-resize during active typing is deferred, not sent per 
     vi.advanceTimersByTime(100);
 
     expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", expect.objectContaining({ text: "hi!" }), expect.any(Number));
+    const [, sentPatch] = vi.mocked(callbacks.onAssetPatch).mock.calls[0];
+    expect(sentPatch).toMatchObject({ width: 40, height: 30 }); // fullAssetPatch always includes current (unchanged) size
   });
 
-  it("a font-size change (not text) still resizes and sends immediately, unaffected by the text throttle", () => {
+  it("a font-size change (not text) folds the corrected size into the same patch and sends immediately, unaffected by the text throttle", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
     stubMeasuredSize(60, 45);
 
     canvas.patchAsset("t1", { fontSize: 32 });
 
-    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 60, 45, expect.any(Number));
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ fontSize: 32, width: 60, height: 45 }),
+      expect.any(Number)
+    );
   });
 });
 
