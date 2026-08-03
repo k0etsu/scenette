@@ -282,6 +282,88 @@ describe("applyRemoteMove / applyRemoteResize / applyRemoteUpdate (seq guard)", 
   });
 });
 
+describe("setAssets -- guarded reconciliation (regression: periodic/manual full-state resync)", () => {
+  it("ignores an incoming entry whose seq is older than what's already applied", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ x: 0, y: 0, seq: 10 }));
+    canvas.setAssets([makeAsset({ x: 999, y: 999, seq: 5 })]);
+    expect(canvas.get("a1")).toMatchObject({ x: 0, y: 0, seq: 10 });
+  });
+
+  it("applies an incoming entry whose seq is newer (or equal) to what's already applied", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ x: 0, y: 0, seq: 5 }));
+    canvas.setAssets([makeAsset({ x: 50, y: 60, seq: 10 })]);
+    expect(canvas.get("a1")).toMatchObject({ x: 50, y: 60, seq: 10 });
+  });
+
+  it("always adds a brand-new assetId regardless of seq -- nothing local to protect", () => {
+    const { canvas } = setup();
+    canvas.setAssets([makeAsset({ assetId: "a1", seq: 1 })]);
+    expect(canvas.get("a1")).toMatchObject({ seq: 1 });
+  });
+
+  it("skips an asset currently being dragged, even if the incoming seq is newer", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ x: 0, y: 0, seq: 5 }));
+    const el = container.querySelector('[data-asset-id="a1"]') as HTMLElement;
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+
+    canvas.setAssets([makeAsset({ x: 999, y: 999, seq: 999 })]);
+
+    expect(canvas.get("a1")).toMatchObject({ x: 0, y: 0, seq: 5 });
+  });
+
+  it("skips an asset currently being resized, even if the incoming seq is newer", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ width: 100, height: 100, seq: 5 }));
+    canvas.selectAsset("a1");
+    const handle = container.querySelector('[data-role="resize-handle"][data-corner="nw"]') as HTMLElement;
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+
+    canvas.setAssets([makeAsset({ width: 5, height: 5, seq: 999 })]);
+
+    expect(canvas.get("a1")).toMatchObject({ width: 100, height: 100, seq: 5 });
+  });
+
+  it("skips an asset currently being inline-text-edited, even if the incoming seq is newer", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello", seq: 5 }));
+    const div = container.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+
+    canvas.setAssets([makeAsset({ assetId: "t1", type: "text", text: "reverted!", seq: 999 })]);
+
+    expect(canvas.get("t1")?.text).toBe("hello");
+  });
+
+  it("resumes accepting resync entries for that asset once inline editing ends (blur)", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hello", seq: 5 }));
+    const div = container.querySelector('[data-asset-type="text"]') as HTMLElement;
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    div.dispatchEvent(new FocusEvent("blur"));
+
+    canvas.setAssets([makeAsset({ assetId: "t1", type: "text", text: "synced", seq: 999 })]);
+
+    expect(canvas.get("t1")?.text).toBe("synced");
+  });
+
+  it("still removes an asset absent from the incoming list even though the guard skipped applying it", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "a1", x: 0, y: 0, seq: 5 }));
+    const el = container.querySelector('[data-asset-id="a1"]') as HTMLElement;
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+
+    // a1 isn't in this snapshot at all -- the drag guard only protects
+    // against *overwriting* it with stale data, not against a legitimate
+    // deletion, so removal still proceeds independent of the guard above.
+    canvas.setAssets([]);
+
+    expect(canvas.get("a1")).toBeUndefined();
+  });
+});
+
 describe("setAssetPosition / setAssetSize / patchAsset", () => {
   it("setAssetPosition applies optimistically and calls onAssetMove with a fresh seq", () => {
     const { canvas, callbacks } = setup();
@@ -414,7 +496,15 @@ describe("patchAsset -- text edits: throttled send + full-object patch", () => {
 
   it("a non-text patch still sends only the fields it actually changed, and isn't subject to the text throttle", () => {
     const { canvas, callbacks } = setup();
-    canvas.upsert(makeAsset({ type: "text", text: "hello", hidden: false }));
+    canvas.upsert(makeAsset({ type: "text", text: "hello", hidden: false, width: 100, height: 100 }));
+    // Matches the stored size (jsdom's real offsetWidth/Height default to 0
+    // otherwise) so patchAsset's own text-auto-fit re-measurement is a
+    // no-op here, same as it would be in a real browser where nothing
+    // text/font-related changed -- this test is about the hidden/locked
+    // fields specifically, not auto-fit.
+    const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    Object.defineProperty(content, "offsetWidth", { value: 100, configurable: true });
+    Object.defineProperty(content, "offsetHeight", { value: 100, configurable: true });
 
     canvas.patchAsset("a1", { hidden: true });
     now = 10;
@@ -511,7 +601,7 @@ describe("text assets size themselves to fit their content", () => {
     expect(div.style.width).toBe("100%"); // fills `el`, which carries the actual px size
   });
 
-  it("syncs the stored width/height to the measured content size once its natural size differs, via the normal resize path", () => {
+  it("syncs the stored width/height to the measured content size once its natural size differs, folded into the same patch (not a separate resize message)", () => {
     const { canvas, callbacks } = setup();
     // Starts with a stored size that's very unlikely to match jsdom's
     // actual (stubbed) layout box for "hi" -- see below.
@@ -522,11 +612,23 @@ describe("text assets size themselves to fit their content", () => {
 
     canvas.patchAsset("t1", { fontSize: 32 });
 
-    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 40, 30, expect.any(Number));
+    // Regression: this used to be a separate asset:resize message with its
+    // own seq -- two messages sharing one seq-gated conditional write per
+    // asset (roomState.ts) with no ordering guarantee across their own
+    // Lambda invocations meant EITHER message could lose a race against the
+    // other regardless of which was sent/generated "later". Folding the
+    // corrected size into the SAME patch/seq as the font change that caused
+    // it removes the race entirely -- see AssetPatch's own doc comment.
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ fontSize: 32, width: 40, height: 30 }),
+      expect.any(Number)
+    );
     expect(canvas.get("t1")).toMatchObject({ width: 40, height: 30 });
   });
 
-  it("does not re-trigger a resize when the measured size hasn't actually changed", () => {
+  it("does not fold width/height into the patch when the measured size hasn't actually changed", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
     const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
@@ -536,6 +638,157 @@ describe("text assets size themselves to fit their content", () => {
     canvas.patchAsset("t1", { fontSize: 32 });
 
     expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", { fontSize: 32 }, expect.any(Number));
+  });
+});
+
+describe("text asset auto-resize during active typing is folded into the same patch, not a separate resize message (regression)", () => {
+  // Every asset:move/resize/update shares one seq-gated conditional write
+  // server-side (roomState.ts). A separate asset:resize message -- whether
+  // sent immediately, deferred to the text throttle's flush, or ordered
+  // before/after the text patch it accompanied -- always had a DIFFERENT
+  // seq than that patch, and no ordering guarantee exists between two
+  // separate WebSocket messages' own Lambda invocations. Whichever message
+  // ended up with the "earlier" seq could lose a race against the other
+  // and get silently rejected as stale, permanently losing either the size
+  // correction (box never grows in browser-source/other collaborators) or,
+  // worse, the edit itself (a font change silently reverting). Folding the
+  // size correction into the exact same patch/seq as whatever caused it is
+  // the only way to remove the race for real -- see canvas.ts's
+  // measureTextAutoFit/AssetPatch's own doc comments for the full history.
+  let now = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function stubMeasuredSize(width: number, height: number): void {
+    const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    Object.defineProperty(content, "offsetWidth", { value: width, configurable: true });
+    Object.defineProperty(content, "offsetHeight", { value: height, configurable: true });
+  }
+
+  it("does not send anything for a keystroke within the throttle window", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" }); // leading send, t=0 -- no size change yet
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    now = 30;
+    stubMeasuredSize(90, 30); // grows on this keystroke
+    canvas.patchAsset("t1", { text: "hi there" }); // within the window -- deferred
+
+    // Applied locally right away...
+    expect(canvas.get("t1")).toMatchObject({ width: 90, height: 30 });
+    // ...but not sent -- still within the text throttle window.
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+  });
+
+  it("sends the corrected width/height as part of the same text patch once the throttle flushes", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" });
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    now = 30;
+    stubMeasuredSize(90, 30);
+    canvas.patchAsset("t1", { text: "hi there" });
+
+    vi.advanceTimersByTime(100); // past the trailing send's own window
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledTimes(1);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ text: "hi there", width: 90, height: 30 }),
+      expect.any(Number)
+    );
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+  });
+
+  it("flushPendingTextPatch (blur) also flushes the corrected size immediately, in the same patch", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" });
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    now = 30;
+    stubMeasuredSize(90, 30);
+    canvas.patchAsset("t1", { text: "hi there" });
+
+    canvas.flushPendingTextPatch("t1");
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ text: "hi there", width: 90, height: 30 }),
+      expect.any(Number)
+    );
+  });
+
+  it("re-measures right before the flush, not just whatever was last measured mid-keystroke", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" });
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    now = 30;
+    stubMeasuredSize(90, 30);
+    canvas.patchAsset("t1", { text: "hi there" });
+    // Content grows further after the last patchAsset call but before the
+    // throttle actually flushes (e.g. a re-render or late DOM settling) --
+    // sendFullTextPatch's own re-measure should pick this up too.
+    stubMeasuredSize(150, 30);
+
+    vi.advanceTimersByTime(100);
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ width: 150, height: 30 }),
+      expect.any(Number)
+    );
+  });
+
+  it("does not include width/height in the patch when the measured size never actually changed", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" });
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    now = 30;
+    canvas.patchAsset("t1", { text: "hi!" }); // measured size still 40x30 -- unchanged
+
+    vi.advanceTimersByTime(100);
+
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", expect.objectContaining({ text: "hi!" }), expect.any(Number));
+    const [, sentPatch] = vi.mocked(callbacks.onAssetPatch).mock.calls[0];
+    expect(sentPatch).toMatchObject({ width: 40, height: 30 }); // fullAssetPatch always includes current (unchanged) size
+  });
+
+  it("a font-size change (not text) folds the corrected size into the same patch and sends immediately, unaffected by the text throttle", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(60, 45);
+
+    canvas.patchAsset("t1", { fontSize: 32 });
+
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith(
+      "t1",
+      expect.objectContaining({ fontSize: 32, width: 60, height: 45 }),
+      expect.any(Number)
+    );
   });
 });
 

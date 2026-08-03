@@ -81,6 +81,19 @@ export interface AssetPatch extends TextStyleFields {
   muted?: boolean;
   volume?: number;
   paused?: boolean;
+  // Text assets only -- a text-content or font/style edit that changes the
+  // box's auto-fit natural size folds the correction in here (as part of
+  // the same atomic write/seq as the edit that caused it) rather than
+  // sending a separate asset:resize message. Two separate messages sharing
+  // one seq-gated conditional write per asset with no ordering guarantee
+  // across their own Lambda invocations meant EITHER message could lose a
+  // race against the other regardless of which one was given the "later"
+  // seq -- see control-ui's canvas.ts (measureTextAutoFit) for the full
+  // history of that bug. Manual corner-handle drag-resize is unrelated and
+  // still goes through the dedicated (and correctly ordered/throttled)
+  // asset:resize message, never this field.
+  width?: number;
+  height?: number;
 }
 
 export interface AssetUpdateMessage {
@@ -381,6 +394,8 @@ export function parseClientMessage(raw: string): ClientMessage {
       if (typeof rawPatch.muted === "boolean") patch.muted = rawPatch.muted;
       if (typeof rawPatch.volume === "number") patch.volume = rawPatch.volume;
       if (typeof rawPatch.paused === "boolean") patch.paused = rawPatch.paused;
+      if (typeof rawPatch.width === "number") patch.width = rawPatch.width;
+      if (typeof rawPatch.height === "number") patch.height = rawPatch.height;
       if (Object.keys(patch).length === 0) throw new Error("Empty patch");
 
       return { action: "asset:update", roomId: msg.roomId, assetId: msg.assetId, patch, seq: msg.seq };

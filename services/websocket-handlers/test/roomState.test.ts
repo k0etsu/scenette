@@ -318,6 +318,22 @@ describe("updateAsset", () => {
     const result = await updateAsset("r1", "a1", { paused: true }, 20, viewport);
     expect(result).toBe("stale");
   });
+
+  it("recomputes visible=true from a patched width, not the stale existing width -- a text auto-fit correction folded into this same patch", async () => {
+    // Entirely left of the viewport at its stored width (50) -- growing it
+    // via the patch should be what makes it visible, not its old geometry.
+    ddbMock.on(GetCommand).resolves({ Item: existingAsset({ x: -100, y: 100, width: 50, height: 50 }) });
+    ddbMock.on(UpdateCommand).resolves({});
+    const result = await updateAsset("r1", "a1", { width: 300 }, 20, viewport);
+    expect(result).toMatchObject({ visible: true });
+  });
+
+  it("recomputes visible=false from a patched (shrunk) width that no longer reaches the viewport", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: existingAsset({ x: -100, y: 100, width: 300, height: 50 }) });
+    ddbMock.on(UpdateCommand).resolves({});
+    const result = await updateAsset("r1", "a1", { width: 50 }, 20, viewport);
+    expect(result).toMatchObject({ visible: false });
+  });
 });
 
 describe("sumRoomStorageBytes", () => {

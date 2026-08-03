@@ -110,6 +110,47 @@ describe("stop()", () => {
   });
 });
 
+function flushFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+describe("tick() width/height smoothing (regression: text box visibly lagging behind its own content)", () => {
+  it("snaps a text asset's width/height immediately instead of smoothing it like a drag", async () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "text", width: 40, height: 30 }));
+    await flushFrame(); // let the constructor's own initial tick pass
+
+    // A big single jump, the same shape as a coalesced auto-fit resize
+    // following several keystrokes -- see control-ui's autoSizeText.
+    renderer.upsert(makeAsset({ type: "text", width: 200, height: 90 }));
+    await flushFrame();
+
+    const el = root.firstElementChild as HTMLElement;
+    expect(el.style.width).toBe("200px");
+    expect(el.style.height).toBe("90px");
+  });
+
+  it("still smooths width/height for a genuinely dragged/resized asset type (e.g. image), not an instant snap", async () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "image", width: 40, height: 30 }));
+    await flushFrame();
+
+    renderer.upsert(makeAsset({ type: "image", width: 200, height: 90 }));
+    await flushFrame();
+
+    const el = root.firstElementChild as HTMLElement;
+    const width = parseFloat(el.style.width);
+    const height = parseFloat(el.style.height);
+    // Regression guard the other direction: a single frame at
+    // SMOOTHING_FACTOR shouldn't already be at the target -- if it is,
+    // smoothing silently stopped applying to non-text assets too.
+    expect(width).toBeGreaterThan(40);
+    expect(width).toBeLessThan(200);
+    expect(height).toBeGreaterThan(30);
+    expect(height).toBeLessThan(90);
+  });
+});
+
 describe("text interpolation", () => {
   it("renders {key} substituted with the variable's value", () => {
     const renderer = new Renderer(root, "assets.example.com");

@@ -63,6 +63,13 @@ function fullAssetPatch(asset: Asset): AssetPatch {
     muted: asset.muted,
     volume: asset.volume,
     paused: asset.paused,
+    // Text auto-fit's current box size -- see AssetPatch's own doc comment
+    // for why this rides along in the same patch/seq as whatever edit
+    // caused it, rather than a separate asset:resize message. Harmless to
+    // include for a non-text asset (unused there) or when unchanged
+    // (redundant re-send of the same value already stored).
+    width: asset.width,
+    height: asset.height,
     fontFamily: asset.fontFamily,
     fontSize: asset.fontSize,
     fontWeight: asset.fontWeight,
@@ -147,6 +154,11 @@ export class CanvasView {
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
   private lastMoveSentAt = 0;
+  // Set for the duration of an active inline text edit (beginInlineTextEdit
+  // -> stopEditing), so a periodic/manual full-state resync (see setAssets)
+  // never reverts mid-edit content between keystrokes -- mirrors `dragging`
+  // above, which protects an active mouse gesture the same way.
+  private inlineEditingAssetId?: string;
 
   // Updated on every plain mousemove over the canvas (not just while
   // dragging) so a toolbar/paste-triggered upload -- which has no click
@@ -506,10 +518,31 @@ export class CanvasView {
     this.callbacks.onSelectionChange(assetId);
   }
 
+  // Also the entry point for a periodic/manual full-state resync (see
+  // main.ts) -- unlike asset:added or an already seq-checked
+  // applyRemoteMove/Resize/Update call, an incoming entry here represents a
+  // potentially-stale external snapshot, not a single pre-validated delta.
+  // A snapshot arriving mid-gesture is otherwise indistinguishable from a
+  // legitimate authoritative update, so this guards every way a local edit
+  // could be in flight before the corresponding network round-trip:
+  //   1. seq: never let a snapshot go backwards relative to what's already
+  //      displayed (same convention as applyRemoteMove/Resize/Update below).
+  //   2. an active drag/resize gesture: doesn't bump seq on every
+  //      mousemove tick (only on throttled sends), so seq alone can't tell
+  //      "stale" from "mid-gesture, not sent yet" -- must check `dragging`.
+  //   3. an active inline text edit: same idea, no seq bump per keystroke
+  //      until the (also throttled) text send actually flushes.
+  // Without all three, a poorly-timed resync could revert someone's own
+  // in-progress edit to a stale server copy out from under them.
   setAssets(assets: Asset[]): void {
     const seen = new Set<string>();
     for (const asset of assets) {
       seen.add(asset.assetId);
+      const entry = this.entries.get(asset.assetId);
+      if (entry && asset.seq < entry.asset.seq) continue;
+      if (this.dragging && "assetId" in this.dragging && this.dragging.assetId === asset.assetId) continue;
+      if (this.dragging && "resizing" in this.dragging && this.dragging.resizing.assetId === asset.assetId) continue;
+      if (this.inlineEditingAssetId === asset.assetId) continue;
       this.upsert(asset);
     }
     for (const [assetId, entry] of this.entries) {
@@ -647,15 +680,27 @@ export class CanvasView {
       this.applyTransform(entry, entry.asset);
     }
     if (assetId === this.selectedAssetId) this.positionHandles();
-    // A font/size/weight change (from the sidebar's text-settings controls)
-    // can change the rendered box's natural size just as much as an actual
-    // text edit -- re-measure after any local patch on a text asset, not
-    // just from the inline-edit path. Safe to call unconditionally: this
-    // method is only ever invoked for *local* edits (remote/collaborator
-    // changes go through applyRemoteUpdate -> upsert instead), so there's
-    // no risk of every connected client redundantly re-measuring and
-    // re-broadcasting on someone else's edit.
-    if (entry.asset.type === "text") this.autoSizeText(assetId);
+
+    // A font/size/weight/text-content change can change the rendered box's
+    // natural size just as much (or more) -- re-measure after any local
+    // patch on a text asset. Folded directly into the SAME outgoing patch
+    // below (as width/height -- see AssetPatch's own doc comment) rather
+    // than sent as a separate asset:resize message with its own seq.
+    //
+    // Regression history: this used to be two separate messages under one
+    // shared per-asset seq gate (roomState.ts), and EITHER ordering was
+    // unsafe -- sending the resize first (an older design) gave it a lower
+    // seq than the patch immediately following it, so an out-of-order
+    // Lambda invocation could let the patch commit first and reject the
+    // resize as stale, permanently losing the size correction. The
+    // "obvious" fix of just swapping the order (resize after patch, so
+    // resize gets the later seq) only moved the bug: now the *patch* had
+    // the lower seq, so the *font/text change itself* could lose to its own
+    // resize correction and silently revert. Two messages sharing one seq
+    // gate with no cross-message ordering guarantee can't be made safe by
+    // choosing an order -- only combining them into one atomic write fixes
+    // it for real, which is what this does.
+    const sizePatch = entry.asset.type === "text" ? this.measureTextAutoFit(assetId) : undefined;
 
     if ("text" in patch) {
       this.sendTextPatchThrottled(assetId);
@@ -664,7 +709,7 @@ export class CanvasView {
 
     const seq = this.nextSeq();
     entry.asset = { ...entry.asset, seq };
-    this.callbacks.onAssetPatch(assetId, patch, seq);
+    this.callbacks.onAssetPatch(assetId, sizePatch ? { ...patch, ...sizePatch } : patch, seq);
   }
 
   // Keyed by assetId (not a single shared record) so throttled edits to two
@@ -720,6 +765,12 @@ export class CanvasView {
   private sendFullTextPatch(assetId: string, state: { lastSentAt: number }): void {
     const entry = this.entries.get(assetId);
     if (!entry) return;
+    // Re-measures right before sending (not just relying on whatever was
+    // last measured mid-keystroke) so the very latest content -- which may
+    // have changed again since the last measurement while this send sat in
+    // the throttle window -- is what actually determines the box size sent
+    // below.
+    if (entry.asset.type === "text") this.measureTextAutoFit(assetId);
     const seq = this.nextSeq();
     entry.asset = { ...entry.asset, seq };
     state.lastSentAt = performance.now();
@@ -728,8 +779,12 @@ export class CanvasView {
     // one seq-gated conditional write on the server (roomState.ts's
     // updateAsset), so a patch carrying only what changed would lose that
     // data permanently if it lost the seq race and got rejected as stale
-    // (message.ts's silent "stale" drop, no retry). Sending everything means
-    // a rejected/coalesced-away send is always truly redundant.
+    // (message.ts's silent "stale" drop, no retry). Sending everything --
+    // including the current width/height, folded in by fullAssetPatch --
+    // means a rejected/coalesced-away send is always truly redundant, and
+    // there's no separate asset:resize message that could itself lose a
+    // race against this one (see AssetPatch's own doc comment for why that
+    // used to be exactly the bug here).
     this.callbacks.onAssetPatch(assetId, fullAssetPatch(entry.asset), seq);
   }
 
@@ -751,23 +806,39 @@ export class CanvasView {
   // Text assets size themselves to fit their own rendered content (see
   // createElement/applyTransform's shrink-to-fit CSS) rather than being
   // manually resized -- this re-measures the already-repainted content
-  // element and syncs the stored width/height via the normal resize path,
-  // so browser-source and other collaborators' viewport-intersection checks
-  // see an accurate box even though they never run this measurement
-  // themselves.
-  private autoSizeText(assetId: string): void {
+  // element and, if it changed, applies the corrected size locally right
+  // away (so it's always reflected instantly, same as any other local
+  // edit) and returns it for the caller to fold into whatever patch it's
+  // about to send. Returns undefined when nothing changed (nothing for the
+  // caller to add) -- purely local, sends nothing over the network itself.
+  //
+  // Deliberately does NOT send its own asset:resize message (a previous
+  // design did, whether immediately or deferred to a throttled flush) --
+  // seq-guarding *which order* two separate messages for the same asset
+  // send in can't make them safe against each other, since server-side
+  // Lambda invocations for each have no ordering guarantee independent of
+  // send order. Whichever of the two got the "later" seq could still lose
+  // to the other committing first. Folding the size correction into the
+  // SAME patch/seq as whatever caused it (see callers) is what actually
+  // fixes that -- see AssetPatch's own doc comment for the full history.
+  private measureTextAutoFit(assetId: string): { width: number; height: number } | undefined {
     const entry = this.entries.get(assetId);
-    if (!entry || entry.asset.type !== "text") return;
+    if (!entry || entry.asset.type !== "text") return undefined;
     const { content, asset } = entry;
     const width = content.offsetWidth;
     const height = content.offsetHeight;
     // Epsilon guard: offsetWidth/Height are whole-pixel snapshots, so an
     // unchanged size can still round a pixel differently between renders --
-    // without this, every call would re-trigger setAssetSize -> applyTransform
-    // -> (no visual change, since text isn't sized from asset.width/height)
-    // for no reason.
-    if (Math.abs(width - asset.width) < 1 && Math.abs(height - asset.height) < 1) return;
-    this.setAssetSize(assetId, width, height);
+    // without this, every call would re-trigger applyTransform for no
+    // visual change (text isn't sized from asset.width/height).
+    if (Math.abs(width - asset.width) < 1 && Math.abs(height - asset.height) < 1) return undefined;
+
+    const w = Math.max(MIN_ASSET_SIZE, width);
+    const h = Math.max(MIN_ASSET_SIZE, height);
+    entry.asset = { ...entry.asset, width: w, height: h };
+    this.applyTransform(entry, entry.asset);
+    if (assetId === this.selectedAssetId) this.positionHandles();
+    return { width: w, height: h };
   }
 
   remove(assetId: string): void {
@@ -921,6 +992,7 @@ export class CanvasView {
     event.stopPropagation();
     const entry = this.entries.get(assetId);
     if (!entry || entry.asset.locked) return;
+    this.inlineEditingAssetId = assetId;
 
     // Edit the raw template (with any {variable} placeholders intact), not
     // the interpolated display applyTransform normally shows -- otherwise
@@ -940,8 +1012,15 @@ export class CanvasView {
 
     const onInput = () => {
       const next = content.textContent ?? "";
+      // patchAsset already re-measures/resizes internally for a text-type
+      // asset on every call (deferred while typing -- see its own doc) --
+      // a second direct autoSizeText() call here used to be harmless (its
+      // measurement was always identical to the one patchAsset had just
+      // taken, so the epsilon guard made it a no-op), but calling it
+      // undeferred risked sending a second, out-of-order resize outside the
+      // throttled flush if that assumption ever broke. Removed as dead
+      // weight rather than left as a landmine.
       if (next !== entry.asset.text) this.patchAsset(assetId, { text: next });
-      this.autoSizeText(assetId);
     };
     const stopEditing = (): void => {
       content.contentEditable = "false";
@@ -949,6 +1028,7 @@ export class CanvasView {
       content.removeEventListener("input", onInput);
       content.removeEventListener("blur", onBlur);
       content.removeEventListener("keydown", onKeyDown);
+      if (this.inlineEditingAssetId === assetId) this.inlineEditingAssetId = undefined;
     };
     const onBlur = () => {
       stopEditing();

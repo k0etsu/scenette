@@ -89,11 +89,15 @@ export class Sidebar {
     // specific listeners in renderProperties().
     this.propertiesPanel.addEventListener("focusin", (event) => {
       const target = event.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") this.focusedField = true;
+      // SELECT included (not just INPUT/TEXTAREA) -- a <select>'s dropdown
+      // stays focused for as long as it's open, so this is what lets
+      // `interacting` cover "the font-family/weight/align dropdown is
+      // currently open" too, not just text fields and sliders.
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") this.focusedField = true;
     });
     this.propertiesPanel.addEventListener("focusout", (event) => {
       const target = event.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") this.focusedField = false;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT") this.focusedField = false;
     });
     this.renderProperties();
   }
@@ -116,7 +120,14 @@ export class Sidebar {
     if (this.selectedAssetId && !this.assets.has(this.selectedAssetId)) {
       this.selectedAssetId = undefined;
     }
-    this.renderProperties();
+    // Same interacting guard as upsertAsset, for the same reason -- this is
+    // also reached by a periodic/manual full-state resync (see main.ts),
+    // which fires on a fixed timer regardless of what the user's doing.
+    // Without this, a resync landing while a dropdown was open or a slider
+    // mid-drag destroyed and recreated the properties panel out from under
+    // the user -- visibly, a font dropdown left open would just close
+    // itself every ~5s in lockstep with the resync interval.
+    if (!this.interacting) this.renderProperties();
   }
 
   upsertAsset(asset: Asset): void {

@@ -289,7 +289,13 @@ export async function updateAsset(
   if (!existing) return undefined;
 
   const nextHidden = patch.hidden ?? existing.hidden;
-  const visible = intersects(existing, viewport) && !nextHidden;
+  // width/height (text auto-fit corrections folded into this same patch --
+  // see AssetPatch's own doc comment) can change viewport intersection just
+  // as much as an actual move/resize, so this must check the patched
+  // dimensions, not the stale `existing` ones.
+  const nextWidth = patch.width ?? existing.width;
+  const nextHeight = patch.height ?? existing.height;
+  const visible = intersects({ ...existing, width: nextWidth, height: nextHeight }, viewport) && !nextHidden;
 
   const names: Record<string, string> = {};
   const values: Record<string, unknown> = {

@@ -5,6 +5,16 @@ import { Renderer } from "./render";
 const root = document.getElementById("viewport-root");
 if (!root) throw new Error("Missing #viewport-root element");
 
+// Self-heals any delta message that lost its seq race and got silently
+// dropped server-side (see roomState.ts's per-asset conditional write) -- a
+// periodic full-state re-fetch guarantees convergence within one interval
+// regardless of whether any specific asset:move/resize/update ever arrives.
+// Browser-source has no local optimistic state of its own (see Renderer),
+// so reusing the exact room:snapshot path here is safe with no additional
+// guarding, and cheap enough at this app's scale (one Lambda invocation +
+// one small DynamoDB query per tick, no room broadcast) to run this often.
+const SNAPSHOT_POLL_INTERVAL_MS = 1000;
+
 async function main(): Promise<void> {
   const params = new URLSearchParams(window.location.search);
   const roomId = params.get("roomId");
@@ -26,6 +36,7 @@ async function main(): Promise<void> {
   }
 
   const renderer = new Renderer(root!, assetsDomain);
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
 
   const connection = new ResilientConnection({
     wsUrl,
@@ -35,6 +46,17 @@ async function main(): Promise<void> {
       // connection has no server-side memory of this client, so always
       // re-request the current state rather than assume anything survived.
       connection.send({ action: "room:snapshot:request", roomId });
+
+      // (Re-)armed here rather than started once outside onOpen -- onOpen
+      // already fires on every reconnect (proactive swap or drop/retry), so
+      // arming from inside it guarantees no two overlapping intervals can
+      // ever run across a reconnect, and the first poll after a fresh
+      // connection always waits a full interval rather than piling up right
+      // behind the immediate request just above.
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(() => {
+        connection.send({ action: "room:snapshot:request", roomId });
+      }, SNAPSHOT_POLL_INTERVAL_MS);
     },
     onMessage: (message: ServerMessage) => {
       switch (message.type) {

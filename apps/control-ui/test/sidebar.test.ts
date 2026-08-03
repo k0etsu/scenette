@@ -205,6 +205,56 @@ describe("mid-typing rebuild guard (focus, not just mousedown/mouseup)", () => {
     expect(textAreaAfter).not.toBe(textAreaBefore);
     expect(textAreaAfter.value).toBe("hello world");
   });
+
+  it("does not close an open <select> dropdown (e.g. font-family) while it has focus", () => {
+    // Regression: focus tracking only checked INPUT/TEXTAREA, not SELECT,
+    // so a <select>'s own focus (held for as long as its dropdown is open)
+    // was never recognized as "interacting" -- combined with setAssets not
+    // even checking the guard at all (see below), a periodic full-state
+    // resync landing while a font-family dropdown was open rebuilt the
+    // panel out from under it, visibly closing the dropdown.
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello", fontFamily: "Roboto" })]);
+    sidebar.setSelected("a1");
+
+    const selectBefore = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    selectBefore.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+
+    sidebar.upsertAsset(makeAsset({ type: "text", text: "hello", fontFamily: "Roboto Mono" }));
+
+    const selectAfter = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    expect(selectAfter).toBe(selectBefore);
+  });
+
+  it("setAssets (periodic/manual full-state resync) also respects the interacting guard, not just upsertAsset", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello", fontFamily: "Roboto" })]);
+    sidebar.setSelected("a1");
+
+    const selectBefore = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    selectBefore.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello", fontFamily: "Roboto Mono" })]);
+
+    const selectAfter = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    expect(selectAfter).toBe(selectBefore);
+  });
+
+  it("setAssets resumes rebuilding once the field loses focus", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello", fontFamily: "Roboto" })]);
+    sidebar.setSelected("a1");
+
+    const selectBefore = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    selectBefore.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    selectBefore.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+
+    sidebar.setAssets([makeAsset({ type: "text", text: "hello", fontFamily: "Roboto Mono" })]);
+
+    const selectAfter = propertiesPanel.querySelector('[data-role="font-family"]') as HTMLSelectElement;
+    expect(selectAfter).not.toBe(selectBefore);
+    expect(selectAfter.value).toBe("Roboto Mono");
+  });
 });
 
 describe("realtime text/name patching", () => {
