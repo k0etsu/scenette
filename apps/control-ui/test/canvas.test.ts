@@ -120,6 +120,13 @@ describe("dispose", () => {
     expect(container.children).toHaveLength(0);
   });
 
+  it("removes the media-controls widget too -- it lives outside `container`, so wiping container's innerHTML alone wouldn't reach it", () => {
+    const { canvas, container } = setup();
+    expect(container.parentElement!.querySelector('[data-role="media-controls"]')).not.toBeNull();
+    canvas.dispose();
+    expect(container.parentElement!.querySelector('[data-role="media-controls"]')).toBeNull();
+  });
+
   it("a second CanvasView constructed after dispose doesn't double-fire on window events", () => {
     const { canvas: first, callbacks: firstCallbacks, container } = setup();
     first.dispose();
@@ -628,7 +635,9 @@ describe("media-controls widget", () => {
   afterEach(() => vi.restoreAllMocks());
 
   function widget(container: HTMLElement) {
-    const root = container.querySelector('[data-role="media-controls"]') as HTMLElement;
+    // Lives as a sibling of `container` now, not a descendant -- see
+    // CanvasView's constructor doc comment on mediaControls for why.
+    const root = container.parentElement!.querySelector('[data-role="media-controls"]') as HTMLElement;
     return {
       root,
       loop: root.querySelector('[data-role="mc-loop"]') as HTMLButtonElement,
@@ -645,6 +654,21 @@ describe("media-controls widget", () => {
     const { canvas, container } = setup();
     canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
     expect(widget(container).root.style.display).toBe("none");
+  });
+
+  it("lives outside `container`, at a z-index above the stream-preview boundary strips (z-index 20), so they can never invert it", () => {
+    // Regression: as a child of `world` (inside `container`), no z-index
+    // set on the widget itself could ever outrank a sibling of `container`
+    // -- #stream-preview-border's always-on-top boundary strips, one
+    // stacking-context level up -- so a strip crossing the widget's screen
+    // position visibly inverted whatever of it was underneath.
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    canvas.selectAsset("v1");
+    const root = widget(container).root;
+    expect(container.contains(root)).toBe(false);
+    expect(container.parentElement!.contains(root)).toBe(true);
+    expect(Number(root.style.zIndex)).toBeGreaterThan(20);
   });
 
   it("is hidden for a selected asset type that has no playback (e.g. image)", () => {

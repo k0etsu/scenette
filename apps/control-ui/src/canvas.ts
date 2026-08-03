@@ -254,16 +254,27 @@ export class CanvasView {
     // mirrors the sidebar's own Playback section (same underlying
     // patchAsset/stopAsset calls, so both surfaces always agree on state;
     // see updateMediaControls) but stays visible right next to the asset
-    // itself rather than requiring a glance over at the sidebar. A plain
-    // child of `world` (like the resize handles above) so it pans/zooms
-    // along with the canvas, counter-scaled in updateMediaControls to stay
-    // a constant on-screen size regardless of zoom.
+    // itself rather than requiring a glance over at the sidebar.
+    //
+    // Deliberately NOT a child of `world` (unlike the resize handles above)
+    // -- #stream-preview-border's always-on-top viewport boundary strips
+    // (z-index 20, backdrop-filter: invert()) are a *sibling* of this
+    // container in the DOM (see index.html), one stacking-context level up,
+    // so no z-index set in here could ever render above them: a strip that
+    // happened to cross the widget inverted whatever of it was underneath.
+    // Appending to the container's own parent instead puts this at that
+    // same sibling level, where a z-index above 20 actually wins. That
+    // means it no longer inherits `world`'s pan/zoom CSS transform for
+    // free, so its position is now recomputed manually in screen space via
+    // worldToScreen() in updateMediaControls -- also the reason it no
+    // longer needs the handles' scale(1/zoom) counter-scaling trick;
+    // screen-space coordinates are already zoom-invariant.
     this.mediaControls = document.createElement("div");
     this.mediaControls.dataset.role = "media-controls";
     this.mediaControls.className = "media-controls-widget";
     this.mediaControls.style.position = "absolute";
     this.mediaControls.style.display = "none";
-    this.mediaControls.style.zIndex = "1000";
+    this.mediaControls.style.zIndex = "30";
     this.mediaControls.innerHTML = `
       <div class="media-controls-row">
         <button type="button" data-role="mc-loop" class="sidebar-flip-button">loop</button>
@@ -277,7 +288,7 @@ export class CanvasView {
         <input type="range" data-role="mc-volume" min="0" max="100" />
       </div>
     `;
-    this.world.appendChild(this.mediaControls);
+    this.container.parentElement!.appendChild(this.mediaControls);
 
     const mc = <T extends HTMLElement>(role: string) => this.mediaControls.querySelector<T>(`[data-role="${role}"]`)!;
     this.mediaControlsLoopButton = mc("mc-loop");
@@ -1081,6 +1092,11 @@ export class CanvasView {
     this.container.removeEventListener("contextmenu", this.handleContainerContextMenu);
     this.container.removeEventListener("wheel", this.handleContainerWheel);
     this.container.innerHTML = "";
+    // Not inside `container` (see the constructor's doc comment on
+    // mediaControls for why), so wiping container's innerHTML above doesn't
+    // reach it -- without this a room switch would leave the previous
+    // CanvasView's widget behind, orphaned in the DOM.
+    this.mediaControls.remove();
   }
 
   private onAssetMouseDown(event: MouseEvent, assetId: string): void {
@@ -1250,6 +1266,13 @@ export class CanvasView {
     return { x: (screenX - this.pan.x) / this.zoom, y: (screenY - this.pan.y) / this.zoom };
   }
 
+  // Inverse of screenToWorld -- see updateMediaControls's own doc comment
+  // for why the media-controls widget needs this instead of just inheriting
+  // `world`'s CSS transform like the corner handles do.
+  private worldToScreen(worldX: number, worldY: number): { x: number; y: number } {
+    return { x: worldX * this.zoom + this.pan.x, y: worldY * this.zoom + this.pan.y };
+  }
+
   private refreshSelection(): void {
     for (const entry of this.entries.values()) {
       entry.el.style.outline = entry.asset.assetId === this.selectedAssetId ? "2px solid #4da3ff" : "none";
@@ -1330,13 +1353,17 @@ export class CanvasView {
     // Centered above the asset's own (unrotated) top edge -- simpler than
     // the corner handles' rotation-aware math above, and reads fine for a
     // small control strip that doesn't need to visually track rotation the
-    // way corner-drag handles do.
-    const left = asset.x + asset.width / 2;
-    const top = asset.y;
-    this.mediaControls.style.left = `${left}px`;
-    this.mediaControls.style.top = `${top}px`;
-    this.mediaControls.style.transform = `translate(-50%, calc(-100% - ${8 / this.zoom}px)) scale(${1 / this.zoom})`;
-    this.mediaControls.style.transformOrigin = "bottom center";
+    // way corner-drag handles do. In screen space (via worldToScreen), not
+    // world space -- this widget lives outside `world` now (see the
+    // constructor's doc comment for why), so it no longer inherits the
+    // pan/zoom CSS transform for free and has to account for it here
+    // instead. That also means the fixed 8px margin below doesn't need
+    // dividing by zoom the way the corner handles' scale(1/zoom) trick
+    // needed -- screen pixels are already the right unit.
+    const anchor = this.worldToScreen(asset.x + asset.width / 2, asset.y);
+    this.mediaControls.style.left = `${anchor.x}px`;
+    this.mediaControls.style.top = `${anchor.y}px`;
+    this.mediaControls.style.transform = "translate(-50%, calc(-100% - 8px))";
   }
 
   private applyWorldTransform(suppressCallback = false): void {
