@@ -1,13 +1,19 @@
 name: Deploy (dev)
 
-# Deploys the Scenette-dev stack on every push to a non-main branch (and on
-# PRs from within this repo). The IAM role's OIDC trust policy is scoped to
-# this repo's (immutable-ID) subject claim, so a forked PR's OIDC token
-# (which carries the fork's own repo claim) cannot assume this role — no
-# secrets needed to keep forks out, the trust policy itself does it.
+# Deploys the Scenette-dev stack. Auto-deploys ONLY the shared `dev`
+# integration branch -- feature branches must be deployed deliberately via the
+# Actions "Run workflow" button (workflow_dispatch), so an unfinished feature
+# push can never silently overwrite the shared dev environment (which is
+# exactly how an in-progress cookie/CORS migration once broke dev login).
+#
+# The IAM role's OIDC trust policy is scoped to this repo's (immutable-ID)
+# subject claim, so a forked PR's OIDC token (which carries the fork's own
+# repo claim) cannot assume this role — no secrets needed to keep forks out,
+# the trust policy itself does it.
 on:
   push:
-    branches-ignore: [main]
+    branches: [dev]
+  workflow_dispatch:
 
 jobs:
   deploy:
