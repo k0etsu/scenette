@@ -70,6 +70,42 @@ describe("DynamoDB GSIs the accounts routes depend on", () => {
   });
 });
 
+describe("durability & abuse hardening", () => {
+  it("enables point-in-time recovery on durable tables in prod", () => {
+    for (const name of ["accounts", "memberships", "rooms", "invites"]) {
+      prodTemplate.hasResourceProperties("AWS::DynamoDB::Table", {
+        TableName: `scenette-prod-${name}`,
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      });
+    }
+  });
+
+  it("leaves point-in-time recovery off in dev (throwaway, cost-saving)", () => {
+    devTemplate.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "scenette-dev-accounts",
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: false },
+    });
+  });
+
+  it("gives the invites table a ttl so expired links are swept", () => {
+    devTemplate.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "scenette-dev-invites",
+      TimeToLiveSpecification: { AttributeName: "ttl", Enabled: true },
+    });
+  });
+
+  it("throttles both API stages against floods / cost amplification", () => {
+    const stages = devTemplate.findResources("AWS::ApiGatewayV2::Stage");
+    const throttled = Object.values(stages).filter(
+      (s: any) =>
+        s.Properties?.DefaultRouteSettings?.ThrottlingRateLimit === 100 &&
+        s.Properties?.DefaultRouteSettings?.ThrottlingBurstLimit === 200
+    );
+    // Both the WebSocket stage and the HTTP API's default stage.
+    expect(throttled.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe("account-deletion cascade routes/permissions", () => {
   it("registers the change-password, change-email, and delete-account routes", () => {
     devTemplate.hasResourceProperties("AWS::ApiGatewayV2::Route", {

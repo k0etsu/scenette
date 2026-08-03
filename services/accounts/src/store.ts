@@ -189,19 +189,40 @@ export async function getRoomOwner(roomId: string): Promise<string | undefined> 
   return members.find((m) => m.role === "owner")?.accountId;
 }
 
+const INVITE_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
+
 export interface Invite {
   inviteToken: string;
   roomId: string;
   createdBy: string;
   createdAt: string;
+  // A leaked-but-unredeemed invite link should not work forever. Absent on
+  // rows created before expiry existed -- those are grandfathered in as
+  // non-expiring by the redeem path.
+  expiresAt?: string;
   // Both unset until redeemed -- a pending invite has neither.
   redeemedBy?: string;
   redeemedAt?: string;
 }
 
 export async function createInvite(roomId: string, createdBy: string): Promise<Invite> {
-  const invite: Invite = { inviteToken: randomUUID(), roomId, createdBy, createdAt: new Date().toISOString() };
-  await ddb.send(new PutCommand({ TableName: INVITES_TABLE, Item: invite }));
+  const now = Date.now();
+  const invite: Invite = {
+    inviteToken: randomUUID(),
+    roomId,
+    createdBy,
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + INVITE_TTL_SECONDS * 1000).toISOString(),
+  };
+  await ddb.send(
+    new PutCommand({
+      TableName: INVITES_TABLE,
+      // ttl (epoch seconds) drives DynamoDB's automatic expiry sweep;
+      // expiresAt (ISO) is what the redeem path checks synchronously, since
+      // the sweep can lag hours behind the real expiry time.
+      Item: { ...invite, ttl: Math.floor(now / 1000) + INVITE_TTL_SECONDS },
+    })
+  );
   return invite;
 }
 

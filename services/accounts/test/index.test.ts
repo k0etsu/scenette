@@ -14,6 +14,7 @@ vi.mock("../src/store", () => ({
   deleteMembership: vi.fn(),
   getRoomOwner: vi.fn(),
   updateAccountPassword: vi.fn(),
+  deleteAllSessionsForUser: vi.fn(),
   updateAccountEmail: vi.fn(),
   createInvite: vi.fn(),
   getInvite: vi.fn(),
@@ -65,6 +66,19 @@ describe("POST /auth/register", () => {
     );
     expect(res.statusCode).toBe(400);
     expect(jsonBody(res).error).toMatch(/username/);
+  });
+
+  it("rejects a username with disallowed characters", async () => {
+    const res: any = await handler(
+      event("POST /auth/register", {
+        body: JSON.stringify({ username: "al ice<b>", email: "a@b.com", password: "password123" }),
+      }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+    expect(jsonBody(res).error).toMatch(/username/);
+    expect(store.createAccount).not.toHaveBeenCalled();
   });
 
   it("rejects a too-short password", async () => {
@@ -227,7 +241,7 @@ describe("POST /auth/change-password", () => {
     expect(store.updateAccountPassword).not.toHaveBeenCalled();
   });
 
-  it("updates the password hash/salt on success", async () => {
+  it("updates the password, revokes all sessions, and issues a fresh one on success", async () => {
     const { hashPassword } = await import("../src/passwords");
     const { hash, salt } = await hashPassword("password123");
     vi.mocked(store.getAccount).mockResolvedValue({
@@ -237,6 +251,7 @@ describe("POST /auth/change-password", () => {
       personalRoomId: "room1",
       createdAt: "t",
     });
+    vi.mocked(store.createSession).mockResolvedValue("fresh-token");
     const res: any = await handler(
       authedEvent("POST /auth/change-password", "alice", {
         body: JSON.stringify({ currentPassword: "password123", newPassword: "newpassword123" }),
@@ -246,6 +261,10 @@ describe("POST /auth/change-password", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(store.updateAccountPassword).toHaveBeenCalledWith("alice", expect.any(String), expect.any(String));
+    // Every prior session is revoked (a stolen token dies), then a new one is
+    // minted so the initiating device stays logged in.
+    expect(store.deleteAllSessionsForUser).toHaveBeenCalledWith("alice");
+    expect(jsonBody(res).sessionToken).toBe("fresh-token");
   });
 });
 
@@ -551,6 +570,24 @@ describe("POST /auth/invites/{inviteToken}/redeem", () => {
       undefined as any
     );
     expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 404 for an expired invite and does not redeem it", async () => {
+    vi.mocked(store.getInvite).mockResolvedValue({
+      inviteToken: "tok1",
+      roomId: "room1",
+      createdBy: "alice",
+      createdAt: "t",
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
+    const res: any = await handler(
+      authedEvent("POST /auth/invites/{inviteToken}/redeem", "bob", { pathParameters: { inviteToken: "tok1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(404);
+    expect(store.redeemInvite).not.toHaveBeenCalled();
+    expect(store.putMembership).not.toHaveBeenCalled();
   });
 
   it("returns 409 when the invite was already redeemed", async () => {

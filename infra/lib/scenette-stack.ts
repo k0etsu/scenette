@@ -37,6 +37,13 @@ export class ScenetteStack extends cdk.Stack {
     const { envName } = props;
     const removalPolicy =
       envName === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY;
+    // Point-in-time recovery is the safety net against an accidental or
+    // malicious bulk delete (e.g. the account-deletion cascade, or a bad
+    // deploy) -- enabled on the durable tables in prod only. Dev is
+    // throwaway, so it stays off there to avoid the extra cost.
+    const pointInTimeRecoverySpecification: dynamodb.TableProps["pointInTimeRecoverySpecification"] = {
+      pointInTimeRecoveryEnabled: envName === "prod",
+    };
 
     // ---- DynamoDB tables ----
 
@@ -56,6 +63,7 @@ export class ScenetteStack extends cdk.Stack {
       tableName: `scenette-${envName}-rooms`,
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
 
@@ -64,6 +72,7 @@ export class ScenetteStack extends cdk.Stack {
       partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
     // Listing/revoking a room's current mods (see AccountsFn's
@@ -80,6 +89,10 @@ export class ScenetteStack extends cdk.Stack {
       tableName: `scenette-${envName}-invites`,
       partitionKey: { name: "inviteToken", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      // Invites carry an expiry (see store.ts createInvite) -- the ttl sweep
+      // eventually clears leaked-but-unredeemed links from the table.
+      timeToLiveAttribute: "ttl",
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
     // Listing a room's pending invites (see AccountsFn's
@@ -100,6 +113,7 @@ export class ScenetteStack extends cdk.Stack {
       tableName: `scenette-${envName}-accounts`,
       partitionKey: { name: "username", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
 
@@ -127,6 +141,7 @@ export class ScenetteStack extends cdk.Stack {
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
 
@@ -270,6 +285,21 @@ export class ScenetteStack extends cdk.Stack {
         allowHeaders: ["*"],
       },
     });
+
+    // ---- API throttling ----
+    // Neither API is metered by default -- an unauthenticated flood ($connect,
+    // /auth/register, the anonymous browser-source snapshot poll) is a direct
+    // availability + billing-amplification attack on PAY_PER_REQUEST tables and
+    // per-invocation Lambda. Cap the default route on each stage. Applied via
+    // the underlying CfnStage since the L2 constructs don't surface it (the
+    // HttpApi uses its implicit $default stage).
+    const defaultRouteSettings: apigwv2.CfnStage.RouteSettingsProperty = {
+      throttlingRateLimit: 100,
+      throttlingBurstLimit: 200,
+    };
+    (webSocketStage.node.defaultChild as apigwv2.CfnStage).defaultRouteSettings = defaultRouteSettings;
+    const httpDefaultStage = httpApi.defaultStage?.node.defaultChild as apigwv2.CfnStage | undefined;
+    if (httpDefaultStage) httpDefaultStage.defaultRouteSettings = defaultRouteSettings;
 
     // ---- Upload URL (HTTP API) ----
 

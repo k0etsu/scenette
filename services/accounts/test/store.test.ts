@@ -238,12 +238,15 @@ describe("memberships", () => {
 });
 
 describe("invites", () => {
-  it("createInvite generates a token and stores the invite", async () => {
+  it("createInvite generates a token, an expiry, and a ttl for the sweep", async () => {
     ddbMock.on(PutCommand).resolves({});
     const invite = await createInvite("room1", "alice");
     expect(invite.roomId).toBe("room1");
     expect(invite.createdBy).toBe("alice");
     expect(typeof invite.inviteToken).toBe("string");
+    expect(Date.parse(invite.expiresAt!)).toBeGreaterThan(Date.now());
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
   });
 
   it("getInvite returns undefined for an unknown token", async () => {
