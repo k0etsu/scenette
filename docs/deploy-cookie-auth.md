@@ -20,10 +20,17 @@ transition. Follow this order.
   distributions. Expect **15–30+ min** for the first deploy and for any revert,
   not the usual ~3 min. This is normal; do not cancel (cancelling the GitHub
   Action does not stop the CloudFormation update anyway).
-- **SES is prod-owned.** The `hanzomon.co` SES domain identity is created only
-  by `Scenette-prod` (two stacks can't own the same domain identity). Dev sends
-  from `dev-noreply@hanzomon.co` using that same identity, so **prod must be
-  deployed at least once** before dev can send verification email.
+- **SES: sender identity vs. sandbox are two different things.**
+  - The DKIM'd *sender identity* is created per-env by that env's own stack
+    (prod verifies `hanzomon.co`, dev verifies `dev.hanzomon.co`) — no
+    prod-first dependency. The first deploy of an env registers the identity
+    and writes its DKIM CNAMEs into the hosted zone; SES validates them within
+    minutes.
+  - *Sandbox mode* (which restricts sending to verified **recipients**) is an
+    **account + region-level** setting, lifted once via an AWS Support request.
+    It has nothing to do with deploying any stack. Until it's lifted, add the
+    recipient addresses you want to test with as verified identities in the SES
+    console.
 - **Shared dev auto-deploy.** `deploy-dev.yml` now auto-deploys **only** the
   `dev` branch; deploy a feature branch to dev **deliberately** via the Actions
   "Run workflow" button, never by pushing the branch.
@@ -35,11 +42,10 @@ transition. Follow this order.
 2. **Make the pre-cookie CORS explicit** on `dev`/`main` so reverts stay legal:
    in `infra/lib/scenette-stack.ts`, the `corsPreflight` block with
    `allowOrigins: ["*"]` must also set `allowCredentials: false,`.
-3. **Deploy `Scenette-prod` once** (merge to `main`) to create the SES domain
-   identity + DKIM records the dev stack's email depends on.
-4. **Request SES production access** for the region (Support → SES sending
-   limits). Until granted, SES is in sandbox and only mails addresses you've
-   verified in SES — real users can't receive verification email.
+3. **Request SES production access** for the region (Support → SES sending
+   limits) — an account-level, one-time step. Until granted, SES only mails
+   recipients you've verified in the SES console (fine for testing). Not tied
+   to any deploy; each env registers its own sender identity on first deploy.
 
 ## Deploying the change
 

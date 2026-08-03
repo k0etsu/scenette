@@ -199,21 +199,29 @@ export class ScenetteStack extends cdk.Stack {
     });
 
     // ---- Email (SES) ----
-    // A single domain identity for hanzomon.co, DKIM-signed against the hosted
-    // zone. Created only in the prod stack -- both envs send from the same
-    // domain (dev just uses a dev-noreply@ From-address), and two stacks can't
-    // both own the same SES domain identity. So dev's sending depends on the
-    // prod stack having been deployed at least once. (SES accounts also start
-    // in sandbox mode -- see README's deploy notes for the production-access
-    // step needed before real recipients can receive mail.)
-    if (envName === "prod") {
-      new ses.EmailIdentity(this, "MailIdentity", {
-        identity: ses.Identity.publicHostedZone(hostedZone),
+    // Each env verifies its OWN DKIM'd SES domain identity -- prod the apex
+    // (hanzomon.co), dev a subdomain (dev.hanzomon.co) -- so neither env
+    // depends on the other having been deployed, and the From-address is
+    // always under a domain this very stack owns. The DKIM CNAMEs are written
+    // into the shared hosted zone for whichever (sub)domain this env uses.
+    //
+    // Note: this only establishes a verified *sender*. SES sandbox mode (which
+    // restricts sending to verified *recipients*) is an account+region-level
+    // setting lifted once via an AWS Support request -- unrelated to any
+    // deploy. See docs/deploy-cookie-auth.md.
+    const mailDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
+    const mailIdentity = new ses.EmailIdentity(this, "MailIdentity", {
+      identity: ses.Identity.domain(mailDomain),
+    });
+    mailIdentity.dkimRecords.forEach((record, i) => {
+      new route53.CnameRecord(this, `MailDkimRecord${i}`, {
+        zone: hostedZone,
+        recordName: record.name,
+        domainName: record.value,
       });
-    }
-    const verificationFromAddress =
-      envName === "prod" ? `noreply@${HANZOMON_ZONE_NAME}` : `dev-noreply@${HANZOMON_ZONE_NAME}`;
-    const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${HANZOMON_ZONE_NAME}`;
+    });
+    const verificationFromAddress = `noreply@${mailDomain}`;
+    const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${mailDomain}`;
 
     // ---- WebSocket API ----
 

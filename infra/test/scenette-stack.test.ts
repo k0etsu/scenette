@@ -65,11 +65,18 @@ describe("cookie-based auth", () => {
 });
 
 describe("email verification (SES)", () => {
-  // The SES domain identity is created only in the prod stack -- both envs
-  // send from the same hanzomon.co domain, and two stacks can't both own it.
-  it("creates the SES::EmailIdentity in prod only", () => {
-    expect(Object.keys(prodTemplate.findResources("AWS::SES::EmailIdentity"))).toHaveLength(1);
-    expect(devTemplate.findResources("AWS::SES::EmailIdentity")).toEqual({});
+  // Each env owns its own DKIM'd identity (prod the apex, dev a subdomain) so
+  // neither depends on the other being deployed.
+  it("creates a per-env SES::EmailIdentity for the env's own (sub)domain", () => {
+    prodTemplate.hasResourceProperties("AWS::SES::EmailIdentity", { EmailIdentity: "hanzomon.co" });
+    devTemplate.hasResourceProperties("AWS::SES::EmailIdentity", { EmailIdentity: "dev.hanzomon.co" });
+  });
+
+  it("writes DKIM CNAME records into the hosted zone for the identity", () => {
+    const cnames = Object.values(devTemplate.findResources("AWS::Route53::RecordSet")).filter(
+      (r: any) => r.Properties?.Type === "CNAME"
+    );
+    expect(cnames.length).toBeGreaterThanOrEqual(3); // SES Easy DKIM = 3 CNAMEs
   });
 
   it("creates the email-verifications DynamoDB table with a ttl", () => {
@@ -86,7 +93,7 @@ describe("email verification (SES)", () => {
     ) as any;
     const vars = accountsFn.Properties.Environment.Variables;
     expect(vars.EMAIL_VERIFICATIONS_TABLE).toBeTruthy();
-    expect(vars.VERIFICATION_FROM_ADDRESS).toBe("dev-noreply@hanzomon.co");
+    expect(vars.VERIFICATION_FROM_ADDRESS).toBe("noreply@dev.hanzomon.co");
     devTemplate.hasResourceProperties("AWS::IAM::Policy", {
       PolicyDocument: Match.objectLike({
         Statement: Match.arrayWith([
