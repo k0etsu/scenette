@@ -17,21 +17,31 @@ const SNAPSHOT_POLL_INTERVAL_MS = 1000;
 
 async function main(): Promise<void> {
   const params = new URLSearchParams(window.location.search);
-  const roomId = params.get("roomId");
-  if (!roomId) {
-    root!.textContent = "scenette browser source: missing roomId query parameter";
+  // The shareable OBS URL carries an opaque, owner-only `obs` key -- never the
+  // roomId itself -- so a mod (who knows the roomId) can't reconstruct it. We
+  // exchange it for the roomId we actually need to connect.
+  const obsKey = params.get("obs");
+  if (!obsKey) {
+    root!.textContent = "scenette browser source: missing obs query parameter";
     return;
   }
 
-  // wsUrl/assetsDomain come from the deployed infra's /config.json (baked in
-  // at deploy time, since neither exists until this stack's own WebSocket
-  // API / assets CloudFront distribution do) unless explicitly overridden
-  // via query params for local testing.
+  // wsUrl/httpApiUrl/assetsDomain come from the deployed infra's /config.json
+  // (baked in at deploy time, since none exist until this stack's own APIs /
+  // assets CloudFront distribution do) unless explicitly overridden via query
+  // params for local testing.
   const config = await fetchConfig();
   const wsUrl = params.get("wsUrl") ?? config?.wsUrl;
+  const httpApiUrl = params.get("httpApiUrl") ?? config?.httpApiUrl;
   const assetsDomain = params.get("assetsDomain") ?? config?.assetsDomain;
-  if (!wsUrl || !assetsDomain) {
-    root!.textContent = "scenette browser source: missing wsUrl/assetsDomain (no query param and /config.json unavailable)";
+  if (!wsUrl || !httpApiUrl || !assetsDomain) {
+    root!.textContent = "scenette browser source: missing wsUrl/httpApiUrl/assetsDomain (no query param and /config.json unavailable)";
+    return;
+  }
+
+  const roomId = await resolveObsKey(httpApiUrl, obsKey);
+  if (!roomId) {
+    root!.textContent = "scenette browser source: this browser source URL is invalid or has been revoked";
     return;
   }
 
@@ -141,11 +151,24 @@ async function main(): Promise<void> {
   connection.start();
 }
 
-async function fetchConfig(): Promise<{ wsUrl?: string; assetsDomain?: string } | undefined> {
+async function fetchConfig(): Promise<{ wsUrl?: string; httpApiUrl?: string; assetsDomain?: string } | undefined> {
   try {
     const res = await fetch("/config.json");
     if (!res.ok) return undefined;
     return await res.json();
+  } catch {
+    return undefined;
+  }
+}
+
+// Exchanges the opaque obs key for the roomId to connect with. Returns
+// undefined for an unknown/revoked key.
+async function resolveObsKey(httpApiUrl: string, obsKey: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${httpApiUrl}/rooms/resolve?obs=${encodeURIComponent(obsKey)}`);
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { roomId?: string };
+    return data.roomId;
   } catch {
     return undefined;
   }

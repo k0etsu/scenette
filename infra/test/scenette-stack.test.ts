@@ -37,13 +37,30 @@ describe("HTTP API CORS", () => {
     });
   });
 
-  it("uses credentialed CORS pinned to the control-ui origin (not '*')", () => {
+  it("uses credentialed CORS pinned to exact origins (not '*'), incl. browser-source", () => {
     devTemplate.hasResourceProperties("AWS::ApiGatewayV2::Api", {
       CorsConfiguration: Match.objectLike({
         AllowCredentials: true,
-        AllowOrigins: ["https://dev.hanzomon.co"],
+        AllowOrigins: Match.arrayWith(["https://dev.hanzomon.co", "https://dev-obs.hanzomon.co"]),
       }),
     });
+  });
+});
+
+describe("browser-source URL obfuscation", () => {
+  it("gives the rooms table a byObsKey GSI to resolve the opaque key", () => {
+    devTemplate.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "scenette-dev-rooms",
+      GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({ IndexName: "byObsKey" })]),
+    });
+  });
+
+  it("registers the owner, obs-url, and public resolve routes", () => {
+    const routes = devTemplate.findResources("AWS::ApiGatewayV2::Route");
+    const routeKeys = Object.values(routes).map((r: any) => r.Properties?.RouteKey);
+    expect(routeKeys).toContain("GET /auth/rooms/{roomId}/owner");
+    expect(routeKeys).toContain("GET /auth/rooms/{roomId}/obs-url");
+    expect(routeKeys).toContain("GET /rooms/resolve");
   });
 });
 

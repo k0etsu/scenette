@@ -68,6 +68,13 @@ export class ScenetteStack extends cdk.Stack {
       pointInTimeRecoverySpecification,
       removalPolicy,
     });
+    // Resolve the opaque browser-source key back to its roomId (see AccountsFn's
+    // GET /rooms/resolve). Sparse -- only rooms that have had an obsKey minted
+    // appear in it.
+    roomsTable.addGlobalSecondaryIndex({
+      indexName: "byObsKey",
+      partitionKey: { name: "obsKey", type: dynamodb.AttributeType.STRING },
+    });
 
     const membershipsTable = new dynamodb.Table(this, "MembershipsTable", {
       tableName: `scenette-${envName}-memberships`,
@@ -320,9 +327,11 @@ export class ScenetteStack extends cdk.Stack {
       apiName: `scenette-${envName}-http`,
       corsPreflight: {
         // Cookie-based auth requires credentialed CORS, which is incompatible
-        // with a "*" origin -- so this is pinned to exactly the control-ui
-        // origin for this env.
-        allowOrigins: [`https://${controlUiDomain}`],
+        // with a "*" origin -- so this is pinned to exact origins. control-ui
+        // is the authenticated app; browser-source is listed only so its
+        // anonymous GET /rooms/resolve call (obsKey -> roomId) isn't
+        // CORS-blocked. API Gateway echoes whichever of the two matches.
+        allowOrigins: [`https://${controlUiDomain}`, `https://${browserSourceDomain}`],
         allowCredentials: true,
         // DELETE (revoke invite/member) is a non-"simple" cross-origin
         // method -- the browser always preflights it first, and without it
@@ -488,6 +497,21 @@ export class ScenetteStack extends cdk.Stack {
       integration: accountsIntegration,
     });
     httpApi.addRoutes({
+      path: "/auth/rooms/{roomId}/owner",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/rooms/{roomId}/obs-url",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/rooms/resolve",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
       path: "/auth/rooms/{roomId}/members/{username}",
       methods: [apigwv2.HttpMethod.DELETE],
       integration: accountsIntegration,
@@ -636,6 +660,7 @@ export class ScenetteStack extends cdk.Stack {
         s3deploy.Source.asset(path.join(__dirname, "../../apps/browser-source/dist")),
         s3deploy.Source.jsonData("config.json", {
           wsUrl: `wss://${wsDomain}`,
+          httpApiUrl: `https://${apiDomain}`,
           assetsDomain: assetsDistribution.distributionDomainName,
         }),
       ],

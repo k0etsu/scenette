@@ -88,6 +88,20 @@ export async function listRooms(httpApiUrl: string): Promise<RoomMembership[]> {
   return data.rooms;
 }
 
+// The owner of a room the caller is a member of -- for the room header.
+export async function getRoomOwner(httpApiUrl: string, roomId: string): Promise<string | undefined> {
+  const res = await fetch(`${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/owner`, withCredentials);
+  const data = await parseJsonOrThrow(res);
+  return data.ownerUsername;
+}
+
+// Owner-only: the opaque key used to build the browser-source URL.
+export async function getBrowserSourceKey(httpApiUrl: string, roomId: string): Promise<string> {
+  const res = await fetch(`${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/obs-url`, withCredentials);
+  const data = await parseJsonOrThrow(res);
+  return data.obsKey;
+}
+
 export interface Member {
   accountId: string;
   roomId: string;

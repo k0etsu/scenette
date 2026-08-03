@@ -9,7 +9,7 @@ import {
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
-import { randomUUID } from "crypto";
+import { randomUUID, randomBytes } from "crypto";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const s3 = new S3Client({});
@@ -292,6 +292,39 @@ export async function deleteMembership(accountId: string, roomId: string): Promi
 export async function getRoomOwner(roomId: string): Promise<string | undefined> {
   const members = await listMembers(roomId);
   return members.find((m) => m.role === "owner")?.accountId;
+}
+
+// The browser-source URL is keyed on this opaque, unguessable obsKey rather
+// than the roomId itself -- a mod (who necessarily knows the roomId from their
+// own control-ui URL) must not be able to derive or obtain the OBS URL and
+// pass someone else's room off as their own. Only the owner can mint/read it
+// (see the owner-gated route), and browser-source resolves obsKey -> roomId
+// via the byObsKey GSI. Created lazily on first request; if_not_exists keeps
+// it stable across repeated requests (and upserts the room row if the WS layer
+// hasn't lazily created it yet).
+export async function getOrCreateObsKey(roomId: string): Promise<string> {
+  const { Attributes } = await ddb.send(
+    new UpdateCommand({
+      TableName: ROOMS_TABLE,
+      Key: { roomId },
+      UpdateExpression: "SET obsKey = if_not_exists(obsKey, :new)",
+      ExpressionAttributeValues: { ":new": randomBytes(16).toString("base64url") },
+      ReturnValues: "ALL_NEW",
+    })
+  );
+  return Attributes!.obsKey as string;
+}
+
+export async function getRoomIdByObsKey(obsKey: string): Promise<string | undefined> {
+  const { Items = [] } = await ddb.send(
+    new QueryCommand({
+      TableName: ROOMS_TABLE,
+      IndexName: "byObsKey",
+      KeyConditionExpression: "obsKey = :o",
+      ExpressionAttributeValues: { ":o": obsKey },
+    })
+  );
+  return (Items[0] as { roomId?: string } | undefined)?.roomId;
 }
 
 const INVITE_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days

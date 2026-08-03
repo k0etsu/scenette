@@ -20,6 +20,8 @@ import {
   redeemInvite,
   resendVerification,
   listRooms,
+  getRoomOwner,
+  getBrowserSourceKey,
   SessionInfo,
 } from "./auth";
 
@@ -90,6 +92,13 @@ const SNAPSHOT_POLL_INTERVAL_MS = 5000;
 // have one thing to read the *current* room's state from.
 interface RoomSession {
   roomId: string;
+  // True when this is the signed-in user's own room. Gates owner-only UI
+  // (e.g. copying the browser-source URL) so a mod can't lift the OBS URL
+  // for a room that isn't theirs.
+  isOwner: boolean;
+  // Username of the room's owner, for the header ("<owner>'s room"). Resolved
+  // async for a mod-access room; the current user's own name when it's theirs.
+  ownerName: string;
   connection: ResilientConnection;
   canvas: CanvasView;
   sidebar: Sidebar;
@@ -311,7 +320,7 @@ async function main(): Promise<void> {
           paused: result.type === "video" || result.type === "audio" ? true : undefined,
         },
       });
-      statusEl!.textContent = `room: ${roomId} (${session!.username})`;
+      if (current) statusEl!.textContent = `${current.ownerName || session!.username}'s room`;
     } catch (err) {
       statusEl!.textContent = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -367,15 +376,23 @@ async function main(): Promise<void> {
   });
 
   copyBrowserSourceButton!.addEventListener("click", async () => {
-    if (!current) return;
-    const url = `${browserSourceUrl}/?roomId=${encodeURIComponent(current.roomId)}`;
+    if (!current || !current.isOwner) return;
     try {
-      await navigator.clipboard.writeText(url);
-      statusEl!.textContent = "browser source URL copied to clipboard";
+      // The URL is keyed on the room's opaque obsKey (owner-only), not its
+      // roomId -- fetched fresh here rather than embedded, so it stays
+      // owner-gated end to end.
+      const obsKey = await getBrowserSourceKey(httpApiUrl, current.roomId);
+      const url = `${browserSourceUrl}/?obs=${encodeURIComponent(obsKey)}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        statusEl!.textContent = "browser source URL copied to clipboard";
+      } catch {
+        // Clipboard API can be denied (e.g. insecure context, permissions) --
+        // fall back to showing the URL directly so it's still usable.
+        statusEl!.textContent = `copy failed, URL: ${url}`;
+      }
     } catch (err) {
-      // Clipboard API can be denied (e.g. insecure context, permissions) --
-      // fall back to showing the URL directly so it's still usable.
-      statusEl!.textContent = `copy failed, URL: ${url}`;
+      statusEl!.textContent = `couldn't get browser source URL: ${err instanceof Error ? err.message : String(err)}`;
     }
   });
 
@@ -456,17 +473,42 @@ function enterRoom(
   roomId: string,
   streamPreviewPanel: StreamPreviewPanel
 ): RoomSession {
-  statusEl!.textContent = `room: ${roomId} (${session.username})`;
-
   // An account's owned room is always exactly its own personalRoomId --
   // invite redemption only ever grants "mod" access to someone else's room
   // (see accounts/store.ts), never "owner" -- so this comparison alone is
   // enough to know ownership for every entry path (dashboard pick, deep
   // link, invite redemption) with no extra membership lookup needed.
-  streamPreviewPanel.setIsOwner(roomId === session.personalRoomId);
+  const isOwner = roomId === session.personalRoomId;
+  streamPreviewPanel.setIsOwner(isOwner);
+
+  // Copying the browser-source URL is owner-only -- it's the capability that
+  // lets someone render the room as an overlay, which a mod must not be able
+  // to lift for a room that isn't theirs.
+  copyBrowserSourceButton!.style.display = isOwner ? "" : "none";
+
+  // Header shows whose room this is. Known immediately when it's the current
+  // user's own; resolved async for a mod-access room.
+  const setRoomHeader = (owner: string) => {
+    statusEl!.textContent = `${owner}'s room`;
+  };
+  setRoomHeader(isOwner ? session.username : "…");
+  if (!isOwner) {
+    void getRoomOwner(httpApiUrl, roomId)
+      .then((owner) => {
+        if (current?.roomId === roomId && owner) {
+          current.ownerName = owner;
+          setRoomHeader(owner);
+        }
+      })
+      .catch(() => {
+        /* leave the placeholder -- not worth surfacing a header lookup failure */
+      });
+  }
 
   const room: RoomSession = {
     roomId,
+    isOwner,
+    ownerName: isOwner ? session.username : "",
     // Assigned just below -- declared here so the callbacks that close
     // over `room` (canvas, sidebar) can reference the connection/canvas
     // that will exist by the time they're actually invoked.

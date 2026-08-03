@@ -16,6 +16,8 @@ import {
   listMembers,
   deleteMembership,
   getRoomOwner,
+  getOrCreateObsKey,
+  getRoomIdByObsKey,
   updateAccountPassword,
   deleteAllSessionsForUser,
   updateAccountEmail,
@@ -332,6 +334,53 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
       const members = await listMembers(roomId);
       return json(200, { members });
+    }
+
+    // Any member (owner or mod) of the room can see whose room it is -- used
+    // for the room header ("<owner>'s room").
+    case "GET /auth/rooms/{roomId}/owner": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership) return json(403, { error: "Not a member of this room" });
+
+      return json(200, { ownerUsername: await getRoomOwner(roomId) });
+    }
+
+    // Owner-only: mints (lazily, once) and returns the room's opaque obsKey so
+    // the owner can build the browser-source URL. A mod deliberately can't
+    // reach this -- that's what stops them lifting the OBS URL for a room
+    // that isn't theirs.
+    case "GET /auth/rooms/{roomId}/obs-url": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership || membership.role !== "owner") {
+        return json(403, { error: "Only the room owner can get the browser source URL" });
+      }
+
+      return json(200, { obsKey: await getOrCreateObsKey(roomId) });
+    }
+
+    // Public (no session): browser-source, which is anonymous, exchanges the
+    // opaque obsKey it was given for the roomId it needs to connect. Having a
+    // valid obsKey is the capability -- it's 128 bits of randomness, so not
+    // guessable, and a resolved roomId grants no control (writes still require
+    // an authenticated member connection).
+    case "GET /rooms/resolve": {
+      const obsKey = event.queryStringParameters?.obs;
+      if (!obsKey) return json(400, { error: "Missing obs" });
+      const roomId = await getRoomIdByObsKey(obsKey);
+      if (!roomId) return json(404, { error: "Unknown browser source key" });
+      return json(200, { roomId });
     }
 
     case "DELETE /auth/rooms/{roomId}/members/{username}": {

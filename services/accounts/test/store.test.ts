@@ -17,6 +17,8 @@ import {
   listMembers,
   deleteMembership,
   getRoomOwner,
+  getOrCreateObsKey,
+  getRoomIdByObsKey,
   createInvite,
   getInvite,
   redeemInvite,
@@ -278,6 +280,29 @@ describe("memberships", () => {
       Items: [{ accountId: "bob", roomId: "room1", role: "mod" }],
     });
     await expect(getRoomOwner("room1")).resolves.toBeUndefined();
+  });
+});
+
+describe("browser-source obsKey", () => {
+  it("getOrCreateObsKey upserts with if_not_exists (stable across calls) and returns it", async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { roomId: "room1", obsKey: "existing-key" } });
+    const key = await getOrCreateObsKey("room1");
+    expect(key).toBe("existing-key");
+    const call = ddbMock.commandCalls(UpdateCommand)[0];
+    expect(call.args[0].input.UpdateExpression).toBe("SET obsKey = if_not_exists(obsKey, :new)");
+    expect(call.args[0].input.ReturnValues).toBe("ALL_NEW");
+  });
+
+  it("getRoomIdByObsKey resolves via the byObsKey GSI", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [{ roomId: "room1", obsKey: "k" }] });
+    await expect(getRoomIdByObsKey("k")).resolves.toBe("room1");
+    const call = ddbMock.commandCalls(QueryCommand)[0];
+    expect(call.args[0].input.IndexName).toBe("byObsKey");
+  });
+
+  it("getRoomIdByObsKey returns undefined for an unknown key", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    await expect(getRoomIdByObsKey("nope")).resolves.toBeUndefined();
   });
 });
 
