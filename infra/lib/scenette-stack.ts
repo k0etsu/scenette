@@ -261,6 +261,11 @@ export class ScenetteStack extends cdk.Stack {
         // TODO: same as the S3 bucket's CORS above — restrict to the deployed
         // control-ui origin once it's hosted somewhere with a known domain.
         allowOrigins: ["*"],
+        // allow-credentials is meaningless without cookies here, but MUST be
+        // set explicitly: API Gateway rejects allowCredentials:true combined
+        // with allowOrigins:"*", so the cookie branch cannot flip this to true
+        // (and back) unless both sides always state it. See docs/deploy-cookie-auth.md.
+        allowCredentials: false,
         // DELETE (revoke invite/member) is a non-"simple" cross-origin
         // method -- the browser always preflights it first, and without it
         // listed here that preflight fails, silently blocking every revoke
