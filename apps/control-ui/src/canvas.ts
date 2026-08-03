@@ -86,6 +86,13 @@ export interface CanvasCallbacks {
   onAssetResize: (assetId: string, x: number, y: number, width: number, height: number, seq: number) => void;
   onAssetPatch: (assetId: string, patch: AssetPatch, seq: number) => void;
   onAssetDelete: (assetId: string) => void;
+  // Fires from stopAsset() alongside (not instead of) the ordinary
+  // onAssetPatch({ paused: true }) it also triggers -- lets the caller
+  // relay an asset:stop so every other connected client/browser-source
+  // resets its own local playback position too, not just this browser's.
+  // See AssetStopMessage's protocol doc comment for why this is a
+  // separate, unpersisted broadcast rather than part of AssetPatch.
+  onAssetStop: (assetId: string) => void;
   // worldX/worldY: where a created asset should be placed. screenX/screenY:
   // viewport-relative coordinates for positioning the context menu itself.
   onContextMenu: (worldX: number, worldY: number, screenX: number, screenY: number) => void;
@@ -450,15 +457,21 @@ export class CanvasView {
 
   // Pauses (synced to every client/browser-source, same as the ordinary
   // pause button) and resets the actual local <video> element back to the
-  // start of its timeline. Audio has no real media element here to reset
-  // (see applyTransform's own note -- actual audio only ever plays for
-  // viewers via browser-source, never in this editor's own preview), so
-  // there's nothing to seek for that type; the pause half still applies.
+  // start of its timeline -- and, via onAssetStop, tells every other
+  // connected client/browser-source to reset their own local playback
+  // position too (see AssetStopMessage's protocol doc comment for why
+  // that's a separate broadcast rather than part of the paused patch).
+  // Audio has no real media element here to reset locally (see
+  // applyTransform's own note -- actual audio only ever plays for viewers
+  // via browser-source, never in this editor's own preview), so there's
+  // nothing to seek for that type on this side; the pause half still
+  // applies, and browser-source's own copy still resets via the broadcast.
   stopAsset(assetId: string): void {
     const entry = this.entries.get(assetId);
     if (!entry) return;
     this.patchAsset(assetId, { paused: true });
     if (entry.asset.type === "video") (entry.content as HTMLVideoElement).currentTime = 0;
+    this.callbacks.onAssetStop(assetId);
   }
 
   get(assetId: string): Asset | undefined {
@@ -555,6 +568,17 @@ export class CanvasView {
     if (!entry) return;
     if (seq < entry.asset.seq) return;
     this.upsert({ ...entry.asset, ...patch, visible, seq });
+  }
+
+  // asset:stopped's own effect -- see AssetStopMessage's protocol doc
+  // comment for why this is a pure ephemeral broadcast with no seq/patch
+  // of its own: playback position isn't part of Asset at all, so there's
+  // no stale-ordering concern the way move/resize/update have (a "stop"
+  // one browser thinks is old still resets to the exact same place — 0 —
+  // as a "stop" it thinks is current).
+  applyRemoteStop(assetId: string): void {
+    const entry = this.entries.get(assetId);
+    if (entry?.asset.type === "video") (entry.content as HTMLVideoElement).currentTime = 0;
   }
 
   // Programmatic counterparts to mouse drag/resize, for the sidebar's

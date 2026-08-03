@@ -75,6 +75,41 @@ describe("visibility and geometry", () => {
   });
 });
 
+describe("stop()", () => {
+  it("resets a video's currentTime to 0", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "video" }));
+    const video = root.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "currentTime", { value: 30, writable: true });
+
+    renderer.stop("a1");
+
+    expect(video.currentTime).toBe(0);
+  });
+
+  it("resets an audio asset's currentTime too -- unlike control-ui's own preview, browser-source actually plays audio", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "audio" }));
+    const audio = root.querySelector("audio") as HTMLAudioElement;
+    Object.defineProperty(audio, "currentTime", { value: 15, writable: true });
+
+    renderer.stop("a1");
+
+    expect(audio.currentTime).toBe(0);
+  });
+
+  it("does nothing for an unknown assetId", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    expect(() => renderer.stop("missing")).not.toThrow();
+  });
+
+  it("does nothing for a non-media asset type (e.g. image)", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "image" }));
+    expect(() => renderer.stop("a1")).not.toThrow();
+  });
+});
+
 describe("text interpolation", () => {
   it("renders {key} substituted with the variable's value", () => {
     const renderer = new Renderer(root, "assets.example.com");

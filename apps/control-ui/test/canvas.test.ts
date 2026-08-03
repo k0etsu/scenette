@@ -42,6 +42,7 @@ function makeCallbacks(overrides: Partial<CanvasCallbacks> = {}): CanvasCallback
     onAssetResize: vi.fn(),
     onAssetPatch: vi.fn(),
     onAssetDelete: vi.fn(),
+    onAssetStop: vi.fn(),
     onContextMenu: vi.fn(),
     onSelectionChange: vi.fn(),
     ...overrides,
@@ -722,6 +723,10 @@ describe("media-controls widget", () => {
 
     expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("v1", { paused: true }, expect.any(Number));
     expect(video.currentTime).toBe(0);
+    // Broadcasts the stop so other clients/browser-source reset their own
+    // playback position too, not just this browser's -- see
+    // CanvasCallbacks.onAssetStop's doc comment.
+    expect(callbacks.onAssetStop).toHaveBeenCalledWith("v1");
   });
 });
 
@@ -743,19 +748,46 @@ describe("stopAsset", () => {
     expect(callbacks.onAssetPatch).toHaveBeenCalledWith("v1", { paused: true }, expect.any(Number));
     expect(video.currentTime).toBe(0);
     expect(canvas.get("v1")?.paused).toBe(true);
+    expect(callbacks.onAssetStop).toHaveBeenCalledWith("v1");
   });
 
-  it("pauses an audio asset without erroring (no real media element to seek)", () => {
+  it("pauses an audio asset without erroring (no real media element to seek), and still broadcasts the stop", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "au1", type: "audio", paused: false }));
     canvas.stopAsset("au1");
     expect(callbacks.onAssetPatch).toHaveBeenCalledWith("au1", { paused: true }, expect.any(Number));
+    expect(callbacks.onAssetStop).toHaveBeenCalledWith("au1");
   });
 
   it("does nothing for an unknown assetId", () => {
     const { canvas, callbacks } = setup();
     canvas.stopAsset("missing");
     expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+    expect(callbacks.onAssetStop).not.toHaveBeenCalled();
+  });
+});
+
+describe("applyRemoteStop", () => {
+  it("resets a video's currentTime to 0", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "currentTime", { value: 30, writable: true });
+
+    canvas.applyRemoteStop("v1");
+
+    expect(video.currentTime).toBe(0);
+  });
+
+  it("does nothing for an unknown assetId", () => {
+    const { canvas } = setup();
+    expect(() => canvas.applyRemoteStop("missing")).not.toThrow();
+  });
+
+  it("does nothing for a non-video asset (e.g. audio, with no real element to seek here)", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "au1", type: "audio" }));
+    expect(() => canvas.applyRemoteStop("au1")).not.toThrow();
   });
 });
 

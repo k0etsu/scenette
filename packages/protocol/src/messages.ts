@@ -124,6 +124,19 @@ export interface AssetDeleteMessage {
   assetId: string;
 }
 
+// Deliberately not part of AssetPatch/asset:update -- playback position
+// (unlike loop/muted/volume/paused) is never persisted at all, only
+// broadcast live to whoever's currently connected. A client that connects
+// *after* a stop already inherits paused: true from the ordinary
+// asset:update that accompanies it (see control-ui's stopAsset), which is
+// all a fresh connection actually needs; there's no stale "resume from
+// here" position worth storing for a video that's sitting paused at 0.
+export interface AssetStopMessage {
+  action: "asset:stop";
+  roomId: string;
+  assetId: string;
+}
+
 // Global volume is a room-level master multiplier applied on top of each
 // asset's own volume, broadcast to every client (control-ui AND
 // browser-source) -- it's what viewers actually hear. Local volume (see
@@ -190,6 +203,7 @@ export type ClientMessage =
   | AssetResizeMessage
   | AssetUpdateMessage
   | AssetDeleteMessage
+  | AssetStopMessage
   | RoomSetGlobalVolumeMessage
   | RoomSetStreamPreviewSettingsMessage
   | VariableSetMessage
@@ -241,6 +255,7 @@ export type ServerMessage =
     }
   | { type: "asset:updated"; assetId: string; patch: AssetPatch; visible: boolean; seq: number }
   | { type: "asset:deleted"; assetId: string }
+  | { type: "asset:stopped"; assetId: string }
   | { type: "room:globalVolumeChanged"; globalVolume: number; seq: number }
   | { type: "room:streamPreviewSettingsChanged"; settings: StreamPreviewSettings; seq: number }
   | { type: "variable:updated"; variable: Variable }
@@ -374,6 +389,11 @@ export function parseClientMessage(raw: string): ClientMessage {
     case "asset:delete": {
       if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
       return { action: "asset:delete", roomId: msg.roomId, assetId: msg.assetId };
+    }
+
+    case "asset:stop": {
+      if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
+      return { action: "asset:stop", roomId: msg.roomId, assetId: msg.assetId };
     }
 
     case "room:setGlobalVolume": {

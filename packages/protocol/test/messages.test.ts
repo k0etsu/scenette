@@ -264,6 +264,20 @@ describe("parseClientMessage", () => {
     });
   });
 
+  describe("asset:stop", () => {
+    it("parses a stop message", () => {
+      expect(send({ action: "asset:stop", roomId: "room1", assetId: "a1" })).toEqual({
+        action: "asset:stop",
+        roomId: "room1",
+        assetId: "a1",
+      });
+    });
+
+    it("rejects a missing assetId", () => {
+      expect(() => send({ action: "asset:stop", roomId: "room1" })).toThrow("Missing assetId");
+    });
+  });
+
   describe("room:setGlobalVolume", () => {
     it("parses a valid message", () => {
       const msg = { action: "room:setGlobalVolume", roomId: "room1", globalVolume: 0.5, seq: 123 };

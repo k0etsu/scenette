@@ -464,6 +464,9 @@ function enterRoom(
       onAssetDelete: (assetId) => {
         room.connection.send({ action: "asset:delete", roomId, assetId });
       },
+      onAssetStop: (assetId) => {
+        room.connection.send({ action: "asset:stop", roomId, assetId });
+      },
       onContextMenu: (worldX, worldY, screenX, screenY) => {
         room.createPosition = { x: worldX, y: worldY };
         showContextMenu(screenX, screenY);
@@ -597,6 +600,9 @@ function enterRoom(
         case "asset:deleted":
           canvas.remove(message.assetId);
           sidebar.removeAsset(message.assetId);
+          break;
+        case "asset:stopped":
+          canvas.applyRemoteStop(message.assetId);
           break;
         case "room:globalVolumeChanged":
           soundPanel.setGlobalVolume(message.globalVolume, message.seq);

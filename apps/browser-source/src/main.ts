@@ -97,6 +97,9 @@ async function main(): Promise<void> {
         case "asset:deleted":
           renderer.remove(message.assetId);
           break;
+        case "asset:stopped":
+          renderer.stop(message.assetId);
+          break;
         case "room:globalVolumeChanged":
           renderer.setGlobalVolume(message.globalVolume, message.seq);
           break;
