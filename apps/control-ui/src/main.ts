@@ -274,6 +274,14 @@ async function main(): Promise<void> {
           width: result.width,
           height: result.height,
           s3Key: result.s3Key,
+          // Starts paused rather than autoplaying immediately on upload --
+          // a streamer placing a video/audio clip needs a moment to
+          // position/size it before it's actually live for viewers, and
+          // autoplaying it into an empty room (or over background audio)
+          // the instant it lands was surprising. No-op for every other
+          // asset type, which ignores `paused` entirely (no play/pause UI
+          // is ever shown for them).
+          paused: result.type === "video" || result.type === "audio" ? true : undefined,
         },
       });
       statusEl!.textContent = `room: ${roomId} (${session!.username})`;
@@ -456,6 +464,9 @@ function enterRoom(
       onAssetDelete: (assetId) => {
         room.connection.send({ action: "asset:delete", roomId, assetId });
       },
+      onAssetStop: (assetId) => {
+        room.connection.send({ action: "asset:stop", roomId, assetId });
+      },
       onContextMenu: (worldX, worldY, screenX, screenY) => {
         room.createPosition = { x: worldX, y: worldY };
         showContextMenu(screenX, screenY);
@@ -498,6 +509,10 @@ function enterRoom(
       syncSidebarFromCanvas(assetId);
     },
     onTextEditBlur: (assetId) => canvas.flushPendingTextPatch(assetId),
+    onStop: (assetId) => {
+      canvas.stopAsset(assetId);
+      syncSidebarFromCanvas(assetId);
+    },
     onMove: (assetId, x, y) => {
       canvas.setAssetPosition(assetId, x, y);
       syncSidebarFromCanvas(assetId);
@@ -585,6 +600,9 @@ function enterRoom(
         case "asset:deleted":
           canvas.remove(message.assetId);
           sidebar.removeAsset(message.assetId);
+          break;
+        case "asset:stopped":
+          canvas.applyRemoteStop(message.assetId);
           break;
         case "room:globalVolumeChanged":
           soundPanel.setGlobalVolume(message.globalVolume, message.seq);

@@ -22,6 +22,7 @@ export interface SidebarCallbacks {
   onDuplicate: (assetId: string) => void;
   onPatch: (assetId: string, patch: AssetPatch) => void;
   onTextEditBlur: (assetId: string) => void;
+  onStop: (assetId: string) => void;
   onMove: (assetId: string, x: number, y: number) => void;
   onResize: (assetId: string, width: number, height: number) => void;
   onCreateClick: () => void;
@@ -283,6 +284,7 @@ export class Sidebar {
         <div class="sidebar-header"><span>Playback</span></div>
         <div class="properties-buttons">
           <button type="button" data-role="play-pause" class="sidebar-icon-button playback-button">${asset.paused ? ICON_PLAY : ICON_PAUSE}</button>
+          <button type="button" data-role="stop" class="sidebar-flip-button">Stop</button>
           <label class="prop-checkbox"><input type="checkbox" data-role="loop" ${asset.loop ? "checked" : ""} /> Loop</label>
           <label class="prop-checkbox"><input type="checkbox" data-role="muted" ${asset.muted ? "checked" : ""} /> Mute</label>
         </div>
@@ -439,6 +441,12 @@ export class Sidebar {
         const current = this.assets.get(assetId);
         if (current) patch({ paused: !current.paused });
       });
+      // Delegates the actual pause+seek-to-0 to the canvas (main.ts wires
+      // this to CanvasView.stopAsset) rather than doing it here -- resetting
+      // the real <video> element's currentTime requires the DOM element
+      // itself, which only the canvas has a handle on; the sidebar only ever
+      // sees the plain Asset data.
+      el<HTMLButtonElement>("stop").addEventListener("click", () => this.callbacks.onStop(assetId));
       el<HTMLInputElement>("loop").addEventListener("change", (e) =>
         patch({ loop: (e.target as HTMLInputElement).checked })
       );

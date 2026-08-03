@@ -41,6 +41,7 @@ function makeCallbacks(overrides: Partial<SidebarCallbacks> = {}): SidebarCallba
     onDuplicate: vi.fn(),
     onPatch: vi.fn(),
     onTextEditBlur: vi.fn(),
+    onStop: vi.fn(),
     onMove: vi.fn(),
     onResize: vi.fn(),
     onCreateClick: vi.fn(),
@@ -338,6 +339,45 @@ describe("editable name field", () => {
     sidebar.setAssets([makeAsset({ type: "video" })]);
     sidebar.setSelected("a1");
     expect(propertiesPanel.querySelector('[data-role="name"]')).not.toBeNull();
+  });
+});
+
+describe("Playback section (video/audio)", () => {
+  it("is only shown for video/audio assets", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "image" })]);
+    sidebar.setSelected("a1");
+    expect(propertiesPanel.querySelector('[data-role="play-pause"]')).toBeNull();
+  });
+
+  it("is shown for video and audio assets", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "video" })]);
+    sidebar.setSelected("a1");
+    expect(propertiesPanel.querySelector('[data-role="play-pause"]')).not.toBeNull();
+    expect(propertiesPanel.querySelector('[data-role="stop"]')).not.toBeNull();
+  });
+
+  it("the stop button delegates to onStop (the actual pause+seek-to-0 happens in the canvas, not here)", () => {
+    const onStop = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onStop }));
+    sidebar.setAssets([makeAsset({ type: "video" })]);
+    sidebar.setSelected("a1");
+
+    (propertiesPanel.querySelector('[data-role="stop"]') as HTMLButtonElement).click();
+
+    expect(onStop).toHaveBeenCalledWith("a1");
+  });
+
+  it("play-pause toggles the current paused state", () => {
+    const onPatch = vi.fn();
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onPatch }));
+    sidebar.setAssets([makeAsset({ type: "video", paused: true })]);
+    sidebar.setSelected("a1");
+
+    (propertiesPanel.querySelector('[data-role="play-pause"]') as HTMLButtonElement).click();
+
+    expect(onPatch).toHaveBeenCalledWith("a1", { paused: false });
   });
 });
 

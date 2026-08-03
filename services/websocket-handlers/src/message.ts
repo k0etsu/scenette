@@ -236,6 +236,17 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
         break;
       }
 
+      // Pure relay, no DB write at all -- see AssetStopMessage's protocol
+      // doc comment for why playback position is never persisted, only
+      // broadcast live to whoever's connected right now.
+      case "asset:stop": {
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "asset:stopped",
+          assetId: message.assetId,
+        });
+        break;
+      }
+
       case "room:setGlobalVolume": {
         const result = await setGlobalVolume(message.roomId, message.globalVolume, message.seq);
         // "stale" = a newer update already won (see Room.globalVolumeSeq) --

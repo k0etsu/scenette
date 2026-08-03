@@ -223,6 +223,28 @@ describe("message handler -- asset:add server-verifies fileSize", () => {
   });
 });
 
+describe("message handler -- asset:stop", () => {
+  it("broadcasts asset:stopped with no DB write at all -- playback position is never persisted", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    // broadcastToRoom fans out to every connection the byRoom index returns
+    // -- a real (not empty) connections list here is what actually exercises
+    // the broadcast payload, unlike other tests in this file that only care
+    // whether a broadcast happens without crashing.
+    ddbMock.on(QueryCommand).resolves({ Items: [{ connectionId: "c2", roomId: "r1" }] });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(event({ action: "asset:stop", roomId: "r1", assetId: "v1" }), {} as any, undefined as any);
+
+    const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
+    const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
+    expect(payload).toEqual({ type: "asset:stopped", assetId: "v1" });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+  });
+});
+
 describe("message handler -- asset:delete cleans up S3", () => {
   it("deletes the S3 object when no other asset in the room shares its s3Key", async () => {
     ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });

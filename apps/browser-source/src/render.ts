@@ -148,6 +148,19 @@ export class Renderer {
     }
   }
 
+  // asset:stopped's own effect -- see AssetStopMessage's protocol doc
+  // comment for why this is a pure ephemeral broadcast rather than a
+  // persisted field: playback position isn't part of Asset at all, so
+  // there's nothing for the accompanying asset:updated (paused: true) to
+  // carry here. Both video and audio have a real element here (unlike
+  // control-ui's own canvas preview, which never plays audio locally --
+  // see canvas.ts's own stopAsset), so both actually get reset.
+  stop(assetId: string): void {
+    const entry = this.entries.get(assetId);
+    if (!entry || (entry.asset.type !== "video" && entry.asset.type !== "audio")) return;
+    (entry.el as HTMLMediaElement).currentTime = 0;
+  }
+
   private tick(): void {
     for (const entry of this.entries.values()) {
       const { rendered, asset } = entry;
