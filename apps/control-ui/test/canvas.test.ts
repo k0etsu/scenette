@@ -539,6 +539,114 @@ describe("text assets size themselves to fit their content", () => {
   });
 });
 
+describe("text asset auto-resize during active typing is deferred, not sent per keystroke (regression)", () => {
+  // Every asset:move/resize/update shares one seq-gated conditional write
+  // server-side (roomState.ts) -- an unthrottled resize sent alongside the
+  // (throttled) text content could arrive after a later-seq'd text update
+  // already committed and get rejected as stale, permanently losing that
+  // resize with no retry. The box then never actually grew to fit the
+  // final typed text for browser-source/other collaborators, even though
+  // the text itself still arrived correctly (see canvas.ts's
+  // autoSizeText/sendFullTextPatch doc comments).
+  let now = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    now = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function stubMeasuredSize(width: number, height: number): void {
+    const content = document.querySelector('[data-asset-type="text"]') as HTMLElement;
+    Object.defineProperty(content, "offsetWidth", { value: width, configurable: true });
+    Object.defineProperty(content, "offsetHeight", { value: height, configurable: true });
+  }
+
+  it("does not send a resize immediately for a keystroke within the throttle window", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" }); // leading send, t=0 -- no size change yet
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+    vi.mocked(callbacks.onAssetResize).mockClear();
+
+    now = 30;
+    stubMeasuredSize(90, 30); // grows on this keystroke
+    canvas.patchAsset("t1", { text: "hi there" }); // within the window -- deferred
+
+    // Applied locally right away...
+    expect(canvas.get("t1")).toMatchObject({ width: 90, height: 30 });
+    // ...but not sent -- still within the text throttle window.
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+  });
+
+  it("sends the deferred resize alongside the text patch once the throttle flushes", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" });
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    now = 30;
+    stubMeasuredSize(90, 30);
+    canvas.patchAsset("t1", { text: "hi there" });
+
+    vi.advanceTimersByTime(100); // past the trailing send's own window
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("t1", expect.objectContaining({ text: "hi there" }), expect.any(Number));
+    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 90, 30, expect.any(Number));
+    // The resize's seq must be strictly newer than the text patch's --
+    // sent right after it in the same flush, not before.
+    const textSeq = vi.mocked(callbacks.onAssetPatch).mock.calls[0][2];
+    const resizeSeq = vi.mocked(callbacks.onAssetResize).mock.calls[0][5];
+    expect(resizeSeq).toBeGreaterThan(textSeq);
+  });
+
+  it("flushPendingTextPatch (blur) also flushes the deferred resize immediately", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" });
+
+    now = 30;
+    stubMeasuredSize(90, 30);
+    canvas.patchAsset("t1", { text: "hi there" });
+
+    canvas.flushPendingTextPatch("t1");
+
+    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 90, 30, expect.any(Number));
+  });
+
+  it("does not send a spurious resize on flush when the measured size never actually changed", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(40, 30);
+    canvas.patchAsset("t1", { text: "hi" });
+
+    now = 30;
+    canvas.patchAsset("t1", { text: "hi!" }); // measured size still 40x30 -- unchanged
+
+    vi.advanceTimersByTime(100);
+
+    expect(callbacks.onAssetResize).not.toHaveBeenCalled();
+  });
+
+  it("a font-size change (not text) still resizes and sends immediately, unaffected by the text throttle", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "hi", width: 40, height: 30 }));
+    stubMeasuredSize(60, 45);
+
+    canvas.patchAsset("t1", { fontSize: 32 });
+
+    expect(callbacks.onAssetResize).toHaveBeenCalledWith("t1", 0, 0, 60, 45, expect.any(Number));
+  });
+});
+
 describe("volume multipliers", () => {
   it("applies asset volume * global * local to a video's actual element volume", () => {
     const { canvas } = setup();

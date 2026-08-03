@@ -654,8 +654,11 @@ export class CanvasView {
     // method is only ever invoked for *local* edits (remote/collaborator
     // changes go through applyRemoteUpdate -> upsert instead), so there's
     // no risk of every connected client redundantly re-measuring and
-    // re-broadcasting on someone else's edit.
-    if (entry.asset.type === "text") this.autoSizeText(assetId);
+    // re-broadcasting on someone else's edit. Deferred (see autoSizeText's
+    // own doc) only while actively typing -- a one-off font-size/family
+    // change isn't part of the text throttle at all, so it still resizes
+    // and sends immediately, same as ever.
+    if (entry.asset.type === "text") this.autoSizeText(assetId, { deferNetworkSend: "text" in patch });
 
     if ("text" in patch) {
       this.sendTextPatchThrottled(assetId);
@@ -731,6 +734,17 @@ export class CanvasView {
     // (message.ts's silent "stale" drop, no retry). Sending everything means
     // a rejected/coalesced-away send is always truly redundant.
     this.callbacks.onAssetPatch(assetId, fullAssetPatch(entry.asset), seq);
+
+    // Flushes any size correction autoSizeText deferred while this text was
+    // actively being typed (see its own doc comment) -- sent right after,
+    // with its own fresh (and therefore strictly newer) seq, rather than
+    // during the throttle window where it would race the text update above
+    // under the same shared per-asset seq gate.
+    if (this.pendingResizeSend.delete(assetId)) {
+      const resizeSeq = this.nextSeq();
+      entry.asset = { ...entry.asset, seq: resizeSeq };
+      this.callbacks.onAssetResize(assetId, entry.asset.x, entry.asset.y, entry.asset.width, entry.asset.height, resizeSeq);
+    }
   }
 
   // Bypasses the throttle to flush on session end (blur) -- otherwise the
@@ -755,7 +769,24 @@ export class CanvasView {
   // so browser-source and other collaborators' viewport-intersection checks
   // see an accurate box even though they never run this measurement
   // themselves.
-  private autoSizeText(assetId: string): void {
+  //
+  // deferNetworkSend: true (only ever passed while actively typing -- see
+  // patchAsset) applies the corrected size locally/optimistically same as
+  // always, but withholds the actual asset:resize send until the text
+  // throttle's own flush (see sendFullTextPatch) instead of sending one
+  // immediately per keystroke. Regression: an unthrottled resize per
+  // keystroke, sent alongside the (throttled) text content, raced it under
+  // the same shared per-asset seq gate every asset:move/resize/update
+  // shares server-side (roomState.ts) -- an in-flight resize for an
+  // earlier keystroke could arrive after a later-seq'd text update had
+  // already committed and get rejected as stale, permanently losing that
+  // resize with no retry. The box then never grew to fit the final text in
+  // browser-source/other collaborators, even though the text itself
+  // (always sent in full, not as a diff) still arrived correctly. Bundling
+  // both into the same flush removes the race the same way the text fix
+  // itself did: only the size that matters (the final one) ever actually
+  // gets sent.
+  private autoSizeText(assetId: string, opts: { deferNetworkSend?: boolean } = {}): void {
     const entry = this.entries.get(assetId);
     if (!entry || entry.asset.type !== "text") return;
     const { content, asset } = entry;
@@ -767,8 +798,22 @@ export class CanvasView {
     // -> (no visual change, since text isn't sized from asset.width/height)
     // for no reason.
     if (Math.abs(width - asset.width) < 1 && Math.abs(height - asset.height) < 1) return;
-    this.setAssetSize(assetId, width, height);
+
+    if (!opts.deferNetworkSend) {
+      this.setAssetSize(assetId, width, height);
+      return;
+    }
+    const w = Math.max(MIN_ASSET_SIZE, width);
+    const h = Math.max(MIN_ASSET_SIZE, height);
+    const seq = this.nextSeq();
+    entry.asset = { ...entry.asset, width: w, height: h, seq };
+    this.applyTransform(entry, entry.asset);
+    if (assetId === this.selectedAssetId) this.positionHandles();
+    this.pendingResizeSend.add(assetId);
   }
+
+  // See autoSizeText's deferNetworkSend doc comment.
+  private readonly pendingResizeSend = new Set<string>();
 
   remove(assetId: string): void {
     const entry = this.entries.get(assetId);
