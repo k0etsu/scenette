@@ -116,6 +116,14 @@ export class CanvasView {
   private readonly world: HTMLElement;
   private readonly viewportRect: HTMLElement;
   private readonly handles: Record<Corner, HTMLElement>;
+  private readonly mediaControls: HTMLElement;
+  private readonly mediaControlsLoopButton: HTMLButtonElement;
+  private readonly mediaControlsPlayButton: HTMLButtonElement;
+  private readonly mediaControlsPauseButton: HTMLButtonElement;
+  private readonly mediaControlsStopButton: HTMLButtonElement;
+  private readonly mediaControlsMutedCheckbox: HTMLInputElement;
+  private readonly mediaControlsVolumeSlider: HTMLInputElement;
+  private readonly mediaControlsVolumeLabel: HTMLElement;
   private viewport: Viewport = { roomId: "", x: 0, y: 0, width: 1920, height: 1080 };
 
   private pan = { x: 0, y: 0 };
@@ -234,6 +242,75 @@ export class CanvasView {
       this.world.appendChild(handle);
       this.handles[corner] = handle;
     }
+
+    // Floating playback control for the selected video/audio asset --
+    // mirrors the sidebar's own Playback section (same underlying
+    // patchAsset/stopAsset calls, so both surfaces always agree on state;
+    // see updateMediaControls) but stays visible right next to the asset
+    // itself rather than requiring a glance over at the sidebar. A plain
+    // child of `world` (like the resize handles above) so it pans/zooms
+    // along with the canvas, counter-scaled in updateMediaControls to stay
+    // a constant on-screen size regardless of zoom.
+    this.mediaControls = document.createElement("div");
+    this.mediaControls.dataset.role = "media-controls";
+    this.mediaControls.className = "media-controls-widget";
+    this.mediaControls.style.position = "absolute";
+    this.mediaControls.style.display = "none";
+    this.mediaControls.style.zIndex = "1000";
+    this.mediaControls.innerHTML = `
+      <div class="media-controls-row">
+        <button type="button" data-role="mc-loop" class="sidebar-flip-button">loop</button>
+        <button type="button" data-role="mc-play" class="sidebar-flip-button">play</button>
+        <button type="button" data-role="mc-pause" class="sidebar-flip-button">pause</button>
+        <button type="button" data-role="mc-stop" class="sidebar-flip-button">stop</button>
+      </div>
+      <div class="media-controls-row">
+        <label class="prop-checkbox"><input type="checkbox" data-role="mc-muted" /> mute</label>
+        <span data-role="mc-volume-label"></span>
+        <input type="range" data-role="mc-volume" min="0" max="100" />
+      </div>
+    `;
+    this.world.appendChild(this.mediaControls);
+
+    const mc = <T extends HTMLElement>(role: string) => this.mediaControls.querySelector<T>(`[data-role="${role}"]`)!;
+    this.mediaControlsLoopButton = mc("mc-loop");
+    this.mediaControlsPlayButton = mc("mc-play");
+    this.mediaControlsPauseButton = mc("mc-pause");
+    this.mediaControlsStopButton = mc("mc-stop");
+    this.mediaControlsMutedCheckbox = mc("mc-muted");
+    this.mediaControlsVolumeSlider = mc("mc-volume");
+    this.mediaControlsVolumeLabel = mc("mc-volume-label");
+
+    // Every handler reads the selected asset fresh from `this.entries` at
+    // click/input time rather than closing over anything captured when the
+    // widget was built (it's built exactly once, in this constructor, and
+    // then reused for whichever asset happens to be selected) -- same
+    // "fresh lookup, not a stale closure" pattern as the sidebar's own
+    // buttons.
+    this.mediaControlsLoopButton.addEventListener("click", () => {
+      const entry = this.selectedEntry();
+      if (entry) this.patchAsset(entry.asset.assetId, { loop: !entry.asset.loop });
+    });
+    this.mediaControlsPlayButton.addEventListener("click", () => {
+      const entry = this.selectedEntry();
+      if (entry) this.patchAsset(entry.asset.assetId, { paused: false });
+    });
+    this.mediaControlsPauseButton.addEventListener("click", () => {
+      const entry = this.selectedEntry();
+      if (entry) this.patchAsset(entry.asset.assetId, { paused: true });
+    });
+    this.mediaControlsStopButton.addEventListener("click", () => {
+      const entry = this.selectedEntry();
+      if (entry) this.stopAsset(entry.asset.assetId);
+    });
+    this.mediaControlsMutedCheckbox.addEventListener("change", () => {
+      const entry = this.selectedEntry();
+      if (entry) this.patchAsset(entry.asset.assetId, { muted: this.mediaControlsMutedCheckbox.checked });
+    });
+    this.mediaControlsVolumeSlider.addEventListener("input", () => {
+      const entry = this.selectedEntry();
+      if (entry) this.patchAsset(entry.asset.assetId, { volume: Number(this.mediaControlsVolumeSlider.value) / 100 });
+    });
 
     // Suppressed here: this fires at the default pan:0/zoom:1 transform,
     // before the deferred first centerOnViewport() pass (see setViewport()
@@ -367,6 +444,23 @@ export class CanvasView {
     return Math.min(1, Math.max(0, asset.volume * this.globalVolume * this.localVolume));
   }
 
+  private selectedEntry(): Entry | undefined {
+    return this.selectedAssetId ? this.entries.get(this.selectedAssetId) : undefined;
+  }
+
+  // Pauses (synced to every client/browser-source, same as the ordinary
+  // pause button) and resets the actual local <video> element back to the
+  // start of its timeline. Audio has no real media element here to reset
+  // (see applyTransform's own note -- actual audio only ever plays for
+  // viewers via browser-source, never in this editor's own preview), so
+  // there's nothing to seek for that type; the pause half still applies.
+  stopAsset(assetId: string): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    this.patchAsset(assetId, { paused: true });
+    if (entry.asset.type === "video") (entry.content as HTMLVideoElement).currentTime = 0;
+  }
+
   get(assetId: string): Asset | undefined {
     return this.entries.get(assetId)?.asset;
   }
@@ -496,7 +590,27 @@ export class CanvasView {
     // it) is ever delayed, so typing always feels instant to the person
     // doing it.
     entry.asset = { ...entry.asset, ...patch };
-    this.applyTransform(entry, entry.asset);
+
+    // Volume-only patches (the sidebar/media-controls volume slider sends
+    // one of these per "input" tick while being dragged) must never go
+    // through the full applyTransform -> syncMediaState path -- see
+    // setVolumeMultipliers's own doc comment for why: syncMediaState's
+    // play/pause branch can re-issue .play() on a video that's merely
+    // mid-buffer (media.paused transiently true while asset.paused is
+    // false), and that .play() call can be silently rejected by the
+    // browser's autoplay policy since a slider drag isn't a direct user
+    // gesture on the video element itself -- permanently desyncing the
+    // real element's actual playback from asset.paused (and therefore the
+    // play/pause button, which reads asset.paused) until paused is toggled
+    // twice more to force a retry. Volume never affects any other rendered
+    // aspect, so applyVolume alone is exactly enough here, same as
+    // setVolumeMultipliers already does for the sound panel's sliders.
+    const isVolumeOnlyVideoPatch = entry.asset.type === "video" && Object.keys(patch).length === 1 && "volume" in patch;
+    if (isVolumeOnlyVideoPatch) {
+      applyVolume(entry.content as HTMLVideoElement, this.effectiveVolume(entry.asset));
+    } else {
+      this.applyTransform(entry, entry.asset);
+    }
     if (assetId === this.selectedAssetId) this.positionHandles();
     // A font/size/weight change (from the sidebar's text-settings controls)
     // can change the rendered box's natural size just as much as an actual
@@ -1125,43 +1239,80 @@ export class CanvasView {
   // with scale(1/zoom) keeps them a constant apparent size on screen,
   // matching a typical canvas editor's resize-handle behavior.
   private positionHandles(): void {
-    const entry = this.selectedAssetId ? this.entries.get(this.selectedAssetId) : undefined;
+    const entry = this.selectedEntry();
     // Text assets size themselves to fit their own content (see
     // autoSizeText) rather than being manually resized, so they never get
     // corner handles regardless of selection/lock state.
     if (!entry || entry.asset.locked || entry.asset.type === "text") {
       for (const corner of CORNERS) this.handles[corner].style.display = "none";
+    } else {
+      const { x, y, width, height, rotation } = entry.asset;
+      // Corner offsets from the asset's center, rotated by the asset's own
+      // rotation -- otherwise the handles stay in an axis-aligned bounding
+      // box while the asset itself visibly rotates, drifting away from its
+      // actual corners instead of tracking them.
+      const cx = x + width / 2;
+      const cy = y + height / 2;
+      const rad = (rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const rotate = (dx: number, dy: number) => ({
+        x: cx + dx * cos - dy * sin,
+        y: cy + dx * sin + dy * cos,
+      });
+      const positions: Record<Corner, { x: number; y: number }> = {
+        nw: rotate(-width / 2, -height / 2),
+        ne: rotate(width / 2, -height / 2),
+        sw: rotate(-width / 2, height / 2),
+        se: rotate(width / 2, height / 2),
+      };
+      for (const corner of CORNERS) {
+        const handle = this.handles[corner];
+        const pos = positions[corner];
+        handle.style.display = "block";
+        handle.style.left = `${pos.x}px`;
+        handle.style.top = `${pos.y}px`;
+        handle.style.transform = `translate(-50%, -50%) scale(${1 / this.zoom})`;
+      }
+    }
+    // Locked only disables drag/resize, not playback -- unlike the corner
+    // handles above, this must stay visible/usable for a locked video/audio
+    // asset, so it's updated unconditionally here rather than folded into
+    // the early-return branch.
+    this.updateMediaControls(entry);
+  }
+
+  // Keeps the floating media-control widget (see the constructor) showing
+  // the selected asset's current loop/paused/muted/volume state, and
+  // positioned just above it -- called from every positionHandles() call
+  // site (upsert, patchAsset, drag/resize, selection changes, wheel zoom),
+  // so it can never drift out of sync with the sidebar, which reads from
+  // this exact same Entry.
+  private updateMediaControls(entry: Entry | undefined): void {
+    if (!entry || (entry.asset.type !== "video" && entry.asset.type !== "audio")) {
+      this.mediaControls.style.display = "none";
       return;
     }
+    const { asset } = entry;
+    this.mediaControls.style.display = "block";
+    this.mediaControlsLoopButton.classList.toggle("active", asset.loop);
+    this.mediaControlsPlayButton.classList.toggle("active", !asset.paused);
+    this.mediaControlsPauseButton.classList.toggle("active", asset.paused);
+    this.mediaControlsMutedCheckbox.checked = asset.muted;
+    const volumePercent = Math.round(asset.volume * 100);
+    this.mediaControlsVolumeSlider.value = String(volumePercent);
+    this.mediaControlsVolumeLabel.textContent = `volume: ${volumePercent}%`;
 
-    const { x, y, width, height, rotation } = entry.asset;
-    // Corner offsets from the asset's center, rotated by the asset's own
-    // rotation -- otherwise the handles stay in an axis-aligned bounding
-    // box while the asset itself visibly rotates, drifting away from its
-    // actual corners instead of tracking them.
-    const cx = x + width / 2;
-    const cy = y + height / 2;
-    const rad = (rotation * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-    const rotate = (dx: number, dy: number) => ({
-      x: cx + dx * cos - dy * sin,
-      y: cy + dx * sin + dy * cos,
-    });
-    const positions: Record<Corner, { x: number; y: number }> = {
-      nw: rotate(-width / 2, -height / 2),
-      ne: rotate(width / 2, -height / 2),
-      sw: rotate(-width / 2, height / 2),
-      se: rotate(width / 2, height / 2),
-    };
-    for (const corner of CORNERS) {
-      const handle = this.handles[corner];
-      const pos = positions[corner];
-      handle.style.display = "block";
-      handle.style.left = `${pos.x}px`;
-      handle.style.top = `${pos.y}px`;
-      handle.style.transform = `translate(-50%, -50%) scale(${1 / this.zoom})`;
-    }
+    // Centered above the asset's own (unrotated) top edge -- simpler than
+    // the corner handles' rotation-aware math above, and reads fine for a
+    // small control strip that doesn't need to visually track rotation the
+    // way corner-drag handles do.
+    const left = asset.x + asset.width / 2;
+    const top = asset.y;
+    this.mediaControls.style.left = `${left}px`;
+    this.mediaControls.style.top = `${top}px`;
+    this.mediaControls.style.transform = `translate(-50%, calc(-100% - ${8 / this.zoom}px)) scale(${1 / this.zoom})`;
+    this.mediaControls.style.transformOrigin = "bottom center";
   }
 
   private applyWorldTransform(suppressCallback = false): void {

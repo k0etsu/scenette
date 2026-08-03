@@ -399,6 +399,26 @@
         font-size: 12px;
         color: #ccc;
       }
+      .media-controls-widget {
+        background: #1e1f24;
+        border: 1px solid #454650;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 12px;
+        color: #ccc;
+        white-space: nowrap;
+      }
+      .media-controls-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .media-controls-row + .media-controls-row {
+        margin-top: 6px;
+      }
+      .media-controls-row input[type="range"] {
+        width: 100px;
+      }
       #canvas-container {
         position: relative;
         flex: 1;

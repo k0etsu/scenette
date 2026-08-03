@@ -560,6 +560,205 @@ describe("volume multipliers", () => {
   });
 });
 
+describe("patchAsset -- volume-only video patches bypass syncMediaState (regression)", () => {
+  // jsdom's HTMLMediaElement.play() returns undefined, not a real Promise --
+  // syncMediaState's .then()/.catch() chain on it throws unless stubbed.
+  // Stubbed on the prototype (not the individual video element) since
+  // upsert() with paused: false already triggers a real play() attempt
+  // before there's any element instance to spy on yet.
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  // jsdom's HTMLMediaElement never actually plays, so a video created with
+  // paused: false already starts life with the real element's .paused
+  // permanently stuck at jsdom's default (true) -- exactly the same
+  // asset.paused/media.paused disagreement the real bug depends on (there
+  // it's caused by momentary buffering instead), letting these tests tell
+  // "did this patch touch play/pause at all" apart from "did it actually
+  // succeed at reconciling them" (jsdom can never do the latter).
+  it("does not call .play()/.pause() on a volume-only patch, even though asset.paused disagrees with the element's real paused state", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", paused: false, volume: 0.5 }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    // Clears the upsert's own initial play() attempt so only the patchAsset
+    // call below counts.
+    vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+    const pauseSpy = vi.spyOn(video, "pause");
+
+    canvas.patchAsset("v1", { volume: 0.9 });
+
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+    expect(pauseSpy).not.toHaveBeenCalled();
+    expect(video.volume).toBeCloseTo(0.9, 5);
+  });
+
+  it("still goes through the normal play/pause sync for a patch that includes any other field alongside volume", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", paused: false, volume: 0.5 }));
+    vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+
+    canvas.patchAsset("v1", { volume: 0.9, muted: true });
+
+    // Confirms this is genuinely the volume-only fast path being skipped,
+    // not that .play() is simply never called at all in this setup.
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
+  });
+
+  it("a volume-only patch on a non-video asset is unaffected (no media element to fast-path around)", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "au1", type: "audio", paused: false, volume: 0.5 }));
+    canvas.patchAsset("au1", { volume: 0.9 });
+    expect(canvas.get("au1")?.volume).toBe(0.9);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("au1", { volume: 0.9 }, expect.any(Number));
+  });
+});
+
+describe("media-controls widget", () => {
+  // See the previous describe block's beforeEach for why this is needed --
+  // jsdom's HTMLMediaElement.play() isn't a real Promise, which throws
+  // inside syncMediaState's .then()/.catch() chain unless stubbed. Applied
+  // to every test in this block for simplicity, even though only some of
+  // them actually transition paused true -> false.
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function widget(container: HTMLElement) {
+    const root = container.querySelector('[data-role="media-controls"]') as HTMLElement;
+    return {
+      root,
+      loop: root.querySelector('[data-role="mc-loop"]') as HTMLButtonElement,
+      play: root.querySelector('[data-role="mc-play"]') as HTMLButtonElement,
+      pause: root.querySelector('[data-role="mc-pause"]') as HTMLButtonElement,
+      stop: root.querySelector('[data-role="mc-stop"]') as HTMLButtonElement,
+      muted: root.querySelector('[data-role="mc-muted"]') as HTMLInputElement,
+      volume: root.querySelector('[data-role="mc-volume"]') as HTMLInputElement,
+      volumeLabel: root.querySelector('[data-role="mc-volume-label"]') as HTMLElement,
+    };
+  }
+
+  it("is hidden when nothing is selected", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    expect(widget(container).root.style.display).toBe("none");
+  });
+
+  it("is hidden for a selected asset type that has no playback (e.g. image)", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "i1", type: "image" }));
+    canvas.selectAsset("i1");
+    expect(widget(container).root.style.display).toBe("none");
+  });
+
+  it("shows and reflects state for a selected video asset, and stays in sync with the sidebar's own patchAsset calls", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", loop: false, paused: true, muted: false, volume: 0.5 }));
+    canvas.selectAsset("v1");
+
+    const w = widget(container);
+    expect(w.root.style.display).toBe("block");
+    expect(w.loop.classList.contains("active")).toBe(false);
+    expect(w.play.classList.contains("active")).toBe(false);
+    expect(w.pause.classList.contains("active")).toBe(true);
+    expect(w.muted.checked).toBe(false);
+    expect(w.volume.value).toBe("50");
+    expect(w.volumeLabel.textContent).toBe("volume: 50%");
+
+    // Simulates a change made via the sidebar's own controls (which call
+    // the same canvas.patchAsset) -- the widget must pick it up too, since
+    // both surfaces read from this exact same Entry.
+    canvas.patchAsset("v1", { loop: true, muted: true, volume: 0.2 });
+    expect(w.loop.classList.contains("active")).toBe(true);
+    expect(w.muted.checked).toBe(true);
+    expect(w.volume.value).toBe("20");
+    expect(w.volumeLabel.textContent).toBe("volume: 20%");
+  });
+
+  it("hides again once the asset is deselected", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    canvas.selectAsset("v1");
+    expect(widget(container).root.style.display).toBe("block");
+    canvas.selectAsset(undefined);
+    expect(widget(container).root.style.display).toBe("none");
+  });
+
+  it("loop/play/pause/mute/volume buttons patch the selected asset", () => {
+    const { canvas, container, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", loop: false, paused: true, muted: false }));
+    canvas.selectAsset("v1");
+    const w = widget(container);
+
+    w.loop.click();
+    expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("v1", { loop: true }, expect.any(Number));
+
+    w.play.click();
+    expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("v1", { paused: false }, expect.any(Number));
+
+    w.pause.click();
+    expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("v1", { paused: true }, expect.any(Number));
+
+    w.muted.checked = true;
+    w.muted.dispatchEvent(new Event("change"));
+    expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("v1", { muted: true }, expect.any(Number));
+
+    w.volume.value = "77";
+    w.volume.dispatchEvent(new Event("input"));
+    const [, sentPatch] = vi.mocked(callbacks.onAssetPatch).mock.calls.at(-1)!;
+    expect(sentPatch).toMatchObject({ volume: 0.77 });
+  });
+
+  it("the stop button pauses and resets the video to the start of its timeline", () => {
+    const { canvas, container, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", paused: false }));
+    canvas.selectAsset("v1");
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "currentTime", { value: 42, writable: true });
+
+    widget(container).stop.click();
+
+    expect(callbacks.onAssetPatch).toHaveBeenLastCalledWith("v1", { paused: true }, expect.any(Number));
+    expect(video.currentTime).toBe(0);
+  });
+});
+
+describe("stopAsset", () => {
+  // See "media-controls widget"'s beforeEach for why this is needed.
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("pauses and resets currentTime to 0 for a video asset", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", paused: false }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "currentTime", { value: 10, writable: true });
+
+    canvas.stopAsset("v1");
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("v1", { paused: true }, expect.any(Number));
+    expect(video.currentTime).toBe(0);
+    expect(canvas.get("v1")?.paused).toBe(true);
+  });
+
+  it("pauses an audio asset without erroring (no real media element to seek)", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "au1", type: "audio", paused: false }));
+    canvas.stopAsset("au1");
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("au1", { paused: true }, expect.any(Number));
+  });
+
+  it("does nothing for an unknown assetId", () => {
+    const { canvas, callbacks } = setup();
+    canvas.stopAsset("missing");
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+  });
+});
+
 describe("double-click to edit text inline", () => {
   it("makes the text element contentEditable on double-click", () => {
     const { canvas } = setup();
