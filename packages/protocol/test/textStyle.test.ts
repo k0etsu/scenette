@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Asset } from "../src/asset";
-import { resolveTextStyle, textStyleToCss, TEXT_FONT_FAMILIES, TEXT_FONT_WEIGHTS } from "../src/textStyle";
+import { resolveTextStyle, textStyleToCss, isSafeColor, TEXT_FONT_FAMILIES, TEXT_FONT_WEIGHTS } from "../src/textStyle";
 
 function makeAsset(overrides: Partial<Asset> = {}): Asset {
   return {
@@ -106,5 +106,21 @@ describe("TEXT_FONT_FAMILIES / TEXT_FONT_WEIGHTS", () => {
 
   it("lists weights 100-900 in steps of 100", () => {
     expect(TEXT_FONT_WEIGHTS).toEqual(["100", "200", "300", "400", "500", "600", "700", "800", "900"]);
+  });
+});
+
+describe("isSafeColor", () => {
+  it("accepts hex, named, and rgb()/hsl() colours", () => {
+    for (const c of ["#fff", "#ffffff", "#ffffffff", "red", "rebeccapurple", "transparent",
+      "rgb(1, 2, 3)", "rgba(1,2,3,0.5)", "hsl(120, 50%, 50%)", "hsla(120, 50%, 50%, 0.5)"]) {
+      expect(isSafeColor(c)).toBe(true);
+    }
+  });
+
+  it("rejects anything carrying HTML/quote characters an injection needs", () => {
+    for (const c of ['"><img src=x onerror=alert(1)>', "#fff\" onmouseover=alert(1)", "red;</style>",
+      "url(javascript:alert(1))", "", "#gggggg", "expression(alert(1))"]) {
+      expect(isSafeColor(c)).toBe(false);
+    }
   });
 });

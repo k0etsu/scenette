@@ -221,6 +221,27 @@ describe("message handler -- asset:add server-verifies fileSize", () => {
 
     expect(s3Mock.commandCalls(HeadObjectCommand)).toHaveLength(0);
   });
+
+  it("rejects an s3Key that points outside the connection's own room", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    const res: any = await handler(
+      // Connection is in r1, but the key belongs to r2 -- attaching (and
+      // later being able to delete) another room's media.
+      event({ ...assetAddMessage, asset: { ...assetAddMessage.asset, s3Key: "r2/a1/photo.png" } }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(res.statusCode).toBe(200);
+    const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
+    const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
+    expect(payload).toEqual({ type: "error", message: "Invalid asset key" });
+    expect(s3Mock.commandCalls(HeadObjectCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
 });
 
 describe("message handler -- asset:stop", () => {
