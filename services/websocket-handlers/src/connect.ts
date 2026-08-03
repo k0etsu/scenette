@@ -16,9 +16,8 @@ import { broadcastToRoom } from "./connections";
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const CONNECTIONS_TABLE = process.env.CONNECTIONS_TABLE!;
 
-// TODO: once the real OAuth broker lands, validate a proper session there
-// too -- for now this only understands the lightweight username/password
-// accounts service's opaque session tokens.
+// Authentication is the accounts service's opaque session tokens -- the one
+// and only auth path.
 //
 // An anonymous browser-source connection (no token) is still allowed to
 // connect read-only, but never gets a `username` attribute -- that's what
