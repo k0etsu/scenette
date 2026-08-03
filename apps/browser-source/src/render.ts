@@ -166,19 +166,38 @@ export class Renderer {
       const { rendered, asset } = entry;
       const dx = asset.x - rendered.x;
       const dy = asset.y - rendered.y;
-      const dw = asset.width - rendered.width;
-      const dh = asset.height - rendered.height;
 
-      if (Math.abs(dx) < SNAP_EPSILON && Math.abs(dy) < SNAP_EPSILON && Math.abs(dw) < SNAP_EPSILON && Math.abs(dh) < SNAP_EPSILON) {
+      if (Math.abs(dx) < SNAP_EPSILON && Math.abs(dy) < SNAP_EPSILON) {
         rendered.x = asset.x;
         rendered.y = asset.y;
-        rendered.width = asset.width;
-        rendered.height = asset.height;
       } else {
         rendered.x += dx * SMOOTHING_FACTOR;
         rendered.y += dy * SMOOTHING_FACTOR;
-        rendered.width += dw * SMOOTHING_FACTOR;
-        rendered.height += dh * SMOOTHING_FACTOR;
+      }
+
+      // Text assets are never resized via a drag gesture (control-ui hides
+      // their corner handles entirely) -- their width/height only ever
+      // changes as a discrete auto-fit correction following a content/font
+      // edit (see control-ui's autoSizeText), not as part of a continuous
+      // stream of updates the way an actual dragged resize is. Smoothing
+      // that the same way as a drag made the box visibly lag behind the
+      // text actually being typed -- clipping mid-word/mid-line until the
+      // animation caught up, worse the bigger a single correction was.
+      // Snapping instead is correct here: there's no "motion" to smooth,
+      // just an occasional correct-size update that should just apply.
+      if (asset.type === "text") {
+        rendered.width = asset.width;
+        rendered.height = asset.height;
+      } else {
+        const dw = asset.width - rendered.width;
+        const dh = asset.height - rendered.height;
+        if (Math.abs(dw) < SNAP_EPSILON && Math.abs(dh) < SNAP_EPSILON) {
+          rendered.width = asset.width;
+          rendered.height = asset.height;
+        } else {
+          rendered.width += dw * SMOOTHING_FACTOR;
+          rendered.height += dh * SMOOTHING_FACTOR;
+        }
       }
       this.paint(entry);
     }
