@@ -507,9 +507,10 @@ function enterRoom(
   const isOwner = roomId === session.personalRoomId;
   streamPreviewPanel.setIsOwner(isOwner);
 
-  // Copying (and rotating) the browser-source URL is owner-only -- it's the
-  // capability that lets someone render the room as an overlay, which a mod
-  // must not be able to lift for a room that isn't theirs.
+  // Owner-only room controls. Managing access (members/invites) and the
+  // browser-source URL are all owner-gated server-side too -- hiding the
+  // buttons for a mod just avoids dead-end clicks into 403s.
+  manageAccessButton!.style.display = isOwner ? "" : "none";
   copyBrowserSourceButton!.style.display = isOwner ? "" : "none";
   regenerateBrowserSourceButton!.style.display = isOwner ? "" : "none";
 
