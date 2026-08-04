@@ -323,6 +323,15 @@ export class ScenetteStack extends cdk.Stack {
     webSocketApi.grantManageConnections(connectFn);
     webSocketApi.grantManageConnections(disconnectFn);
 
+    // The Management API (PostToConnection) must target the execute-api
+    // callback URL, never a custom domain -- added here (post-stage, via
+    // addEnvironment) since the stage doesn't exist when the functions are
+    // created. Without this, once ws.<zone> fronts the API every broadcast
+    // (and thus $connect for an authenticated member) 502s.
+    for (const fn of [connectFn, disconnectFn, messageFn]) {
+      fn.addEnvironment("WS_CALLBACK_URL", webSocketStage.callbackUrl);
+    }
+
     const httpApi = new apigwv2.HttpApi(this, "HttpApi", {
       apiName: `scenette-${envName}-http`,
       corsPreflight: {

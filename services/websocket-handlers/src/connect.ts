@@ -95,7 +95,11 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
 
   if (username) {
     const apiGw = new ApiGatewayManagementApiClient({
-      endpoint: `https://${event.requestContext.domainName}/${event.requestContext.stage}`,
+      // Must be the execute-api callback URL, NOT requestContext.domainName --
+      // once a custom domain (ws.<zone>) fronts the API, domainName is that
+      // custom domain, and PostToConnection against it fails (which surfaced
+      // as a 502 at $connect the moment this tried to broadcast presence).
+      endpoint: process.env.WS_CALLBACK_URL ?? `https://${event.requestContext.domainName}/${event.requestContext.stage}`,
     });
     // Exclude this connection itself: from API Gateway's Management API
     // perspective a connection isn't fully "active" until $connect returns,

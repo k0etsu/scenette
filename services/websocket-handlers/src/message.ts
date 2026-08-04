@@ -40,7 +40,9 @@ async function fetchFileSize(s3Key: string): Promise<number | undefined> {
 export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   const connectionId = event.requestContext.connectionId;
   const apiGw = new ApiGatewayManagementApiClient({
-    endpoint: `https://${event.requestContext.domainName}/${event.requestContext.stage}`,
+    // Execute-api callback URL, not the (possibly custom) domainName -- see
+    // connect.ts for why.
+    endpoint: process.env.WS_CALLBACK_URL ?? `https://${event.requestContext.domainName}/${event.requestContext.stage}`,
   });
 
   try {

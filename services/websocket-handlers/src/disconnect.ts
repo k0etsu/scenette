@@ -23,7 +23,9 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
 
   if (Item?.username && Item?.roomId) {
     const apiGw = new ApiGatewayManagementApiClient({
-      endpoint: `https://${event.requestContext.domainName}/${event.requestContext.stage}`,
+      // Execute-api callback URL, not the (possibly custom) domainName -- see
+      // connect.ts for why.
+      endpoint: process.env.WS_CALLBACK_URL ?? `https://${event.requestContext.domainName}/${event.requestContext.stage}`,
     });
     await broadcastToRoom(apiGw, Item.roomId, {
       type: "presence:left",
