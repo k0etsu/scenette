@@ -57,7 +57,8 @@ function authedEvent(
   opts: Partial<APIGatewayProxyEventV2> = {}
 ): APIGatewayProxyEventV2 {
   vi.mocked(store.getSessionUsername).mockResolvedValue(username);
-  return event(routeKey, { headers: { cookie: "scenette_session=faketoken" }, ...opts });
+  // HTTP API delivers the session cookie in the `cookies` array (not a header).
+  return event(routeKey, { cookies: ["scenette_session=faketoken"], ...opts });
 }
 
 function jsonBody(res: Awaited<ReturnType<typeof handler>>): any {
@@ -518,7 +519,7 @@ describe("DELETE /auth/account", () => {
 describe("POST /auth/logout", () => {
   it("deletes the presented session and clears the cookie", async () => {
     const res: any = await handler(
-      event("POST /auth/logout", { headers: { cookie: "scenette_session=tok" } }),
+      event("POST /auth/logout", { cookies: ["scenette_session=tok"] }),
       {} as any,
       undefined as any
     );

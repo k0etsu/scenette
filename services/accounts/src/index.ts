@@ -54,8 +54,10 @@ function json(statusCode: number, body: unknown, cookies?: string[]): APIGateway
   };
 }
 
-async function requireSession(headers: Record<string, string | undefined>): Promise<string | undefined> {
-  const token = readSessionToken(headers);
+async function requireSession(
+  event: Parameters<APIGatewayProxyHandlerV2>[0]
+): Promise<string | undefined> {
+  const token = readSessionToken(event);
   if (!token) return undefined;
   return getSessionUsername(token);
 }
@@ -171,7 +173,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "GET /auth/session": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const account = await getAccount(username);
@@ -186,13 +188,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "POST /auth/logout": {
-      const token = readSessionToken(event.headers ?? {});
+      const token = readSessionToken(event);
       if (token) await deleteSession(token);
       return json(200, { ok: true }, [clearSessionCookie()]);
     }
 
     case "POST /auth/change-password": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const currentPassword = body.currentPassword;
@@ -223,7 +225,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "POST /auth/change-email": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const email = body.email;
@@ -270,7 +272,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "POST /auth/resend-verification": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const account = await getAccount(username);
@@ -287,7 +289,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     // room it's only a mod on elsewhere, every session, and the account row
     // -- see cascade.ts for the full cascade.
     case "DELETE /auth/account": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const password = body.password;
@@ -304,7 +306,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "GET /auth/rooms": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const memberships = await listMemberships(username);
@@ -323,7 +325,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "GET /auth/rooms/{roomId}/members": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
@@ -341,7 +343,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     // Any member (owner or mod) of the room can see whose room it is -- used
     // for the room header ("<owner>'s room").
     case "GET /auth/rooms/{roomId}/owner": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
@@ -358,7 +360,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     // reach this -- that's what stops them lifting the OBS URL for a room
     // that isn't theirs.
     case "GET /auth/rooms/{roomId}/obs-url": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
@@ -375,7 +377,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     // Owner-only: rotate the obsKey, revoking whatever URL was in use before.
     // POST (a state change) as opposed to the idempotent GET above.
     case "POST /auth/rooms/{roomId}/obs-url": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
@@ -410,7 +412,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "DELETE /auth/rooms/{roomId}/members/{username}": {
-      const requester = await requireSession(event.headers ?? {});
+      const requester = await requireSession(event);
       if (!requester) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
@@ -436,7 +438,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "POST /auth/rooms/{roomId}/invites": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
@@ -452,7 +454,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "GET /auth/rooms/{roomId}/invites": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
@@ -468,7 +470,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "DELETE /auth/rooms/{roomId}/invites/{inviteToken}": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const roomId = event.pathParameters?.roomId;
@@ -491,7 +493,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     // register+verify+login flow beforehand -- this route only ever does
     // the room-attachment half.
     case "POST /auth/invites/{inviteToken}/redeem": {
-      const username = await requireSession(event.headers ?? {});
+      const username = await requireSession(event);
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const inviteToken = event.pathParameters?.inviteToken;

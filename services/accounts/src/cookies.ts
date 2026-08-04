@@ -25,13 +25,23 @@ export function clearSessionCookie(): string {
   return `${SESSION_COOKIE}=; ${cookieAttrs()}; Max-Age=0`;
 }
 
-export function readSessionToken(headers: Record<string, string | undefined>): string | undefined {
-  const cookieHeader = headers.cookie ?? headers.Cookie;
-  if (!cookieHeader) return undefined;
-  for (const part of cookieHeader.split(";")) {
+// Reads the session token from either delivery mechanism:
+//  - HTTP API (payload format 2.0) parses request cookies into a top-level
+//    `cookies` array and does NOT populate the Cookie header.
+//  - WebSocket $connect delivers them in the Cookie header instead.
+// Checking both keeps one helper correct for every caller.
+export function readSessionToken(source: {
+  cookies?: string[];
+  headers?: Record<string, string | undefined>;
+}): string | undefined {
+  for (const c of source.cookies ?? []) {
+    const eq = c.indexOf("=");
+    if (eq !== -1 && c.slice(0, eq).trim() === SESSION_COOKIE) return c.slice(eq + 1).trim();
+  }
+  const cookieHeader = source.headers?.cookie ?? source.headers?.Cookie;
+  for (const part of (cookieHeader ?? "").split(";")) {
     const eq = part.indexOf("=");
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() === SESSION_COOKIE) return part.slice(eq + 1).trim();
+    if (eq !== -1 && part.slice(0, eq).trim() === SESSION_COOKIE) return part.slice(eq + 1).trim();
   }
   return undefined;
 }

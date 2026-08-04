@@ -37,8 +37,10 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
   // headers rather than a query param, so the token is never exposed in a URL
   // or to page JS. $connect events carry headers at runtime even though the
   // minimal handler event type doesn't surface them.
+  // $connect delivers the cookie in the Cookie header (WebSocket APIs don't
+  // use the HTTP API's `cookies` array), so hand the helper just the headers.
   const headers = (event as { headers?: Record<string, string | undefined> }).headers ?? {};
-  const token = readSessionToken(headers);
+  const token = readSessionToken({ headers });
   const username = token ? await getSessionUsername(token) : undefined;
 
   // An authenticated connection must actually be a member (owner or mod)

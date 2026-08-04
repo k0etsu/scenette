@@ -58,7 +58,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     return { statusCode: 400, body: "Missing roomId, fileName, or contentType" };
   }
 
-  const token = readSessionToken(event.headers ?? {});
+  const token = readSessionToken(event);
   const username = token ? await getSessionUsername(token) : undefined;
   if (!username) {
     return { statusCode: 401, body: "Invalid or missing session" };
