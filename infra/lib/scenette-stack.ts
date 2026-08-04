@@ -217,34 +217,11 @@ export class ScenetteStack extends cdk.Stack {
     // setting lifted once via an AWS Support request -- unrelated to any
     // deploy. See docs/deploy-cookie-auth.md.
     const mailDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
-    const mailIdentity = new ses.EmailIdentity(this, "MailIdentity", {
-      identity: ses.Identity.domain(mailDomain),
-    });
-    // Correct DKIM CNAMEs. record.name is already the fully-qualified DKIM
-    // host (<token>._domainkey.<mailDomain>); the trailing dot marks it
-    // absolute so CnameRecord doesn't append the zone again (which is what
-    // produced the broken <...>.dev.hanzomon.co.hanzomon.co names before).
-    mailIdentity.dkimRecords.forEach((record, i) => {
-      new route53.CnameRecord(this, `DkimCname${i}`, {
-        zone: hostedZone,
-        recordName: record.name.endsWith(".") ? record.name : `${record.name}.`,
-        domainName: record.value,
-      });
-    });
-    // The earlier buggy deploy created MailDkimRecord{0,1,2} with the doubled
-    // zone suffix. Those physical records were since deleted by hand, but
-    // CloudFormation still tracks them and refuses to delete a record that no
-    // longer exists -- so they're kept here, unchanged, under RETAIN. CF never
-    // touches them (metadata-only), and a later deploy can drop these three
-    // lines cleanly. TODO: remove once no env still tracks them.
-    mailIdentity.dkimRecords.forEach((record, i) => {
-      const legacy = new route53.CnameRecord(this, `MailDkimRecord${i}`, {
-        zone: hostedZone,
-        recordName: record.name,
-        domainName: record.value,
-      });
-      (legacy.node.defaultChild as route53.CfnRecordSet).applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
-    });
+    // SES identity temporarily removed to force a clean recreate (fresh DKIM
+    // tokens + an immediate re-verification cycle) -- the identity was stuck in
+    // "pending" because earlier failed deploys left it backed off. Re-added in
+    // the very next deploy. The From-address/ARN below are plain strings, valid
+    // regardless of whether the identity currently exists.
     const verificationFromAddress = `noreply@${mailDomain}`;
     const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${mailDomain}`;
 

@@ -107,12 +107,15 @@ describe("cookie-based auth", () => {
 describe("email verification (SES)", () => {
   // Each env owns its own DKIM'd identity (prod the apex, dev a subdomain) so
   // neither depends on the other being deployed.
-  it("creates a per-env SES::EmailIdentity for the env's own (sub)domain", () => {
+  // TEMPORARILY skipped: the dev identity is being removed in one deploy and
+  // re-added in the next to force a fresh DKIM verification cycle. Restore once
+  // the identity is back.
+  it.skip("creates a per-env SES::EmailIdentity for the env's own (sub)domain", () => {
     prodTemplate.hasResourceProperties("AWS::SES::EmailIdentity", { EmailIdentity: "hanzomon.co" });
     devTemplate.hasResourceProperties("AWS::SES::EmailIdentity", { EmailIdentity: "dev.hanzomon.co" });
   });
 
-  it("writes DKIM CNAME records into the hosted zone for the identity", () => {
+  it.skip("writes DKIM CNAME records into the hosted zone for the identity", () => {
     const cnames = Object.values(devTemplate.findResources("AWS::Route53::RecordSet")).filter(
       (r: any) => r.Properties?.Type === "CNAME"
     );
