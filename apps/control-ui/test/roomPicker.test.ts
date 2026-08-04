@@ -95,6 +95,31 @@ describe("RoomPicker", () => {
     expect(root.querySelector('[data-role="resend-verification"]')).toBeNull();
   });
 
+  it("showLoading renders the dashboard shell immediately", () => {
+    const picker = new RoomPicker(root, makeCallbacks());
+    picker.showLoading();
+    expect(root.style.display).toBe("flex");
+    expect(root.querySelector(".room-picker-loading")?.textContent).toContain("Loading");
+  });
+
+  it("renders an announcement (escaped) when one is provided, and omits it otherwise", () => {
+    const withRooms: RoomMembership[] = [{ roomId: "room1", role: "owner", ownerUsername: "alice" }];
+    const p1 = new RoomPicker(root, makeCallbacks());
+    p1.pickRoom(withRooms, "room1", undefined, "Re-copy your <b>OBS</b> URL");
+    const banner = root.querySelector(".room-picker-announcement") as HTMLElement;
+    expect(banner).not.toBeNull();
+    // Escaped -- the tag is text, not a real element.
+    expect(banner.querySelector("b")).toBeNull();
+    expect(banner.textContent).toContain("Re-copy your <b>OBS</b> URL");
+
+    document.body.innerHTML = "";
+    root = document.createElement("div");
+    document.body.appendChild(root);
+    const p2 = new RoomPicker(root, makeCallbacks());
+    p2.pickRoom(withRooms, "room1", undefined, null);
+    expect(root.querySelector(".room-picker-announcement")).toBeNull();
+  });
+
   it("shows a 'Rooms you moderate' divider above mod-access rooms, but not when there are none", () => {
     const picker = new RoomPicker(root, makeCallbacks());
     picker.pickRoom(

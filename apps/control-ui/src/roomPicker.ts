@@ -31,10 +31,23 @@ export class RoomPicker {
   // Logging out is a terminal action (main.ts reloads the page) rather than
   // something this promise ever resolves with -- callbacks.onLogout() fires
   // directly instead.
+  // Renders the dashboard shell immediately (before the room list has loaded)
+  // so navigating to the dashboard feels instant rather than blanking out
+  // while the room list is fetched.
+  showLoading(): void {
+    this.root.innerHTML = `
+      <div id="room-picker">
+        <div class="room-picker-header"><h2>Choose a room</h2></div>
+        <div class="room-picker-loading">Loading…</div>
+      </div>`;
+    this.root.style.display = "flex";
+  }
+
   pickRoom(
     rooms: RoomMembership[],
     ownRoomId: string | undefined,
-    verify: VerifyPrompt = { hasEmail: false, onResend: () => {} }
+    verify: VerifyPrompt = { hasEmail: false, onResend: () => {} },
+    announcement?: string | null
   ): Promise<string> {
     return new Promise((resolve) => {
       const ownRoom = ownRoomId ? rooms.find((r) => r.roomId === ownRoomId) : undefined;
@@ -73,6 +86,13 @@ export class RoomPicker {
             modRooms.map((r) => rowHtml(r, false)).join("")
           : "";
 
+      // Admin-managed announcement (see accounts GET /announcement) -- plain
+      // text, escaped, with newlines preserved. Hidden entirely when empty.
+      const announcementHtml =
+        announcement && announcement.trim()
+          ? `<div class="room-picker-announcement">${escapeHtml(announcement.trim())}</div>`
+          : "";
+
       this.root.innerHTML = `
         <div id="room-picker">
           <div class="room-picker-header">
@@ -82,6 +102,7 @@ export class RoomPicker {
               <button type="button" data-role="logout" class="room-picker-logout">Log out</button>
             </div>
           </div>
+          ${announcementHtml}
           <div data-role="room-picker-list">${ownSectionHtml}${modSectionHtml}</div>
         </div>
       `;

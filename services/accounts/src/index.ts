@@ -19,6 +19,7 @@ import {
   getOrCreateObsKey,
   regenerateObsKey,
   getRoomIdByObsKey,
+  getAnnouncement,
   updateAccountPassword,
   deleteAllSessionsForUser,
   updateAccountEmail,
@@ -399,6 +400,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const roomId = await getRoomIdByObsKey(obsKey);
       if (!roomId) return json(404, { error: "Unknown browser source key" });
       return json(200, { roomId });
+    }
+
+    // Public: the dashboard announcement banner. Content is an admin-managed
+    // S3 object (see store.getAnnouncement), so it's changed by overwriting
+    // that file -- no redeploy.
+    case "GET /announcement": {
+      return json(200, { message: await getAnnouncement() });
     }
 
     case "DELETE /auth/rooms/{roomId}/members/{username}": {

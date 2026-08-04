@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, UpdateCommand, QueryCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import {
   getAccount,
   createAccount,
@@ -20,6 +20,7 @@ import {
   getOrCreateObsKey,
   regenerateObsKey,
   getRoomIdByObsKey,
+  getAnnouncement,
   createInvite,
   getInvite,
   redeemInvite,
@@ -313,6 +314,27 @@ describe("browser-source obsKey", () => {
   it("getRoomIdByObsKey returns undefined for an unknown key", async () => {
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     await expect(getRoomIdByObsKey("nope")).resolves.toBeUndefined();
+  });
+});
+
+describe("announcement", () => {
+  it("returns the trimmed S3 object contents when present", async () => {
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: { transformToString: () => Promise.resolve("  hello world  ") },
+    } as any);
+    await expect(getAnnouncement()).resolves.toBe("hello world");
+  });
+
+  it("returns null when the object is absent/unreadable", async () => {
+    s3Mock.on(GetObjectCommand).rejects(Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" }));
+    await expect(getAnnouncement()).resolves.toBeNull();
+  });
+
+  it("returns null for an empty/whitespace-only announcement", async () => {
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: { transformToString: () => Promise.resolve("   \n  ") },
+    } as any);
+    await expect(getAnnouncement()).resolves.toBeNull();
   });
 });
 

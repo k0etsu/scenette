@@ -436,6 +436,9 @@ export class ScenetteStack extends cdk.Stack {
     // Delete only -- the cascade never reads/writes an asset's actual
     // object content, just removes it once the room it belongs to is gone.
     assetsBucket.grantDelete(accountsFn);
+    // Plus read on the single admin-managed announcement object (see
+    // GET /announcement) -- scoped to the admin/ prefix, not room media.
+    assetsBucket.grantRead(accountsFn, "admin/*");
 
     const accountsIntegration = new apigwv2Integrations.HttpLambdaIntegration(
       "AccountsIntegration",
@@ -508,6 +511,11 @@ export class ScenetteStack extends cdk.Stack {
     });
     httpApi.addRoutes({
       path: "/rooms/resolve",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/announcement",
       methods: [apigwv2.HttpMethod.GET],
       integration: accountsIntegration,
     });

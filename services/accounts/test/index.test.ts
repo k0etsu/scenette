@@ -16,6 +16,7 @@ vi.mock("../src/store", () => ({
   getOrCreateObsKey: vi.fn(),
   regenerateObsKey: vi.fn(),
   getRoomIdByObsKey: vi.fn(),
+  getAnnouncement: vi.fn(),
   updateAccountPassword: vi.fn(),
   deleteAllSessionsForUser: vi.fn(),
   updateAccountEmail: vi.fn(),
@@ -452,6 +453,13 @@ describe("browser-source URL obfuscation + room owner", () => {
       undefined as any
     );
     expect(res.statusCode).toBe(404);
+  });
+
+  it("GET /announcement returns the current message with no session", async () => {
+    vi.mocked(store.getAnnouncement).mockResolvedValue("Re-copy your browser source URL");
+    const res: any = await handler(event("GET /announcement"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res).message).toBe("Re-copy your browser source URL");
   });
 });
 

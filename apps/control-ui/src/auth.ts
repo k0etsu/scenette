@@ -76,6 +76,20 @@ export async function logout(httpApiUrl: string): Promise<void> {
   await fetch(`${httpApiUrl}/auth/logout`, { ...withCredentials, method: "POST" }).catch(() => {});
 }
 
+// Admin-managed dashboard announcement (an S3-backed message, editable
+// without a redeploy). Returns null when there's nothing to show or the
+// fetch fails -- the dashboard simply omits the banner in that case.
+export async function fetchAnnouncement(httpApiUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${httpApiUrl}/announcement`, withCredentials);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data.message === "string" ? data.message : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface RoomMembership {
   roomId: string;
   role: "owner" | "mod";

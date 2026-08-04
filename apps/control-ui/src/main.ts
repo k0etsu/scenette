@@ -20,6 +20,7 @@ import {
   redeemInvite,
   resendVerification,
   listRooms,
+  fetchAnnouncement,
   getRoomOwner,
   getBrowserSourceKey,
   regenerateBrowserSourceKey,
@@ -195,7 +196,6 @@ async function main(): Promise<void> {
   async function showDashboardView(): Promise<void> {
     teardownCurrentRoom();
     appView!.style.display = "none";
-    const rooms = await listRooms(httpApiUrl);
     const roomPicker = new RoomPicker(roomPickerViewEl!, {
       onLogout: () => {
         void logout(httpApiUrl).then(() => {
@@ -204,6 +204,15 @@ async function main(): Promise<void> {
       },
       onSettings: () => settingsModal.open(httpApiUrl, session!.email),
     });
+    // Show the dashboard shell immediately, then fill it in -- otherwise the
+    // room view just blanks out for the duration of the listRooms fetch,
+    // which reads as a lag when clicking "Dashboard". The announcement is
+    // fetched alongside the rooms so neither blocks the other.
+    roomPicker.showLoading();
+    const [rooms, announcement] = await Promise.all([
+      listRooms(httpApiUrl),
+      fetchAnnouncement(httpApiUrl),
+    ]);
     const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId, {
       hasEmail: Boolean(session!.email),
       onResend: () => {
@@ -215,7 +224,7 @@ async function main(): Promise<void> {
             statusEl!.textContent = `Could not resend verification: ${err instanceof Error ? err.message : String(err)}`;
           });
       },
-    });
+    }, announcement);
     // The user just made an explicit choice -- push so that a later "back"
     // returns to the dashboard rather than leaving the app entirely.
     setUrl(roomId, true);

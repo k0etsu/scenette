@@ -65,6 +65,28 @@ describe("browser-source URL obfuscation", () => {
   });
 });
 
+describe("dashboard announcement", () => {
+  it("registers the public GET /announcement route", () => {
+    const routes = devTemplate.findResources("AWS::ApiGatewayV2::Route");
+    const routeKeys = Object.values(routes).map((r: any) => r.Properties?.RouteKey);
+    expect(routeKeys).toContain("GET /announcement");
+  });
+
+  it("grants read scoped to the admin/ prefix (not all assets)", () => {
+    // The prefix appears in the synthesized IAM resource ARN (an Fn::Join),
+    // whose exact shape is awkward to match structurally -- assert the scoped
+    // grant exists via the rendered template, and that s3:GetObject is granted.
+    expect(JSON.stringify(devTemplate.toJSON())).toContain("admin/*");
+    devTemplate.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({ Action: Match.arrayWith([Match.stringLikeRegexp("s3:GetObject")]) }),
+        ]),
+      }),
+    });
+  });
+});
+
 describe("cookie-based auth", () => {
   it("gives the HTTP and WS APIs custom domains under the zone (for a shared cookie)", () => {
     const domains = devTemplate.findResources("AWS::ApiGatewayV2::DomainName");

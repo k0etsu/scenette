@@ -8,7 +8,7 @@ import {
   ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { randomUUID, randomBytes } from "crypto";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -476,4 +476,19 @@ export async function deleteS3Object(s3Key: string): Promise<void> {
   await s3.send(new DeleteObjectCommand({ Bucket: ASSETS_BUCKET, Key: s3Key })).catch((err) => {
     console.error("Failed to delete S3 object during account deletion cascade", err);
   });
+}
+
+// The dashboard announcement is a single admin-managed S3 object -- an admin
+// overwrites it to change the message with no redeploy. Returns null when
+// absent/unreadable so the dashboard just shows nothing.
+const ANNOUNCEMENT_KEY = "admin/announcement.txt";
+
+export async function getAnnouncement(): Promise<string | null> {
+  try {
+    const { Body } = await s3.send(new GetObjectCommand({ Bucket: ASSETS_BUCKET, Key: ANNOUNCEMENT_KEY }));
+    const text = (await Body?.transformToString())?.trim();
+    return text ? text : null;
+  } catch {
+    return null;
+  }
 }
