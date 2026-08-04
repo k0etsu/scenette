@@ -220,21 +220,30 @@ export class ScenetteStack extends cdk.Stack {
     const mailIdentity = new ses.EmailIdentity(this, "MailIdentity", {
       identity: ses.Identity.domain(mailDomain),
     });
+    // Correct DKIM CNAMEs. record.name is already the fully-qualified DKIM
+    // host (<token>._domainkey.<mailDomain>); the trailing dot marks it
+    // absolute so CnameRecord doesn't append the zone again (which is what
+    // produced the broken <...>.dev.hanzomon.co.hanzomon.co names before).
     mailIdentity.dkimRecords.forEach((record, i) => {
-      new route53.CnameRecord(this, `MailDkimRecord${i}`, {
+      new route53.CnameRecord(this, `DkimCname${i}`, {
         zone: hostedZone,
-        // record.name is already the fully-qualified DKIM host
-        // (<token>._domainkey.<mailDomain>). CnameRecord otherwise appends the
-        // zone name again -> <token>._domainkey.dev.hanzomon.co.hanzomon.co,
-        // which never matches what SES looks for. The trailing dot marks it
-        // absolute so CDK leaves it as-is.
         recordName: record.name.endsWith(".") ? record.name : `${record.name}.`,
         domainName: record.value,
-        // Overwrite any record already at this name rather than failing the
-        // deploy on a conflict -- lets the corrected record replace a
-        // hand-created or previously-mis-generated one cleanly.
-        deleteExisting: true,
       });
+    });
+    // The earlier buggy deploy created MailDkimRecord{0,1,2} with the doubled
+    // zone suffix. Those physical records were since deleted by hand, but
+    // CloudFormation still tracks them and refuses to delete a record that no
+    // longer exists -- so they're kept here, unchanged, under RETAIN. CF never
+    // touches them (metadata-only), and a later deploy can drop these three
+    // lines cleanly. TODO: remove once no env still tracks them.
+    mailIdentity.dkimRecords.forEach((record, i) => {
+      const legacy = new route53.CnameRecord(this, `MailDkimRecord${i}`, {
+        zone: hostedZone,
+        recordName: record.name,
+        domainName: record.value,
+      });
+      (legacy.node.defaultChild as route53.CfnRecordSet).applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
     });
     const verificationFromAddress = `noreply@${mailDomain}`;
     const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${mailDomain}`;
