@@ -3,10 +3,10 @@ import { ICON_TRASH, ICON_PLUS } from "./icons";
 
 // Room access management: current members (revocable, except the owner's
 // own row) and pending single-use invite links (create/copy/revoke). Talks
-// to the accounts HTTP API directly rather than going through main.ts
-// callbacks -- everything it needs (httpApiUrl, roomId, the stored session
-// token via auth.ts) is passed into open() or pulled from localStorage,
-// and nothing here needs to coordinate with canvas/sidebar state.
+// to the accounts HTTP API directly (via auth.ts, which sends the HttpOnly
+// session cookie automatically) rather than going through main.ts callbacks
+// -- everything it needs (httpApiUrl, roomId) is passed into open(), and
+// nothing here needs to coordinate with canvas/sidebar state.
 export class AccessModal {
   private httpApiUrl = "";
   private roomId = "";

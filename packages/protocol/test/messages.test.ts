@@ -244,6 +244,33 @@ describe("parseClientMessage", () => {
       expect(result.patch.opacity).toBe(0.5);
     });
 
+    it("drops a colour value carrying an HTML/XSS payload but keeps a valid one", () => {
+      const patch = {
+        // Would break out of control-ui's value="..." attribute if it ever
+        // reached the (innerHTML) properties panel unescaped.
+        textColor: '"><img src=x onerror=alert(1)>',
+        backgroundColor: "#445566",
+      };
+      const result = send({ action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch }) as {
+        patch: Record<string, unknown>;
+      };
+      expect(result.patch).not.toHaveProperty("textColor");
+      expect(result.patch.backgroundColor).toBe("#445566");
+    });
+
+    it("accepts hex, named, and rgb()/hsl() colour values", () => {
+      const patch = {
+        textColor: "#fff",
+        backgroundColor: "rebeccapurple",
+        shadowColor: "rgba(1, 2, 3, 0.5)",
+        outlineColor: "hsl(120, 50%, 50%)",
+      };
+      const result = send({ action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch }) as {
+        patch: Record<string, unknown>;
+      };
+      expect(result.patch).toEqual(patch);
+    });
+
     it("rejects an empty patch", () => {
       expect(() =>
         send({ action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch: {} })

@@ -29,6 +29,20 @@ export const TEXT_FONT_FAMILIES = [
 
 export const TEXT_FONT_WEIGHTS = ["100", "200", "300", "400", "500", "600", "700", "800", "900"] as const;
 
+// Colour fields are the one text-styling input that's a free-form string an
+// editor can type anything into (the hex box), so they're the natural XSS
+// carrier: control-ui builds its properties panel via innerHTML, and an
+// unescaped colour value could break out of the value="..." attribute. The
+// sink itself is escaped, but validating here too keeps a hostile value from
+// ever being stored/broadcast. Accepts what a real colour actually is -- hex,
+// a CSS named colour, or an rgb()/hsl() function -- none of which can contain
+// the <>"'` characters an injection needs.
+const SAFE_CSS_COLOR = /^#[0-9a-fA-F]{3,8}$|^[a-zA-Z]{3,20}$|^(?:rgb|rgba|hsl|hsla)\([0-9.,%\s/]+\)$/;
+
+export function isSafeColor(value: string): boolean {
+  return SAFE_CSS_COLOR.test(value);
+}
+
 export interface ResolvedTextStyle {
   fontFamily: string;
   fontSize: number;

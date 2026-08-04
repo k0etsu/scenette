@@ -7,6 +7,7 @@ import { AssetType } from "@scenette/protocol";
 // pattern for why (accounts has no build step / compiled entry point for
 // normal module resolution to find; esbuild bundles the TS source directly).
 import { getSessionUsername, getMembership } from "../../accounts/src/store";
+import { readSessionToken } from "../../accounts/src/cookies";
 // Same cross-service pattern -- reuses the byte-accounting logic message.ts
 // already needs (server-verified file sizes, deduped by s3Key so a
 // duplicateAsset() doesn't double-count) rather than re-implementing it here.
@@ -57,8 +58,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     return { statusCode: 400, body: "Missing roomId, fileName, or contentType" };
   }
 
-  const auth = event.headers?.authorization ?? event.headers?.Authorization;
-  const token = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
+  const token = readSessionToken(event.headers ?? {});
   const username = token ? await getSessionUsername(token) : undefined;
   if (!username) {
     return { statusCode: 401, body: "Invalid or missing session" };

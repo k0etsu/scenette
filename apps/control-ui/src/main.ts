@@ -18,8 +18,12 @@ import {
   checkSession,
   logout,
   redeemInvite,
-  getStoredToken,
+  resendVerification,
   listRooms,
+  fetchAnnouncement,
+  getRoomOwner,
+  getBrowserSourceKey,
+  regenerateBrowserSourceKey,
   SessionInfo,
 } from "./auth";
 
@@ -53,6 +57,7 @@ const manageAccessButton = document.getElementById("manage-access-button");
 const accessModalEl = document.getElementById("access-modal");
 const settingsModalEl = document.getElementById("settings-modal");
 const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
+const regenerateBrowserSourceButton = document.getElementById("regenerate-browser-source-button");
 const dashboardButton = document.getElementById("dashboard-button");
 const statusEl = document.getElementById("status");
 
@@ -90,6 +95,13 @@ const SNAPSHOT_POLL_INTERVAL_MS = 5000;
 // have one thing to read the *current* room's state from.
 interface RoomSession {
   roomId: string;
+  // True when this is the signed-in user's own room. Gates owner-only UI
+  // (e.g. copying the browser-source URL) so a mod can't lift the OBS URL
+  // for a room that isn't theirs.
+  isOwner: boolean;
+  // Username of the room's owner, for the header ("<owner>'s room"). Resolved
+  // async for a mod-access room; the current user's own name when it's theirs.
+  ownerName: string;
   connection: ResilientConnection;
   canvas: CanvasView;
   sidebar: Sidebar;
@@ -184,7 +196,6 @@ async function main(): Promise<void> {
   async function showDashboardView(): Promise<void> {
     teardownCurrentRoom();
     appView!.style.display = "none";
-    const rooms = await listRooms(httpApiUrl);
     const roomPicker = new RoomPicker(roomPickerViewEl!, {
       onLogout: () => {
         void logout(httpApiUrl).then(() => {
@@ -193,7 +204,27 @@ async function main(): Promise<void> {
       },
       onSettings: () => settingsModal.open(httpApiUrl, session!.email),
     });
-    const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId);
+    // Show the dashboard shell immediately, then fill it in -- otherwise the
+    // room view just blanks out for the duration of the listRooms fetch,
+    // which reads as a lag when clicking "Dashboard". The announcement is
+    // fetched alongside the rooms so neither blocks the other.
+    roomPicker.showLoading();
+    const [rooms, announcement] = await Promise.all([
+      listRooms(httpApiUrl),
+      fetchAnnouncement(httpApiUrl),
+    ]);
+    const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId, {
+      hasEmail: Boolean(session!.email),
+      onResend: () => {
+        void resendVerification(httpApiUrl)
+          .then(() => {
+            statusEl!.textContent = "Verification email sent — check your inbox, then reload.";
+          })
+          .catch((err) => {
+            statusEl!.textContent = `Could not resend verification: ${err instanceof Error ? err.message : String(err)}`;
+          });
+      },
+    }, announcement);
     // The user just made an explicit choice -- push so that a later "back"
     // returns to the dashboard rather than leaving the app entirely.
     setUrl(roomId, true);
@@ -300,7 +331,7 @@ async function main(): Promise<void> {
           paused: result.type === "video" || result.type === "audio" ? true : undefined,
         },
       });
-      statusEl!.textContent = `room: ${roomId} (${session!.username})`;
+      if (current) statusEl!.textContent = `${current.ownerName || session!.username}'s room`;
     } catch (err) {
       statusEl!.textContent = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -356,15 +387,47 @@ async function main(): Promise<void> {
   });
 
   copyBrowserSourceButton!.addEventListener("click", async () => {
-    if (!current) return;
-    const url = `${browserSourceUrl}/?roomId=${encodeURIComponent(current.roomId)}`;
+    if (!current || !current.isOwner) return;
     try {
-      await navigator.clipboard.writeText(url);
-      statusEl!.textContent = "browser source URL copied to clipboard";
+      // The URL is keyed on the room's opaque obsKey (owner-only), not its
+      // roomId -- fetched fresh here rather than embedded, so it stays
+      // owner-gated end to end.
+      const obsKey = await getBrowserSourceKey(httpApiUrl, current.roomId);
+      const url = `${browserSourceUrl}/?obs=${encodeURIComponent(obsKey)}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        statusEl!.textContent = "browser source URL copied to clipboard";
+      } catch {
+        // Clipboard API can be denied (e.g. insecure context, permissions) --
+        // fall back to showing the URL directly so it's still usable.
+        statusEl!.textContent = `copy failed, URL: ${url}`;
+      }
     } catch (err) {
-      // Clipboard API can be denied (e.g. insecure context, permissions) --
-      // fall back to showing the URL directly so it's still usable.
-      statusEl!.textContent = `copy failed, URL: ${url}`;
+      statusEl!.textContent = `couldn't get browser source URL: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  });
+
+  regenerateBrowserSourceButton!.addEventListener("click", async () => {
+    if (!current || !current.isOwner) return;
+    // Destructive: the current URL stops working immediately, so confirm first.
+    if (
+      !window.confirm(
+        "Regenerate the browser source URL? The current URL will stop working immediately and must be replaced in OBS."
+      )
+    ) {
+      return;
+    }
+    try {
+      const obsKey = await regenerateBrowserSourceKey(httpApiUrl, current.roomId);
+      const url = `${browserSourceUrl}/?obs=${encodeURIComponent(obsKey)}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        statusEl!.textContent = "browser source URL regenerated and copied — update it in OBS";
+      } catch {
+        statusEl!.textContent = `browser source URL regenerated — update it in OBS: ${url}`;
+      }
+    } catch (err) {
+      statusEl!.textContent = `couldn't regenerate browser source URL: ${err instanceof Error ? err.message : String(err)}`;
     }
   });
 
@@ -445,17 +508,44 @@ function enterRoom(
   roomId: string,
   streamPreviewPanel: StreamPreviewPanel
 ): RoomSession {
-  statusEl!.textContent = `room: ${roomId} (${session.username})`;
-
   // An account's owned room is always exactly its own personalRoomId --
   // invite redemption only ever grants "mod" access to someone else's room
   // (see accounts/store.ts), never "owner" -- so this comparison alone is
   // enough to know ownership for every entry path (dashboard pick, deep
   // link, invite redemption) with no extra membership lookup needed.
-  streamPreviewPanel.setIsOwner(roomId === session.personalRoomId);
+  const isOwner = roomId === session.personalRoomId;
+  streamPreviewPanel.setIsOwner(isOwner);
+
+  // Owner-only room controls. Managing access (members/invites) and the
+  // browser-source URL are all owner-gated server-side too -- hiding the
+  // buttons for a mod just avoids dead-end clicks into 403s.
+  manageAccessButton!.style.display = isOwner ? "" : "none";
+  copyBrowserSourceButton!.style.display = isOwner ? "" : "none";
+  regenerateBrowserSourceButton!.style.display = isOwner ? "" : "none";
+
+  // Header shows whose room this is. Known immediately when it's the current
+  // user's own; resolved async for a mod-access room.
+  const setRoomHeader = (owner: string) => {
+    statusEl!.textContent = `${owner}'s room`;
+  };
+  setRoomHeader(isOwner ? session.username : "…");
+  if (!isOwner) {
+    void getRoomOwner(httpApiUrl, roomId)
+      .then((owner) => {
+        if (current?.roomId === roomId && owner) {
+          current.ownerName = owner;
+          setRoomHeader(owner);
+        }
+      })
+      .catch(() => {
+        /* leave the placeholder -- not worth surfacing a header lookup failure */
+      });
+  }
 
   const room: RoomSession = {
     roomId,
+    isOwner,
+    ownerName: isOwner ? session.username : "",
     // Assigned just below -- declared here so the callbacks that close
     // over `room` (canvas, sidebar) can reference the connection/canvas
     // that will exist by the time they're actually invoked.
@@ -567,7 +657,8 @@ function enterRoom(
   const connection = new ResilientConnection({
     wsUrl,
     roomId,
-    token: getStoredToken() ?? undefined,
+    // No token in the URL -- the browser sends the HttpOnly session cookie on
+    // the WS upgrade handshake, and $connect reads it from there.
     onOpen: () => {
       connection.send({ action: "room:snapshot:request", roomId });
 

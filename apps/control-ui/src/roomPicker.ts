@@ -10,38 +10,88 @@ export interface RoomPickerCallbacks {
   onSettings: () => void;
 }
 
+export interface VerifyPrompt {
+  hasEmail: boolean;
+  onResend: () => void;
+}
+
+function escapeHtml(value: string): string {
+  const div = document.createElement("div");
+  div.textContent = value;
+  return div.innerHTML;
+}
+
 export class RoomPicker {
   constructor(private readonly root: HTMLElement, private readonly callbacks: RoomPickerCallbacks) {}
 
   // Resolves with the chosen roomId once a row is clicked. The own room is
-  // always listed first, in its own group, regardless of where it falls in
-  // `rooms` -- any mod-access rooms are grouped separately below it.
+  // always listed first, in its own group -- any mod-access rooms are grouped
+  // separately below it. When the account has no own room yet (email not
+  // verified), a prompt to verify is shown in its place instead.
   // Logging out is a terminal action (main.ts reloads the page) rather than
   // something this promise ever resolves with -- callbacks.onLogout() fires
   // directly instead.
-  pickRoom(rooms: RoomMembership[], ownRoomId: string): Promise<string> {
+  // Renders the dashboard shell immediately (before the room list has loaded)
+  // so navigating to the dashboard feels instant rather than blanking out
+  // while the room list is fetched.
+  showLoading(): void {
+    this.root.innerHTML = `
+      <div id="room-picker">
+        <div class="room-picker-header"><h2>Choose a room</h2></div>
+        <div class="room-picker-loading">Loading…</div>
+      </div>`;
+    this.root.style.display = "flex";
+  }
+
+  pickRoom(
+    rooms: RoomMembership[],
+    ownRoomId: string | undefined,
+    verify: VerifyPrompt = { hasEmail: false, onResend: () => {} },
+    announcement?: string | null
+  ): Promise<string> {
     return new Promise((resolve) => {
-      const ownRoom = rooms.find((r) => r.roomId === ownRoomId);
+      const ownRoom = ownRoomId ? rooms.find((r) => r.roomId === ownRoomId) : undefined;
       const modRooms = rooms.filter((r) => r.roomId !== ownRoomId);
 
       const rowHtml = (room: RoomMembership, isOwn: boolean): string => {
-        const title = isOwn ? "Your room" : `${room.ownerUsername ?? room.roomId}'s room`;
+        const title = isOwn ? "Your room" : `${escapeHtml(room.ownerUsername ?? room.roomId)}'s room`;
         const sub = isOwn ? "" : `<div class="room-picker-row-sub">mod access</div>`;
-        return `<button type="button" class="room-picker-row" data-room-id="${room.roomId}">
+        return `<button type="button" class="room-picker-row" data-room-id="${escapeHtml(room.roomId)}">
           <span class="room-picker-row-title">${title}</span>
           ${sub}
         </button>`;
       };
 
-      // Falls back to the raw (unordered, ungrouped) list in the unexpected
-      // case where the account's own room isn't in `rooms` at all.
-      const rowsHtml = ownRoom
-        ? rowHtml(ownRoom, true) +
-          (modRooms.length > 0
-            ? `<div class="room-picker-section-label">Rooms you moderate</div>` +
-              modRooms.map((r) => rowHtml(r, false)).join("")
-            : "")
-        : rooms.map((r) => rowHtml(r, false)).join("");
+      // No own room yet: prompt to verify (add an email in Settings first if
+      // there isn't one) rather than showing a "Your room" row.
+      const ownSectionHtml = ownRoom
+        ? rowHtml(ownRoom, true)
+        : `<div class="room-picker-verify" data-role="verify-prompt">
+            <div class="room-picker-verify-title">Verify your email to create your own room</div>
+            <div class="room-picker-verify-sub">${
+              verify.hasEmail
+                ? "Check your inbox for the verification link, then reload."
+                : "Add an email address in Settings, then verify it."
+            }</div>
+            ${
+              verify.hasEmail
+                ? `<button type="button" data-role="resend-verification" class="room-picker-logout">Resend email</button>`
+                : ""
+            }
+          </div>`;
+
+      const modSectionHtml =
+        modRooms.length > 0
+          ? `<div class="room-picker-section-label">Rooms you moderate</div>` +
+            modRooms.map((r) => rowHtml(r, false)).join("")
+          : "";
+
+      // Admin-managed announcement (see accounts GET /announcement) -- plain
+      // text, escaped, with newlines preserved. Hidden entirely when empty.
+      const announcementHtml =
+        announcement && announcement.trim()
+          ? `<div class="room-picker-announcement">${escapeHtml(announcement.trim())}</div>`
+          : "";
 
       this.root.innerHTML = `
         <div id="room-picker">
@@ -52,7 +102,8 @@ export class RoomPicker {
               <button type="button" data-role="logout" class="room-picker-logout">Log out</button>
             </div>
           </div>
-          <div data-role="room-picker-list">${rowsHtml}</div>
+          ${announcementHtml}
+          <div data-role="room-picker-list">${ownSectionHtml}${modSectionHtml}</div>
         </div>
       `;
       this.root.style.display = "flex";
@@ -65,6 +116,9 @@ export class RoomPicker {
         });
       });
 
+      this.root.querySelector('[data-role="resend-verification"]')?.addEventListener("click", () => {
+        verify.onResend();
+      });
       this.root.querySelector('[data-role="logout"]')!.addEventListener("click", () => {
         this.callbacks.onLogout();
       });

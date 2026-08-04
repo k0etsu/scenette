@@ -788,6 +788,22 @@
         color: #888;
         margin-top: 12px;
       }
+      .room-picker-loading {
+        color: #888;
+        padding: 16px 0;
+      }
+      .room-picker-announcement {
+        white-space: pre-wrap;
+        background: #2a2f3a;
+        border: 1px solid #3a4150;
+        border-left: 3px solid #6ea8fe;
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-bottom: 14px;
+        color: #cdd3df;
+        font-size: 13px;
+        line-height: 1.45;
+      }
     </style>
   </head>
   <body>
@@ -815,6 +831,7 @@
         <input id="upload-input" type="file" accept="image/*,video/*,audio/*" style="display: none" />
         <button id="manage-access-button" class="toolbar-button">Manage access</button>
         <button id="copy-browser-source-button" class="toolbar-button">Copy browser source URL</button>
+        <button id="regenerate-browser-source-button" class="toolbar-button">Regenerate URL</button>
         <span id="status"></span>
       </div>
       <div id="main-area">

@@ -18,8 +18,13 @@ export function hashPassword(password: string): Promise<{ hash: string; salt: st
 export function verifyPassword(password: string, salt: string, expectedHash: string): Promise<boolean> {
   return new Promise((resolve, reject) => {
     scrypt(password, salt, KEY_LENGTH, (err, derivedKey) => {
-      if (err) reject(err);
-      else resolve(timingSafeEqual(Buffer.from(expectedHash, "hex"), derivedKey));
+      if (err) return reject(err);
+      // timingSafeEqual throws on unequal-length buffers -- a corrupt/short
+      // stored hash must fail verification cleanly (a plain false -> 401),
+      // not blow up into a 500.
+      const expected = Buffer.from(expectedHash, "hex");
+      if (expected.length !== derivedKey.length) return resolve(false);
+      resolve(timingSafeEqual(expected, derivedKey));
     });
   });
 }

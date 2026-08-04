@@ -9,6 +9,7 @@ import {
   deleteInvite,
   deleteS3Object,
   deleteAllSessionsForUser,
+  deleteAllVerificationsForUser,
   deleteAccountRow,
 } from "./store";
 
@@ -32,6 +33,7 @@ export async function deleteAccountCascade(username: string): Promise<void> {
   }
 
   await deleteAllSessionsForUser(username);
+  await deleteAllVerificationsForUser(username);
   await deleteAccountRow(username);
 }
 

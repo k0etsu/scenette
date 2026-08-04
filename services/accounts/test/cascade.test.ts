@@ -11,6 +11,7 @@ vi.mock("../src/store", () => ({
   deleteInvite: vi.fn(),
   deleteS3Object: vi.fn(),
   deleteAllSessionsForUser: vi.fn(),
+  deleteAllVerificationsForUser: vi.fn(),
   deleteAccountRow: vi.fn(),
 }));
 
@@ -34,6 +35,7 @@ describe("deleteAccountCascade", () => {
     expect(store.deleteRoomRow).not.toHaveBeenCalled();
     expect(store.listRoomAssetsForCascade).not.toHaveBeenCalled();
     expect(store.deleteAllSessionsForUser).toHaveBeenCalledWith("bob");
+    expect(store.deleteAllVerificationsForUser).toHaveBeenCalledWith("bob");
     expect(store.deleteAccountRow).toHaveBeenCalledWith("bob");
   });
 

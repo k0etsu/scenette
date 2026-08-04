@@ -22,9 +22,14 @@ beforeEach(() => {
 });
 
 function event(query: Record<string, string>): APIGatewayProxyWebsocketEventV2 {
+  // The session token now travels in the HttpOnly cookie on the $connect
+  // handshake, not a query param -- pull any `token` here into a Cookie
+  // header so the existing call sites don't all have to change.
+  const { token, ...queryStringParameters } = query;
   return {
     requestContext: { connectionId: "c1", domainName: "api.example.com", stage: "dev" },
-    queryStringParameters: query,
+    queryStringParameters,
+    ...(token ? { headers: { cookie: `scenette_session=${token}` } } : {}),
   } as unknown as APIGatewayProxyWebsocketEventV2;
 }
 

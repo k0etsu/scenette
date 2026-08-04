@@ -1,5 +1,6 @@
 import { Asset, AssetType } from "./asset";
 import { Variable, VariableType } from "./variables";
+import { isSafeColor } from "./textStyle";
 
 // Shared between AssetAddMessage and AssetPatch below -- both carry the same
 // optional text-styling fields, just at different points in an asset's life
@@ -463,16 +464,16 @@ function parseTextStyleFields(raw: Record<string, unknown>): TextStyleFields {
   if (raw.textAlign === "left" || raw.textAlign === "center" || raw.textAlign === "right") {
     fields.textAlign = raw.textAlign;
   }
-  if (typeof raw.textColor === "string") fields.textColor = raw.textColor;
-  if (typeof raw.backgroundColor === "string") fields.backgroundColor = raw.backgroundColor;
+  if (typeof raw.textColor === "string" && isSafeColor(raw.textColor)) fields.textColor = raw.textColor;
+  if (typeof raw.backgroundColor === "string" && isSafeColor(raw.backgroundColor)) fields.backgroundColor = raw.backgroundColor;
   if (typeof raw.backgroundAlpha === "number") fields.backgroundAlpha = raw.backgroundAlpha;
   if (typeof raw.shadowEnabled === "boolean") fields.shadowEnabled = raw.shadowEnabled;
   if (typeof raw.shadowX === "number") fields.shadowX = raw.shadowX;
   if (typeof raw.shadowY === "number") fields.shadowY = raw.shadowY;
   if (typeof raw.shadowBlur === "number") fields.shadowBlur = raw.shadowBlur;
-  if (typeof raw.shadowColor === "string") fields.shadowColor = raw.shadowColor;
+  if (typeof raw.shadowColor === "string" && isSafeColor(raw.shadowColor)) fields.shadowColor = raw.shadowColor;
   if (typeof raw.outlineEnabled === "boolean") fields.outlineEnabled = raw.outlineEnabled;
-  if (typeof raw.outlineColor === "string") fields.outlineColor = raw.outlineColor;
+  if (typeof raw.outlineColor === "string" && isSafeColor(raw.outlineColor)) fields.outlineColor = raw.outlineColor;
   if (typeof raw.outlineWidth === "number") fields.outlineWidth = raw.outlineWidth;
   return fields;
 }

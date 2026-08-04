@@ -2,6 +2,8 @@ import type { APIGatewayProxyHandlerV2, APIGatewayProxyResultV2 } from "aws-lamb
 import { randomUUID } from "crypto";
 import { hashPassword, verifyPassword } from "./passwords";
 import { deleteAccountCascade } from "./cascade";
+import { sendVerificationEmail } from "./email";
+import { setSessionCookie, clearSessionCookie, readSessionToken } from "./cookies";
 import {
   getAccount,
   createAccount,
@@ -14,8 +16,17 @@ import {
   listMembers,
   deleteMembership,
   getRoomOwner,
+  getOrCreateObsKey,
+  regenerateObsKey,
+  getRoomIdByObsKey,
+  getAnnouncement,
   updateAccountPassword,
+  deleteAllSessionsForUser,
   updateAccountEmail,
+  createVerification,
+  getVerification,
+  deleteVerification,
+  markEmailVerified,
   createInvite,
   getInvite,
   redeemInvite,
@@ -25,20 +36,61 @@ import {
 
 const MIN_USERNAME_LENGTH = 3;
 const MIN_PASSWORD_LENGTH = 8;
+// Constrain usernames to a safe, predictable set rather than accepting any
+// string >= 3 chars: keeps HTML/control characters out of a value that other
+// users see (members/presence lists) and bounds the length.
+const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,30}$/;
 // Deliberately loose (just "has an @ and something on both sides with a
 // dot") -- only applied if an email is actually provided, since it's an
 // optional contact field, not a required/verified one.
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function json(statusCode: number, body: unknown): APIGatewayProxyResultV2 {
-  return { statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+function json(statusCode: number, body: unknown, cookies?: string[]): APIGatewayProxyResultV2 {
+  return {
+    statusCode,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    ...(cookies ? { cookies } : {}),
+  };
 }
 
 async function requireSession(headers: Record<string, string | undefined>): Promise<string | undefined> {
-  const auth = headers.authorization ?? headers.Authorization;
-  const token = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
+  const token = readSessionToken(headers);
   if (!token) return undefined;
   return getSessionUsername(token);
+}
+
+// A minimal self-contained confirmation page for the emailed verify link
+// (which is opened directly in a browser, not via the SPA). Only static,
+// non-user-controlled text is interpolated -- no XSS surface.
+function html(statusCode: number, title: string, message: string): APIGatewayProxyResultV2 {
+  return {
+    statusCode,
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+    body:
+      `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+      `<meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>` +
+      `<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;text-align:center">` +
+      `<h1>${title}</h1><p>${message}</p></body></html>`,
+  };
+}
+
+// The origin this API is reached at, taken from the request itself so the
+// verify link is correct on both the execute-api domain and the custom
+// api.<zone> domain without a config value to keep in sync.
+function apiBaseUrl(event: Parameters<APIGatewayProxyHandlerV2>[0]): string {
+  return `https://${event.requestContext.domainName}`;
+}
+
+async function startEmailVerification(username: string, email: string, baseUrl: string): Promise<void> {
+  const verification = await createVerification(username, email);
+  try {
+    await sendVerificationEmail(email, username, verification.token, baseUrl);
+  } catch (err) {
+    // A send failure must not fail the user's request -- the token row is
+    // already written, so the user can just resend. Logged for visibility.
+    console.error("Failed to send verification email", err);
+  }
 }
 
 export const handler: APIGatewayProxyHandlerV2 = async (event) => {
@@ -49,8 +101,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const username = body.username;
       const password = body.password;
       const email = body.email;
-      if (typeof username !== "string" || username.length < MIN_USERNAME_LENGTH) {
-        return json(400, { error: `username must be at least ${MIN_USERNAME_LENGTH} characters` });
+      if (typeof username !== "string" || !USERNAME_PATTERN.test(username)) {
+        return json(400, {
+          error: "username must be 3-30 characters, using only letters, numbers, and _ . -",
+        });
       }
       if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
         return json(400, { error: `password must be at least ${MIN_PASSWORD_LENGTH} characters` });
@@ -61,25 +115,33 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       const { hash, salt } = await hashPassword(password);
-      const personalRoomId = randomUUID();
       const created = await createAccount({
         username,
         passwordHash: hash,
         passwordSalt: salt,
         email: email || undefined,
-        personalRoomId,
+        emailVerified: false,
         createdAt: new Date().toISOString(),
       });
       if (!created) {
         return json(409, { error: "username already taken" });
       }
 
-      await putMembership({ accountId: username, roomId: personalRoomId, role: "owner" });
+      // No personal room yet -- a room (and its owner membership) is created
+      // only when an email is verified (see GET /auth/verify). Registration
+      // logs straight in so an unverified user can still act as a mod on
+      // rooms they're invited to. If an email was supplied now, kick off
+      // verification immediately.
+      if (email) {
+        await startEmailVerification(username, email as string, apiBaseUrl(event));
+      }
 
-      // No email verification step anymore -- log straight in, same
-      // response shape as POST /auth/login.
       const sessionToken = await createSession(username);
-      return json(201, { sessionToken, username, personalRoomId, email: email || undefined });
+      return json(
+        201,
+        { username, email: email || undefined, emailVerified: false, personalRoomId: undefined },
+        [setSessionCookie(sessionToken)]
+      );
     }
 
     case "POST /auth/login": {
@@ -96,7 +158,16 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (!valid) return json(401, { error: "Invalid username or password" });
 
       const sessionToken = await createSession(username);
-      return json(200, { sessionToken, username, personalRoomId: account.personalRoomId, email: account.email });
+      return json(
+        200,
+        {
+          username,
+          personalRoomId: account.personalRoomId,
+          email: account.email,
+          emailVerified: account.emailVerified ?? false,
+        },
+        [setSessionCookie(sessionToken)]
+      );
     }
 
     case "GET /auth/session": {
@@ -106,14 +177,18 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const account = await getAccount(username);
       if (!account) return json(401, { error: "Account no longer exists" });
 
-      return json(200, { username, personalRoomId: account.personalRoomId, email: account.email });
+      return json(200, {
+        username,
+        personalRoomId: account.personalRoomId,
+        email: account.email,
+        emailVerified: account.emailVerified ?? false,
+      });
     }
 
     case "POST /auth/logout": {
-      const auth = (event.headers ?? {}).authorization ?? (event.headers ?? {}).Authorization;
-      const token = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
+      const token = readSessionToken(event.headers ?? {});
       if (token) await deleteSession(token);
-      return json(200, { ok: true });
+      return json(200, { ok: true }, [clearSessionCookie()]);
     }
 
     case "POST /auth/change-password": {
@@ -137,7 +212,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
       const { hash, salt } = await hashPassword(newPassword);
       await updateAccountPassword(username, hash, salt);
-      return json(200, { ok: true });
+      // Changing a password revokes every existing session -- a token stolen
+      // before the change (the whole reason a user changes a password after a
+      // suspected compromise) stops working immediately. A fresh session is
+      // then issued so the user who initiated the change stays logged in on
+      // this device only.
+      await deleteAllSessionsForUser(username);
+      const sessionToken = await createSession(username);
+      return json(200, { ok: true }, [setSessionCookie(sessionToken)]);
     }
 
     case "POST /auth/change-email": {
@@ -151,6 +233,52 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       await updateAccountEmail(username, (email as string | undefined) || undefined);
+      // Setting a (non-empty) email starts verification -- the address is
+      // unverified until the mailed link is clicked, which is what unlocks
+      // the account's own room.
+      if (email) {
+        await startEmailVerification(username, email as string, apiBaseUrl(event));
+      }
+      return json(200, { ok: true });
+    }
+
+    // Opened directly from the emailed link (a browser GET, not an SPA fetch)
+    // -- responds with a small HTML confirmation page. Verifying an email is
+    // what first creates the account's personal room + owner membership.
+    case "GET /auth/verify": {
+      const token = event.queryStringParameters?.token;
+      if (!token) return html(400, "Invalid link", "This verification link is missing its token.");
+
+      const verification = await getVerification(token);
+      if (!verification || Date.parse(verification.expiresAt) < Date.now()) {
+        return html(400, "Link expired", "This verification link is invalid or has expired. Request a new one from scenette.");
+      }
+
+      const account = await getAccount(verification.username);
+      if (!account) return html(400, "Invalid link", "That account no longer exists.");
+      // Guard a stale link left over from before the user changed their email
+      // again -- only the current pending address can be verified.
+      if (account.email !== verification.email) {
+        await deleteVerification(token);
+        return html(400, "Link expired", "This link was for a different email address. Request a new one from scenette.");
+      }
+
+      const roomId = await markEmailVerified(verification.username, randomUUID());
+      await putMembership({ accountId: verification.username, roomId, role: "owner" });
+      await deleteVerification(token);
+      return html(200, "Email verified", "Your email is verified and your room is ready. Head back to scenette to start using it.");
+    }
+
+    case "POST /auth/resend-verification": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const account = await getAccount(username);
+      // Deliberately generic response whether or not a resend actually
+      // happened -- never reveals whether an account has a pending email.
+      if (account?.email && !account.emailVerified) {
+        await startEmailVerification(username, account.email, apiBaseUrl(event));
+      }
       return json(200, { ok: true });
     }
 
@@ -172,7 +300,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (!valid) return json(401, { error: "Incorrect password" });
 
       await deleteAccountCascade(username);
-      return json(200, { ok: true });
+      return json(200, { ok: true }, [clearSessionCookie()]);
     }
 
     case "GET /auth/rooms": {
@@ -208,6 +336,77 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
       const members = await listMembers(roomId);
       return json(200, { members });
+    }
+
+    // Any member (owner or mod) of the room can see whose room it is -- used
+    // for the room header ("<owner>'s room").
+    case "GET /auth/rooms/{roomId}/owner": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership) return json(403, { error: "Not a member of this room" });
+
+      return json(200, { ownerUsername: await getRoomOwner(roomId) });
+    }
+
+    // Owner-only: mints (lazily, once) and returns the room's opaque obsKey so
+    // the owner can build the browser-source URL. A mod deliberately can't
+    // reach this -- that's what stops them lifting the OBS URL for a room
+    // that isn't theirs.
+    case "GET /auth/rooms/{roomId}/obs-url": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership || membership.role !== "owner") {
+        return json(403, { error: "Only the room owner can get the browser source URL" });
+      }
+
+      return json(200, { obsKey: await getOrCreateObsKey(roomId) });
+    }
+
+    // Owner-only: rotate the obsKey, revoking whatever URL was in use before.
+    // POST (a state change) as opposed to the idempotent GET above.
+    case "POST /auth/rooms/{roomId}/obs-url": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership || membership.role !== "owner") {
+        return json(403, { error: "Only the room owner can regenerate the browser source URL" });
+      }
+
+      return json(200, { obsKey: await regenerateObsKey(roomId) });
+    }
+
+    // Public (no session): browser-source, which is anonymous, exchanges the
+    // opaque obsKey it was given for the roomId it needs to connect. Having a
+    // valid obsKey is the capability -- it's 128 bits of randomness, so not
+    // guessable, and a resolved roomId grants no control (writes still require
+    // an authenticated member connection).
+    case "GET /rooms/resolve": {
+      const obsKey = event.queryStringParameters?.obs;
+      if (!obsKey) return json(400, { error: "Missing obs" });
+      const roomId = await getRoomIdByObsKey(obsKey);
+      if (!roomId) return json(404, { error: "Unknown browser source key" });
+      return json(200, { roomId });
+    }
+
+    // Public: the dashboard announcement banner. Content is an admin-managed
+    // S3 object (see store.getAnnouncement), so it's changed by overwriting
+    // that file -- no redeploy.
+    case "GET /announcement": {
+      return json(200, { message: await getAnnouncement() });
     }
 
     case "DELETE /auth/rooms/{roomId}/members/{username}": {
@@ -300,6 +499,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
       const invite = await getInvite(inviteToken);
       if (!invite) return json(404, { error: "Invalid or already-used invite link" });
+      // Grandfather in pre-expiry invites (no expiresAt) as non-expiring.
+      if (invite.expiresAt && Date.parse(invite.expiresAt) < Date.now()) {
+        return json(404, { error: "This invite link has expired" });
+      }
 
       const redeemed = await redeemInvite(inviteToken, username);
       if (!redeemed) return json(409, { error: "This invite has already been used" });

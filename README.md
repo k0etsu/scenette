@@ -16,7 +16,7 @@ Early scaffold — infrastructure and CI/CD are being stood up before feature co
 infra/                  CDK app (TypeScript) — defines all AWS resources, parameterized per environment (dev/prod)
 services/
   websocket-handlers/    Lambda handlers for the API Gateway WebSocket API ($connect / $disconnect / message routes)
-  accounts/              Username/password auth (HTTP API) — registration, login, email verification via SES, room membership grants
+  accounts/              Username/password auth (HTTP API) — registration, login, room membership grants, and email verification via SES (verifying an email is what creates a user's own room; mods on someone else's room don't need to)
   retention-job/         Scheduled Lambda that garbage-collects unused media assets
 apps/
   control-ui/            Streamer/mod-facing canvas editor
@@ -35,7 +35,7 @@ Deploys run exclusively through GitHub Actions via OIDC-federated IAM roles — 
 Required one-time AWS setup (not automated, done directly in the console/CLI once):
 1. Create the `scenette-dev-deploy` and `scenette-prod-deploy` IAM roles with an OIDC trust policy scoped to this repo (prod role additionally scoped to `ref:refs/heads/main` only).
 2. Store their role ARNs as GitHub Actions **variables** (not secrets — they're not sensitive) `AWS_DEPLOY_ROLE_ARN_DEV` / `AWS_DEPLOY_ROLE_ARN_PROD`.
-3. Request SES production access (AWS Support Center → Create case → Service limit increase → SES sending limits) for the account/region this deploys to. New SES accounts start in sandbox mode, which can only send to verified recipient addresses — real users can't receive their verification email until this is granted. The domain identity itself (`hanzomon.co`, used for the verification email's From-address) is provisioned automatically by the prod stack via CDK; this step just lifts the sandbox send restriction.
+3. Request SES production access (AWS Support Center → Create case → Service limit increase → SES sending limits) for the account/region this deploys to. New SES accounts start in sandbox mode, which can only send to verified recipient addresses — real users can't receive their verification email until this is granted. This is an account+region-level setting, independent of any stack deploy. (The DKIM'd sender *identity* each env sends from — `hanzomon.co` for prod, `dev.hanzomon.co` for dev — is provisioned automatically by that env's own CDK stack; this step only lifts the account-wide sandbox restriction.)
 
 See `.env.example` for the runtime configuration each Lambda expects.
 

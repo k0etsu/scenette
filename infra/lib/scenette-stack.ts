@@ -13,6 +13,8 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as route53Targets from "aws-cdk-lib/aws-route53-targets";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
+import * as ses from "aws-cdk-lib/aws-ses";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as path from "path";
 
@@ -37,6 +39,13 @@ export class ScenetteStack extends cdk.Stack {
     const { envName } = props;
     const removalPolicy =
       envName === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY;
+    // Point-in-time recovery is the safety net against an accidental or
+    // malicious bulk delete (e.g. the account-deletion cascade, or a bad
+    // deploy) -- enabled on the durable tables in prod only. Dev is
+    // throwaway, so it stays off there to avoid the extra cost.
+    const pointInTimeRecoverySpecification: dynamodb.TableProps["pointInTimeRecoverySpecification"] = {
+      pointInTimeRecoveryEnabled: envName === "prod",
+    };
 
     // ---- DynamoDB tables ----
 
@@ -56,7 +65,15 @@ export class ScenetteStack extends cdk.Stack {
       tableName: `scenette-${envName}-rooms`,
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification,
       removalPolicy,
+    });
+    // Resolve the opaque browser-source key back to its roomId (see AccountsFn's
+    // GET /rooms/resolve). Sparse -- only rooms that have had an obsKey minted
+    // appear in it.
+    roomsTable.addGlobalSecondaryIndex({
+      indexName: "byObsKey",
+      partitionKey: { name: "obsKey", type: dynamodb.AttributeType.STRING },
     });
 
     const membershipsTable = new dynamodb.Table(this, "MembershipsTable", {
@@ -64,6 +81,7 @@ export class ScenetteStack extends cdk.Stack {
       partitionKey: { name: "accountId", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
     // Listing/revoking a room's current mods (see AccountsFn's
@@ -80,6 +98,10 @@ export class ScenetteStack extends cdk.Stack {
       tableName: `scenette-${envName}-invites`,
       partitionKey: { name: "inviteToken", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      // Invites carry an expiry (see store.ts createInvite) -- the ttl sweep
+      // eventually clears leaked-but-unredeemed links from the table.
+      timeToLiveAttribute: "ttl",
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
     // Listing a room's pending invites (see AccountsFn's
@@ -91,21 +113,34 @@ export class ScenetteStack extends cdk.Stack {
     });
 
     // Username/password accounts (see AccountsFn below) -- the one and only
-    // auth path, not a stopgap for something else. No email verification
-    // step (kept intentionally simple to test without SES set up) --
-    // registering logs straight in. Session tokens are opaque
-    // (crypto.randomUUID, not signed) and looked up against this table, so
-    // logout/expiry is just a row delete/TTL — no signing secret to manage.
+    // auth path. Registration logs straight in, but an account only gets its
+    // own room once it verifies an email (see the email-verifications table +
+    // AccountsFn's /auth/verify); a mod on someone else's room never needs to.
+    // Session tokens are opaque (crypto.randomUUID, not signed) and looked up
+    // against the sessions table, so logout/expiry is just a row delete/TTL —
+    // no signing secret to manage.
     const accountsTable = new dynamodb.Table(this, "AccountsTable", {
       tableName: `scenette-${envName}-accounts`,
       partitionKey: { name: "username", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
 
     const sessionsTable = new dynamodb.Table(this, "SessionsTable", {
       tableName: `scenette-${envName}-sessions`,
       partitionKey: { name: "sessionToken", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy,
+    });
+
+    // Pending email-verification tokens (see AccountsFn's /auth/verify).
+    // Short-lived: each row carries a 24h ttl for the sweep; the token is the
+    // key, looked up directly from the emailed link.
+    const emailVerificationsTable = new dynamodb.Table(this, "EmailVerificationsTable", {
+      tableName: `scenette-${envName}-email-verifications`,
+      partitionKey: { name: "token", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: "ttl",
       removalPolicy,
@@ -127,6 +162,7 @@ export class ScenetteStack extends cdk.Stack {
       partitionKey: { name: "roomId", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "assetId", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification,
       removalPolicy,
     });
 
@@ -156,11 +192,43 @@ export class ScenetteStack extends cdk.Stack {
     const controlUiDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
     const browserSourceDomain =
       envName === "prod" ? `obs.${HANZOMON_ZONE_NAME}` : `dev-obs.${HANZOMON_ZONE_NAME}`;
+    // The HTTP and WS APIs get custom domains under the same zone so a single
+    // Domain=.hanzomon.co session cookie is shared by all three (control-ui +
+    // both APIs) -- default execute-api domains are on the public suffix list
+    // and can't share cookies.
+    const apiDomain = envName === "prod" ? `api.${HANZOMON_ZONE_NAME}` : `dev-api.${HANZOMON_ZONE_NAME}`;
+    const wsDomain = envName === "prod" ? `ws.${HANZOMON_ZONE_NAME}` : `dev-ws.${HANZOMON_ZONE_NAME}`;
+    const cookieDomain = `.${HANZOMON_ZONE_NAME}`;
 
     const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, "HostedZone", {
       hostedZoneId: HANZOMON_ZONE_ID,
       zoneName: HANZOMON_ZONE_NAME,
     });
+
+    // ---- Email (SES) ----
+    // Each env verifies its OWN DKIM'd SES domain identity -- prod the apex
+    // (hanzomon.co), dev a subdomain (dev.hanzomon.co) -- so neither env
+    // depends on the other having been deployed, and the From-address is
+    // always under a domain this very stack owns. The DKIM CNAMEs are written
+    // into the shared hosted zone for whichever (sub)domain this env uses.
+    //
+    // Note: this only establishes a verified *sender*. SES sandbox mode (which
+    // restricts sending to verified *recipients*) is an account+region-level
+    // setting lifted once via an AWS Support request -- unrelated to any
+    // deploy. See docs/deploy-cookie-auth.md.
+    const mailDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
+    const mailIdentity = new ses.EmailIdentity(this, "MailIdentity", {
+      identity: ses.Identity.domain(mailDomain),
+    });
+    mailIdentity.dkimRecords.forEach((record, i) => {
+      new route53.CnameRecord(this, `MailDkimRecord${i}`, {
+        zone: hostedZone,
+        recordName: record.name,
+        domainName: record.value,
+      });
+    });
+    const verificationFromAddress = `noreply@${mailDomain}`;
+    const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${mailDomain}`;
 
     // ---- WebSocket API ----
 
@@ -258,23 +326,37 @@ export class ScenetteStack extends cdk.Stack {
     const httpApi = new apigwv2.HttpApi(this, "HttpApi", {
       apiName: `scenette-${envName}-http`,
       corsPreflight: {
-        // TODO: same as the S3 bucket's CORS above — restrict to the deployed
-        // control-ui origin once it's hosted somewhere with a known domain.
-        allowOrigins: ["*"],
-        // allow-credentials is meaningless without cookies here, but MUST be
-        // set explicitly: API Gateway rejects allowCredentials:true combined
-        // with allowOrigins:"*", so the cookie branch cannot flip this to true
-        // (and back) unless both sides always state it. See docs/deploy-cookie-auth.md.
-        allowCredentials: false,
+        // Cookie-based auth requires credentialed CORS, which is incompatible
+        // with a "*" origin -- so this is pinned to exact origins. control-ui
+        // is the authenticated app; browser-source is listed only so its
+        // anonymous GET /rooms/resolve call (obsKey -> roomId) isn't
+        // CORS-blocked. API Gateway echoes whichever of the two matches.
+        allowOrigins: [`https://${controlUiDomain}`, `https://${browserSourceDomain}`],
+        allowCredentials: true,
         // DELETE (revoke invite/member) is a non-"simple" cross-origin
         // method -- the browser always preflights it first, and without it
         // listed here that preflight fails, silently blocking every revoke
         // request client-side with a CORS error before it ever reaches API
         // Gateway.
         allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST, apigwv2.CorsHttpMethod.DELETE],
-        allowHeaders: ["*"],
+        allowHeaders: ["content-type"],
       },
     });
+
+    // ---- API throttling ----
+    // Neither API is metered by default -- an unauthenticated flood ($connect,
+    // /auth/register, the anonymous browser-source snapshot poll) is a direct
+    // availability + billing-amplification attack on PAY_PER_REQUEST tables and
+    // per-invocation Lambda. Cap the default route on each stage. Applied via
+    // the underlying CfnStage since the L2 constructs don't surface it (the
+    // HttpApi uses its implicit $default stage).
+    const defaultRouteSettings: apigwv2.CfnStage.RouteSettingsProperty = {
+      throttlingRateLimit: 100,
+      throttlingBurstLimit: 200,
+    };
+    (webSocketStage.node.defaultChild as apigwv2.CfnStage).defaultRouteSettings = defaultRouteSettings;
+    const httpDefaultStage = httpApi.defaultStage?.node.defaultChild as apigwv2.CfnStage | undefined;
+    if (httpDefaultStage) httpDefaultStage.defaultRouteSettings = defaultRouteSettings;
 
     // ---- Upload URL (HTTP API) ----
 
@@ -330,6 +412,11 @@ export class ScenetteStack extends cdk.Stack {
         ROOMS_TABLE: roomsTable.tableName,
         ASSETS_TABLE: assetsTable.tableName,
         ASSETS_BUCKET: assetsBucket.bucketName,
+        EMAIL_VERIFICATIONS_TABLE: emailVerificationsTable.tableName,
+        VERIFICATION_FROM_ADDRESS: verificationFromAddress,
+        // Scopes the session cookie to the whole zone so control-ui and both
+        // APIs (all same-site subdomains) share it.
+        COOKIE_DOMAIN: cookieDomain,
       },
     });
     accountsTable.grantReadWriteData(accountsFn);
@@ -338,9 +425,20 @@ export class ScenetteStack extends cdk.Stack {
     invitesTable.grantReadWriteData(accountsFn);
     roomsTable.grantReadWriteData(accountsFn);
     assetsTable.grantReadWriteData(accountsFn);
+    emailVerificationsTable.grantReadWriteData(accountsFn);
+    // Send-only, scoped to the hanzomon.co identity -- the verification email.
+    accountsFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: [mailIdentityArn],
+      })
+    );
     // Delete only -- the cascade never reads/writes an asset's actual
     // object content, just removes it once the room it belongs to is gone.
     assetsBucket.grantDelete(accountsFn);
+    // Plus read on the single admin-managed announcement object (see
+    // GET /announcement) -- scoped to the admin/ prefix, not room media.
+    assetsBucket.grantRead(accountsFn, "admin/*");
 
     const accountsIntegration = new apigwv2Integrations.HttpLambdaIntegration(
       "AccountsIntegration",
@@ -377,6 +475,16 @@ export class ScenetteStack extends cdk.Stack {
       integration: accountsIntegration,
     });
     httpApi.addRoutes({
+      path: "/auth/verify",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/resend-verification",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
       path: "/auth/account",
       methods: [apigwv2.HttpMethod.DELETE],
       integration: accountsIntegration,
@@ -388,6 +496,26 @@ export class ScenetteStack extends cdk.Stack {
     });
     httpApi.addRoutes({
       path: "/auth/rooms/{roomId}/members",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/rooms/{roomId}/owner",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/rooms/{roomId}/obs-url",
+      methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/rooms/resolve",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/announcement",
       methods: [apigwv2.HttpMethod.GET],
       integration: accountsIntegration,
     });
@@ -443,9 +571,37 @@ export class ScenetteStack extends cdk.Stack {
     // deploys, so no cross-region certificate construct is needed.
     const certificate = new acm.Certificate(this, "FrontendCertificate", {
       domainName: controlUiDomain,
-      subjectAlternativeNames: [browserSourceDomain],
+      subjectAlternativeNames: [browserSourceDomain, apiDomain, wsDomain],
       validation: acm.CertificateValidation.fromDns(hostedZone),
     });
+
+    // ---- API custom domains ----
+    // Regional custom domains for the HTTP + WS APIs under the same zone, so
+    // the session cookie (Domain=.hanzomon.co) is shared with control-ui. The
+    // cert lives in this stack's region (us-east-1), which regional API
+    // Gateway domains require.
+    const apiDomainName = new apigwv2.DomainName(this, "ApiDomainName", { domainName: apiDomain, certificate });
+    new apigwv2.ApiMapping(this, "ApiMapping", {
+      api: httpApi,
+      domainName: apiDomainName,
+      stage: httpApi.defaultStage,
+    });
+    const wsDomainName = new apigwv2.DomainName(this, "WsDomainName", { domainName: wsDomain, certificate });
+    new apigwv2.ApiMapping(this, "WsApiMapping", {
+      api: webSocketApi,
+      domainName: wsDomainName,
+      stage: webSocketStage,
+    });
+    for (const [id, recordName, dn] of [
+      ["Api", apiDomain, apiDomainName],
+      ["Ws", wsDomain, wsDomainName],
+    ] as const) {
+      const target = route53.RecordTarget.fromAlias(
+        new route53Targets.ApiGatewayv2DomainProperties(dn.regionalDomainName, dn.regionalHostedZoneId)
+      );
+      new route53.ARecord(this, `${id}AliasRecordA`, { zone: hostedZone, recordName, target });
+      new route53.AaaaRecord(this, `${id}AliasRecordAAAA`, { zone: hostedZone, recordName, target });
+    }
 
     const controlUiBucket = new s3.Bucket(this, "ControlUiBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -479,8 +635,10 @@ export class ScenetteStack extends cdk.Stack {
       sources: [
         s3deploy.Source.asset(path.join(__dirname, "../../apps/control-ui/dist")),
         s3deploy.Source.jsonData("config.json", {
-          wsUrl: webSocketStage.url,
-          httpApiUrl: httpApi.apiEndpoint,
+          // Custom domains (not the raw execute-api URLs) so the session
+          // cookie is same-site with control-ui and gets sent along.
+          wsUrl: `wss://${wsDomain}`,
+          httpApiUrl: `https://${apiDomain}`,
           assetsDomain: assetsDistribution.distributionDomainName,
           browserSourceUrl: `https://${browserSourceDomain}`,
         }),
@@ -509,7 +667,8 @@ export class ScenetteStack extends cdk.Stack {
       sources: [
         s3deploy.Source.asset(path.join(__dirname, "../../apps/browser-source/dist")),
         s3deploy.Source.jsonData("config.json", {
-          wsUrl: webSocketStage.url,
+          wsUrl: `wss://${wsDomain}`,
+          httpApiUrl: `https://${apiDomain}`,
           assetsDomain: assetsDistribution.distributionDomainName,
         }),
       ],

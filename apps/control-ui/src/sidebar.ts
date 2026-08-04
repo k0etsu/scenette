@@ -551,14 +551,14 @@ function textSettingsHtml(asset: Asset): string {
     <div class="color-swap-row">
       <div class="color-field">
         <label class="prop-label">background</label>
-        <input type="color" data-role="bg-color-swatch" value="${s.backgroundColor}" />
-        <input type="text" data-role="bg-color-hex" value="${s.backgroundColor}" />
+        <input type="color" data-role="bg-color-swatch" value="${escapeHtml(s.backgroundColor)}" />
+        <input type="text" data-role="bg-color-hex" value="${escapeHtml(s.backgroundColor)}" />
       </div>
       <button type="button" data-role="swap-colors" class="toolbar-button">swap &#8646;</button>
       <div class="color-field">
         <label class="prop-label">text</label>
-        <input type="color" data-role="text-color-swatch" value="${s.textColor}" />
-        <input type="text" data-role="text-color-hex" value="${s.textColor}" />
+        <input type="color" data-role="text-color-swatch" value="${escapeHtml(s.textColor)}" />
+        <input type="text" data-role="text-color-hex" value="${escapeHtml(s.textColor)}" />
       </div>
     </div>
     <div class="prop-slider-row">
@@ -582,11 +582,11 @@ function textSettingsHtml(asset: Asset): string {
     </div>
     <div>
       <label class="prop-label">Color:</label>
-      <input type="color" data-role="shadow-color" value="${s.shadowColor}" />
+      <input type="color" data-role="shadow-color" value="${escapeHtml(s.shadowColor)}" />
     </div>
     <label class="prop-checkbox"><input type="checkbox" data-role="outline-enabled" ${s.outlineEnabled ? "checked" : ""} /> outline</label>
     <div class="prop-slider-row">
-      <input type="color" data-role="outline-color" value="${s.outlineColor}" />
+      <input type="color" data-role="outline-color" value="${escapeHtml(s.outlineColor)}" />
       <input type="range" data-role="outline-width" min="0" max="20" value="${s.outlineWidth}" />
     </div>
   `;

@@ -85,6 +85,15 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
       }
 
       case "asset:add": {
+        // The upload flow only ever mints keys under `${roomId}/` (see
+        // services/upload-url), so a client-supplied s3Key pointing outside
+        // this room's prefix is either a bug or an attempt to attach (and,
+        // via a later asset:delete, destroy) another room's media. Reject it
+        // rather than HeadObject/store/broadcast an arbitrary key.
+        if (message.asset.s3Key && !message.asset.s3Key.startsWith(`${message.roomId}/`)) {
+          await sendTo(apiGw, connectionId, { type: "error", message: "Invalid asset key" });
+          return { statusCode: 200, body: "OK" };
+        }
         const now = new Date().toISOString();
         const hidden = message.asset.hidden ?? false;
         const fileSize = message.asset.s3Key ? await fetchFileSize(message.asset.s3Key) : undefined;

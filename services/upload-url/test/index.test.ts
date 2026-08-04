@@ -34,7 +34,7 @@ beforeEach(() => {
 });
 
 describe("upload-url handler -- auth", () => {
-  it("rejects a request with no Authorization header", async () => {
+  it("rejects a request with no session cookie", async () => {
     const res: any = await handler(event(validQuery), {} as any, undefined as any);
     expect(res.statusCode).toBe(401);
     expect(getMembership).not.toHaveBeenCalled();
@@ -43,7 +43,7 @@ describe("upload-url handler -- auth", () => {
   it("rejects a request with an invalid/expired session token", async () => {
     vi.mocked(getSessionUsername).mockResolvedValue(undefined);
     const res: any = await handler(
-      event(validQuery, { authorization: "Bearer bogus" }),
+      event(validQuery, { cookie: "scenette_session=bogus" }),
       {} as any,
       undefined as any
     );
@@ -55,7 +55,7 @@ describe("upload-url handler -- auth", () => {
     vi.mocked(getMembership).mockResolvedValue(undefined);
 
     const res: any = await handler(
-      event(validQuery, { authorization: "Bearer tok" }),
+      event(validQuery, { cookie: "scenette_session=tok" }),
       {} as any,
       undefined as any
     );
@@ -70,7 +70,7 @@ describe("upload-url handler -- auth", () => {
     vi.mocked(sumRoomStorageBytes).mockResolvedValue(0);
 
     const res: any = await handler(
-      event(validQuery, { authorization: "Bearer tok" }),
+      event(validQuery, { cookie: "scenette_session=tok" }),
       {} as any,
       undefined as any
     );
@@ -89,20 +89,20 @@ describe("upload-url handler -- storage quota", () => {
 
   it("allows an upload when the room is under quota", async () => {
     vi.mocked(sumRoomStorageBytes).mockResolvedValue(999);
-    const res: any = await handler(event(validQuery, { authorization: "Bearer tok" }), {} as any, undefined as any);
+    const res: any = await handler(event(validQuery, { cookie: "scenette_session=tok" }), {} as any, undefined as any);
     expect(res.statusCode).toBe(200);
   });
 
   it("rejects an upload once the room is exactly at quota", async () => {
     vi.mocked(sumRoomStorageBytes).mockResolvedValue(1000);
-    const res: any = await handler(event(validQuery, { authorization: "Bearer tok" }), {} as any, undefined as any);
+    const res: any = await handler(event(validQuery, { cookie: "scenette_session=tok" }), {} as any, undefined as any);
     expect(res.statusCode).toBe(413);
     expect(res.body).toMatch(/quota/i);
   });
 
   it("rejects an upload when the room is already over quota", async () => {
     vi.mocked(sumRoomStorageBytes).mockResolvedValue(5000);
-    const res: any = await handler(event(validQuery, { authorization: "Bearer tok" }), {} as any, undefined as any);
+    const res: any = await handler(event(validQuery, { cookie: "scenette_session=tok" }), {} as any, undefined as any);
     expect(res.statusCode).toBe(413);
   });
 });

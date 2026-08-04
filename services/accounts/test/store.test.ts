@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, UpdateCommand, QueryCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import {
   getAccount,
   createAccount,
@@ -17,6 +17,10 @@ import {
   listMembers,
   deleteMembership,
   getRoomOwner,
+  getOrCreateObsKey,
+  regenerateObsKey,
+  getRoomIdByObsKey,
+  getAnnouncement,
   createInvite,
   getInvite,
   redeemInvite,
@@ -27,6 +31,10 @@ import {
   deleteAssetRow,
   deleteRoomRow,
   deleteS3Object,
+  createVerification,
+  getVerification,
+  deleteVerification,
+  markEmailVerified,
 } from "../src/store";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -167,23 +175,63 @@ describe("account mutation helpers (change password/email, delete account)", () 
     });
   });
 
-  it("updateAccountEmail sets the email when given a non-empty value", async () => {
+  it("updateAccountEmail sets the email and marks it unverified when given a non-empty value", async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await updateAccountEmail("alice", "new@example.com");
     const call = ddbMock.commandCalls(UpdateCommand)[0];
     expect(call.args[0].input).toMatchObject({
-      UpdateExpression: "SET email = :e",
-      ExpressionAttributeValues: { ":e": "new@example.com" },
+      UpdateExpression: "SET email = :e, emailVerified = :false",
+      ExpressionAttributeValues: { ":e": "new@example.com", ":false": false },
     });
   });
 
-  it("updateAccountEmail removes the attribute entirely when given undefined", async () => {
+  it("updateAccountEmail removes the attribute and clears verified status when given undefined", async () => {
     ddbMock.on(UpdateCommand).resolves({});
     await updateAccountEmail("alice", undefined);
     const call = ddbMock.commandCalls(UpdateCommand)[0];
-    expect(call.args[0].input.UpdateExpression).toBe("REMOVE email");
+    expect(call.args[0].input.UpdateExpression).toBe("REMOVE email SET emailVerified = :false");
   });
 
+  it("createVerification writes a token row with an expiry and a ttl", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    const v = await createVerification("alice", "a@b.com");
+    expect(v.username).toBe("alice");
+    expect(v.email).toBe("a@b.com");
+    expect(typeof v.token).toBe("string");
+    expect(Date.parse(v.expiresAt)).toBeGreaterThan(Date.now());
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
+  });
+
+  it("getVerification returns undefined for an unknown token", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    await expect(getVerification("bogus")).resolves.toBeUndefined();
+  });
+
+  it("deleteVerification does not throw", async () => {
+    ddbMock.on(DeleteCommand).resolves({});
+    await expect(deleteVerification("tok")).resolves.toBeUndefined();
+  });
+
+  it("markEmailVerified assigns a new room on first verification", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const roomId = await markEmailVerified("alice", "new-room");
+    expect(roomId).toBe("new-room");
+    const call = ddbMock.commandCalls(UpdateCommand)[0];
+    // Guarded so a second click can't mint a second room.
+    expect(call.args[0].input.ConditionExpression).toBe("attribute_not_exists(personalRoomId)");
+  });
+
+  it("markEmailVerified keeps the existing room (no second room) when already verified", async () => {
+    // First update (the conditional room assignment) fails: a room exists.
+    ddbMock.on(UpdateCommand).rejectsOnce(conditionalCheckFailed).resolves({});
+    ddbMock.on(GetCommand).resolves({ Item: { username: "alice", personalRoomId: "existing-room" } });
+    const roomId = await markEmailVerified("alice", "ignored-new-room");
+    expect(roomId).toBe("existing-room");
+  });
+});
+
+describe("account row deletion", () => {
   it("deleteAccountRow does not throw", async () => {
     ddbMock.on(DeleteCommand).resolves({});
     await expect(deleteAccountRow("alice")).resolves.toBeUndefined();
@@ -237,13 +285,69 @@ describe("memberships", () => {
   });
 });
 
+describe("browser-source obsKey", () => {
+  it("getOrCreateObsKey upserts with if_not_exists (stable across calls) and returns it", async () => {
+    ddbMock.on(UpdateCommand).resolves({ Attributes: { roomId: "room1", obsKey: "existing-key" } });
+    const key = await getOrCreateObsKey("room1");
+    expect(key).toBe("existing-key");
+    const call = ddbMock.commandCalls(UpdateCommand)[0];
+    expect(call.args[0].input.UpdateExpression).toBe("SET obsKey = if_not_exists(obsKey, :new)");
+    expect(call.args[0].input.ReturnValues).toBe("ALL_NEW");
+  });
+
+  it("regenerateObsKey overwrites unconditionally (revoking the old key) and returns the new one", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const key = await regenerateObsKey("room1");
+    expect(typeof key).toBe("string");
+    const call = ddbMock.commandCalls(UpdateCommand)[0];
+    // No if_not_exists -- a straight overwrite, so the prior key stops resolving.
+    expect(call.args[0].input.UpdateExpression).toBe("SET obsKey = :new");
+  });
+
+  it("getRoomIdByObsKey resolves via the byObsKey GSI", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [{ roomId: "room1", obsKey: "k" }] });
+    await expect(getRoomIdByObsKey("k")).resolves.toBe("room1");
+    const call = ddbMock.commandCalls(QueryCommand)[0];
+    expect(call.args[0].input.IndexName).toBe("byObsKey");
+  });
+
+  it("getRoomIdByObsKey returns undefined for an unknown key", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    await expect(getRoomIdByObsKey("nope")).resolves.toBeUndefined();
+  });
+});
+
+describe("announcement", () => {
+  it("returns the trimmed S3 object contents when present", async () => {
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: { transformToString: () => Promise.resolve("  hello world  ") },
+    } as any);
+    await expect(getAnnouncement()).resolves.toBe("hello world");
+  });
+
+  it("returns null when the object is absent/unreadable", async () => {
+    s3Mock.on(GetObjectCommand).rejects(Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" }));
+    await expect(getAnnouncement()).resolves.toBeNull();
+  });
+
+  it("returns null for an empty/whitespace-only announcement", async () => {
+    s3Mock.on(GetObjectCommand).resolves({
+      Body: { transformToString: () => Promise.resolve("   \n  ") },
+    } as any);
+    await expect(getAnnouncement()).resolves.toBeNull();
+  });
+});
+
 describe("invites", () => {
-  it("createInvite generates a token and stores the invite", async () => {
+  it("createInvite generates a token, an expiry, and a ttl for the sweep", async () => {
     ddbMock.on(PutCommand).resolves({});
     const invite = await createInvite("room1", "alice");
     expect(invite.roomId).toBe("room1");
     expect(invite.createdBy).toBe("alice");
     expect(typeof invite.inviteToken).toBe("string");
+    expect(Date.parse(invite.expiresAt!)).toBeGreaterThan(Date.now());
+    const item = ddbMock.commandCalls(PutCommand)[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.ttl).toBeGreaterThan(Math.floor(Date.now() / 1000));
   });
 
   it("getInvite returns undefined for an unknown token", async () => {

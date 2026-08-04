@@ -13,8 +13,17 @@ vi.mock("../src/store", () => ({
   listMembers: vi.fn(),
   deleteMembership: vi.fn(),
   getRoomOwner: vi.fn(),
+  getOrCreateObsKey: vi.fn(),
+  regenerateObsKey: vi.fn(),
+  getRoomIdByObsKey: vi.fn(),
+  getAnnouncement: vi.fn(),
   updateAccountPassword: vi.fn(),
+  deleteAllSessionsForUser: vi.fn(),
   updateAccountEmail: vi.fn(),
+  createVerification: vi.fn(),
+  getVerification: vi.fn(),
+  deleteVerification: vi.fn(),
+  markEmailVerified: vi.fn(),
   createInvite: vi.fn(),
   getInvite: vi.fn(),
   redeemInvite: vi.fn(),
@@ -23,6 +32,9 @@ vi.mock("../src/store", () => ({
 }));
 vi.mock("../src/cascade", () => ({
   deleteAccountCascade: vi.fn(),
+}));
+vi.mock("../src/email", () => ({
+  sendVerificationEmail: vi.fn(),
 }));
 
 import { handler } from "../src/index";
@@ -33,6 +45,8 @@ function event(routeKey: string, opts: Partial<APIGatewayProxyEventV2> = {}): AP
   return {
     routeKey,
     headers: {},
+    // apiBaseUrl() reads this to build the verification link.
+    requestContext: { domainName: "api.test.example.com" },
     ...opts,
   } as APIGatewayProxyEventV2;
 }
@@ -43,7 +57,7 @@ function authedEvent(
   opts: Partial<APIGatewayProxyEventV2> = {}
 ): APIGatewayProxyEventV2 {
   vi.mocked(store.getSessionUsername).mockResolvedValue(username);
-  return event(routeKey, { headers: { authorization: "Bearer faketoken" }, ...opts });
+  return event(routeKey, { headers: { cookie: "scenette_session=faketoken" }, ...opts });
 }
 
 function jsonBody(res: Awaited<ReturnType<typeof handler>>): any {
@@ -67,6 +81,19 @@ describe("POST /auth/register", () => {
     expect(jsonBody(res).error).toMatch(/username/);
   });
 
+  it("rejects a username with disallowed characters", async () => {
+    const res: any = await handler(
+      event("POST /auth/register", {
+        body: JSON.stringify({ username: "al ice<b>", email: "a@b.com", password: "password123" }),
+      }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+    expect(jsonBody(res).error).toMatch(/username/);
+    expect(store.createAccount).not.toHaveBeenCalled();
+  });
+
   it("rejects a too-short password", async () => {
     const res: any = await handler(
       event("POST /auth/register", { body: JSON.stringify({ username: "alice", email: "a@b.com", password: "short" }) }),
@@ -87,9 +114,10 @@ describe("POST /auth/register", () => {
     expect(jsonBody(res).error).toMatch(/email/);
   });
 
-  it("allows registering with no email at all -- it's optional", async () => {
+  it("allows registering with no email -- creates no room and starts no verification", async () => {
     vi.mocked(store.createAccount).mockResolvedValue(true);
     vi.mocked(store.createSession).mockResolvedValue("session-token");
+    const email = await import("../src/email");
 
     const res: any = await handler(
       event("POST /auth/register", { body: JSON.stringify({ username: "alice", password: "password123" }) }),
@@ -97,25 +125,51 @@ describe("POST /auth/register", () => {
       undefined as any
     );
     expect(res.statusCode).toBe(201);
-    expect(store.createAccount).toHaveBeenCalledWith(expect.objectContaining({ username: "alice", email: undefined }));
+    expect(store.createAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ username: "alice", email: undefined, emailVerified: false })
+    );
+    // No room until an email is verified.
+    expect(store.putMembership).not.toHaveBeenCalled();
+    expect(store.createVerification).not.toHaveBeenCalled();
+    expect(email.sendVerificationEmail).not.toHaveBeenCalled();
+    const body = jsonBody(res);
+    expect(body.personalRoomId).toBeUndefined();
+    expect(body.emailVerified).toBe(false);
   });
 
-  it("creates the account, its personal room membership, and logs straight in -- no verification step", async () => {
+  it("creates the account, logs in, and starts verification when an email is supplied -- but still no room yet", async () => {
     vi.mocked(store.createAccount).mockResolvedValue(true);
     vi.mocked(store.createSession).mockResolvedValue("session-token");
+    vi.mocked(store.createVerification).mockResolvedValue({
+      token: "vtok",
+      username: "alice",
+      email: "alice@example.com",
+      expiresAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    const email = await import("../src/email");
 
     const res: any = await handler(event("POST /auth/register", { body: validBody }), {} as any, undefined as any);
 
     expect(store.createAccount).toHaveBeenCalledWith(
-      expect.objectContaining({ username: "alice", email: "alice@example.com" })
+      expect.objectContaining({ username: "alice", email: "alice@example.com", emailVerified: false })
     );
-    expect(store.putMembership).toHaveBeenCalledWith(
-      expect.objectContaining({ accountId: "alice", role: "owner" })
+    // The room + owner membership are NOT created at registration.
+    expect(store.putMembership).not.toHaveBeenCalled();
+    expect(store.createVerification).toHaveBeenCalledWith("alice", "alice@example.com");
+    expect(email.sendVerificationEmail).toHaveBeenCalledWith(
+      "alice@example.com",
+      "alice",
+      "vtok",
+      "https://api.test.example.com"
     );
     expect(res.statusCode).toBe(201);
     const body = jsonBody(res);
-    expect(body.sessionToken).toBe("session-token");
+    // The token is set as an HttpOnly cookie, never returned in the body.
+    expect(body.sessionToken).toBeUndefined();
+    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=session-token")]);
+    expect(res.cookies[0]).toContain("HttpOnly");
     expect(body.username).toBe("alice");
+    expect(body.personalRoomId).toBeUndefined();
   });
 
   it("returns 409 when the username is already taken", async () => {
@@ -149,7 +203,8 @@ describe("POST /auth/login", () => {
 
     const res: any = await handler(event("POST /auth/login", { body: loginBody }), {} as any, undefined as any);
     expect(res.statusCode).toBe(200);
-    expect(jsonBody(res).sessionToken).toBe("session-token");
+    expect(jsonBody(res).sessionToken).toBeUndefined();
+    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=session-token")]);
   });
 
   it("logs in an account with no email at all", async () => {
@@ -227,7 +282,7 @@ describe("POST /auth/change-password", () => {
     expect(store.updateAccountPassword).not.toHaveBeenCalled();
   });
 
-  it("updates the password hash/salt on success", async () => {
+  it("updates the password, revokes all sessions, and issues a fresh one on success", async () => {
     const { hashPassword } = await import("../src/passwords");
     const { hash, salt } = await hashPassword("password123");
     vi.mocked(store.getAccount).mockResolvedValue({
@@ -237,6 +292,7 @@ describe("POST /auth/change-password", () => {
       personalRoomId: "room1",
       createdAt: "t",
     });
+    vi.mocked(store.createSession).mockResolvedValue("fresh-token");
     const res: any = await handler(
       authedEvent("POST /auth/change-password", "alice", {
         body: JSON.stringify({ currentPassword: "password123", newPassword: "newpassword123" }),
@@ -246,6 +302,11 @@ describe("POST /auth/change-password", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(store.updateAccountPassword).toHaveBeenCalledWith("alice", expect.any(String), expect.any(String));
+    // Every prior session is revoked (a stolen token dies), then a new one is
+    // minted so the initiating device stays logged in.
+    expect(store.deleteAllSessionsForUser).toHaveBeenCalledWith("alice");
+    // The fresh session is delivered as a cookie, keeping this device logged in.
+    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=fresh-token")]);
   });
 });
 
@@ -269,7 +330,14 @@ describe("POST /auth/change-email", () => {
     expect(store.updateAccountEmail).not.toHaveBeenCalled();
   });
 
-  it("updates the email on success", async () => {
+  it("updates the email and starts verification on success", async () => {
+    vi.mocked(store.createVerification).mockResolvedValue({
+      token: "vtok",
+      username: "alice",
+      email: "new@example.com",
+      expiresAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    const email = await import("../src/email");
     const res: any = await handler(
       authedEvent("POST /auth/change-email", "alice", { body: JSON.stringify({ email: "new@example.com" }) }),
       {} as any,
@@ -277,9 +345,12 @@ describe("POST /auth/change-email", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(store.updateAccountEmail).toHaveBeenCalledWith("alice", "new@example.com");
+    expect(store.createVerification).toHaveBeenCalledWith("alice", "new@example.com");
+    expect(email.sendVerificationEmail).toHaveBeenCalled();
   });
 
-  it("clears the email when given an empty string", async () => {
+  it("clears the email (no verification) when given an empty string", async () => {
+    const email = await import("../src/email");
     const res: any = await handler(
       authedEvent("POST /auth/change-email", "alice", { body: JSON.stringify({ email: "" }) }),
       {} as any,
@@ -287,6 +358,108 @@ describe("POST /auth/change-email", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(store.updateAccountEmail).toHaveBeenCalledWith("alice", undefined);
+    expect(store.createVerification).not.toHaveBeenCalled();
+    expect(email.sendVerificationEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("browser-source URL obfuscation + room owner", () => {
+  it("GET /auth/rooms/{roomId}/owner returns the owner to any member", async () => {
+    vi.mocked(store.getMembership).mockResolvedValue({ accountId: "bob", roomId: "r1", role: "mod" });
+    vi.mocked(store.getRoomOwner).mockResolvedValue("alice");
+    const res: any = await handler(
+      authedEvent("GET /auth/rooms/{roomId}/owner", "bob", { pathParameters: { roomId: "r1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res).ownerUsername).toBe("alice");
+  });
+
+  it("GET /auth/rooms/{roomId}/owner rejects a non-member", async () => {
+    vi.mocked(store.getMembership).mockResolvedValue(undefined);
+    const res: any = await handler(
+      authedEvent("GET /auth/rooms/{roomId}/owner", "carol", { pathParameters: { roomId: "r1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("GET /auth/rooms/{roomId}/obs-url mints the key for the owner", async () => {
+    vi.mocked(store.getMembership).mockResolvedValue({ accountId: "alice", roomId: "r1", role: "owner" });
+    vi.mocked(store.getOrCreateObsKey).mockResolvedValue("opaquekey123");
+    const res: any = await handler(
+      authedEvent("GET /auth/rooms/{roomId}/obs-url", "alice", { pathParameters: { roomId: "r1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res).obsKey).toBe("opaquekey123");
+    expect(store.getOrCreateObsKey).toHaveBeenCalledWith("r1");
+  });
+
+  it("GET /auth/rooms/{roomId}/obs-url is forbidden to a mod (can't lift the OBS URL)", async () => {
+    vi.mocked(store.getMembership).mockResolvedValue({ accountId: "bob", roomId: "r1", role: "mod" });
+    const res: any = await handler(
+      authedEvent("GET /auth/rooms/{roomId}/obs-url", "bob", { pathParameters: { roomId: "r1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(403);
+    expect(store.getOrCreateObsKey).not.toHaveBeenCalled();
+  });
+
+  it("POST /auth/rooms/{roomId}/obs-url rotates the key for the owner", async () => {
+    vi.mocked(store.getMembership).mockResolvedValue({ accountId: "alice", roomId: "r1", role: "owner" });
+    vi.mocked(store.regenerateObsKey).mockResolvedValue("fresh-key");
+    const res: any = await handler(
+      authedEvent("POST /auth/rooms/{roomId}/obs-url", "alice", { pathParameters: { roomId: "r1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res).obsKey).toBe("fresh-key");
+    expect(store.regenerateObsKey).toHaveBeenCalledWith("r1");
+  });
+
+  it("POST /auth/rooms/{roomId}/obs-url is forbidden to a mod", async () => {
+    vi.mocked(store.getMembership).mockResolvedValue({ accountId: "bob", roomId: "r1", role: "mod" });
+    const res: any = await handler(
+      authedEvent("POST /auth/rooms/{roomId}/obs-url", "bob", { pathParameters: { roomId: "r1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(403);
+    expect(store.regenerateObsKey).not.toHaveBeenCalled();
+  });
+
+  it("GET /rooms/resolve maps an obsKey to its roomId with no session", async () => {
+    vi.mocked(store.getRoomIdByObsKey).mockResolvedValue("r1");
+    const res: any = await handler(
+      event("GET /rooms/resolve", { queryStringParameters: { obs: "opaquekey123" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res).roomId).toBe("r1");
+  });
+
+  it("GET /rooms/resolve 404s for an unknown obsKey", async () => {
+    vi.mocked(store.getRoomIdByObsKey).mockResolvedValue(undefined);
+    const res: any = await handler(
+      event("GET /rooms/resolve", { queryStringParameters: { obs: "nope" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("GET /announcement returns the current message with no session", async () => {
+    vi.mocked(store.getAnnouncement).mockResolvedValue("Re-copy your browser source URL");
+    const res: any = await handler(event("GET /announcement"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res).message).toBe("Re-copy your browser source URL");
   });
 });
 
@@ -336,6 +509,30 @@ describe("DELETE /auth/account", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(cascade.deleteAccountCascade).toHaveBeenCalledWith("alice");
+    // The session cookie is cleared (Max-Age=0) on the way out.
+    expect(res.cookies[0]).toContain("scenette_session=;");
+    expect(res.cookies[0]).toContain("Max-Age=0");
+  });
+});
+
+describe("POST /auth/logout", () => {
+  it("deletes the presented session and clears the cookie", async () => {
+    const res: any = await handler(
+      event("POST /auth/logout", { headers: { cookie: "scenette_session=tok" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(store.deleteSession).toHaveBeenCalledWith("tok");
+    expect(res.cookies[0]).toContain("scenette_session=;");
+    expect(res.cookies[0]).toContain("Max-Age=0");
+  });
+
+  it("still clears the cookie (and 200s) when no session cookie is present", async () => {
+    const res: any = await handler(event("POST /auth/logout"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(200);
+    expect(store.deleteSession).not.toHaveBeenCalled();
+    expect(res.cookies[0]).toContain("Max-Age=0");
   });
 });
 
@@ -533,6 +730,128 @@ describe("DELETE /auth/rooms/{roomId}/invites/{inviteToken}", () => {
   });
 });
 
+describe("GET /auth/verify", () => {
+  function verifyEvent(token?: string) {
+    return event("GET /auth/verify", { queryStringParameters: token ? { token } : undefined });
+  }
+
+  it("returns an HTML error for a missing token", async () => {
+    const res: any = await handler(verifyEvent(undefined), {} as any, undefined as any);
+    expect(res.statusCode).toBe(400);
+    expect(res.headers["Content-Type"]).toMatch(/text\/html/);
+  });
+
+  it("returns an HTML error for an expired token", async () => {
+    vi.mocked(store.getVerification).mockResolvedValue({
+      token: "vtok",
+      username: "alice",
+      email: "a@b.com",
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
+    const res: any = await handler(verifyEvent("vtok"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(400);
+    expect(store.markEmailVerified).not.toHaveBeenCalled();
+  });
+
+  it("verifies, creates the room + owner membership, and clears the token", async () => {
+    vi.mocked(store.getVerification).mockResolvedValue({
+      token: "vtok",
+      username: "alice",
+      email: "a@b.com",
+      expiresAt: new Date(Date.now() + 10000).toISOString(),
+    });
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "a@b.com",
+      emailVerified: false,
+      createdAt: "t",
+    });
+    vi.mocked(store.markEmailVerified).mockResolvedValue("new-room");
+
+    const res: any = await handler(verifyEvent("vtok"), {} as any, undefined as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(store.markEmailVerified).toHaveBeenCalledWith("alice", expect.any(String));
+    expect(store.putMembership).toHaveBeenCalledWith({ accountId: "alice", roomId: "new-room", role: "owner" });
+    expect(store.deleteVerification).toHaveBeenCalledWith("vtok");
+  });
+
+  it("rejects a stale token whose email no longer matches the account", async () => {
+    vi.mocked(store.getVerification).mockResolvedValue({
+      token: "vtok",
+      username: "alice",
+      email: "old@b.com",
+      expiresAt: new Date(Date.now() + 10000).toISOString(),
+    });
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "new@b.com",
+      emailVerified: false,
+      createdAt: "t",
+    });
+    const res: any = await handler(verifyEvent("vtok"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(400);
+    expect(store.markEmailVerified).not.toHaveBeenCalled();
+    expect(store.deleteVerification).toHaveBeenCalledWith("vtok");
+  });
+});
+
+describe("POST /auth/resend-verification", () => {
+  it("requires a session", async () => {
+    const res: any = await handler(event("POST /auth/resend-verification"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("resends when the account has a pending unverified email", async () => {
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "a@b.com",
+      emailVerified: false,
+      createdAt: "t",
+    });
+    vi.mocked(store.createVerification).mockResolvedValue({
+      token: "vtok2",
+      username: "alice",
+      email: "a@b.com",
+      expiresAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    const email = await import("../src/email");
+    const res: any = await handler(
+      authedEvent("POST /auth/resend-verification", "alice"),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(email.sendVerificationEmail).toHaveBeenCalled();
+  });
+
+  it("responds generically (no resend, no leak) when the email is already verified", async () => {
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "a@b.com",
+      emailVerified: true,
+      personalRoomId: "room1",
+      createdAt: "t",
+    });
+    const email = await import("../src/email");
+    const res: any = await handler(
+      authedEvent("POST /auth/resend-verification", "alice"),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(email.sendVerificationEmail).not.toHaveBeenCalled();
+  });
+});
+
 describe("POST /auth/invites/{inviteToken}/redeem", () => {
   it("requires a session", async () => {
     const res: any = await handler(
@@ -551,6 +870,24 @@ describe("POST /auth/invites/{inviteToken}/redeem", () => {
       undefined as any
     );
     expect(res.statusCode).toBe(404);
+  });
+
+  it("returns 404 for an expired invite and does not redeem it", async () => {
+    vi.mocked(store.getInvite).mockResolvedValue({
+      inviteToken: "tok1",
+      roomId: "room1",
+      createdBy: "alice",
+      createdAt: "t",
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
+    const res: any = await handler(
+      authedEvent("POST /auth/invites/{inviteToken}/redeem", "bob", { pathParameters: { inviteToken: "tok1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(404);
+    expect(store.redeemInvite).not.toHaveBeenCalled();
+    expect(store.putMembership).not.toHaveBeenCalled();
   });
 
   it("returns 409 when the invite was already redeemed", async () => {

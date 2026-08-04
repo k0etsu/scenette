@@ -1,10 +1,9 @@
 # Validates PRs, including from forks, before merge -- deliberately requests
 # no permissions and touches no secrets/OIDC, since it only builds/lints/
-# synths and never deploys. Deliberately NOT triggered on `push`: pushes to
-# a branch also fire deploy-dev.yml, which builds as the first step of its
-# own single job and simply stops (skipping the deploy step) if that build
-# fails -- so a second, separate build-only workflow on every push added no
-# extra safety, just duplicate npm ci/build work on every branch push.
+# synths and never deploys. This is the only validation a feature branch gets
+# on its own: deploy-dev.yml no longer auto-deploys feature-branch pushes
+# (only the shared `dev` branch), so CI on `pull_request` is what guards a
+# branch's build/synth health before it's merged or manually deployed.
 name: CI
 
 on:
@@ -24,9 +23,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "24"
           cache: npm
