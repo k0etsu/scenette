@@ -216,13 +216,16 @@ async function main(): Promise<void> {
     const roomId = await roomPicker.pickRoom(rooms, session!.personalRoomId, {
       hasEmail: Boolean(session!.email),
       onResend: () => {
+        // Feedback goes into the dashboard's own prompt -- the toolbar status
+        // bar (statusEl) lives in the room view, which is hidden here.
+        const setSub = (t: string) => {
+          const sub = roomPickerViewEl!.querySelector(".room-picker-verify-sub");
+          if (sub) sub.textContent = t;
+        };
+        setSub("Sending…");
         void resendVerification(httpApiUrl)
-          .then(() => {
-            statusEl!.textContent = "Verification email sent — check your inbox, then reload.";
-          })
-          .catch((err) => {
-            statusEl!.textContent = `Could not resend verification: ${err instanceof Error ? err.message : String(err)}`;
-          });
+          .then(() => setSub("Verification email sent — check your inbox, then reload."))
+          .catch((err) => setSub(`Couldn't send the email: ${err instanceof Error ? err.message : String(err)}`));
       },
     }, announcement);
     // The user just made an explicit choice -- push so that a later "back"

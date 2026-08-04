@@ -832,6 +832,32 @@ describe("POST /auth/resend-verification", () => {
     expect(email.sendVerificationEmail).toHaveBeenCalled();
   });
 
+  it("surfaces a 502 to the owner when the verification email fails to send", async () => {
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "a@b.com",
+      emailVerified: false,
+      createdAt: "t",
+    });
+    vi.mocked(store.createVerification).mockResolvedValue({
+      token: "vtok3",
+      username: "alice",
+      email: "a@b.com",
+      expiresAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    const email = await import("../src/email");
+    vi.mocked(email.sendVerificationEmail).mockRejectedValueOnce(new Error("Email address is not verified"));
+    const res: any = await handler(
+      authedEvent("POST /auth/resend-verification", "alice"),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(502);
+    expect(jsonBody(res).error).toMatch(/not verified/);
+  });
+
   it("responds generically (no resend, no leak) when the email is already verified", async () => {
     vi.mocked(store.getAccount).mockResolvedValue({
       username: "alice",

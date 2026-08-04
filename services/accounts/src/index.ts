@@ -276,10 +276,19 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (!username) return json(401, { error: "Invalid or missing session" });
 
       const account = await getAccount(username);
-      // Deliberately generic response whether or not a resend actually
-      // happened -- never reveals whether an account has a pending email.
       if (account?.email && !account.emailVerified) {
-        await startEmailVerification(username, account.email, apiBaseUrl(event));
+        const verification = await createVerification(username, account.email);
+        try {
+          await sendVerificationEmail(account.email, username, verification.token, apiBaseUrl(event));
+        } catch (err) {
+          // Surface the failure to the (authenticated) owner rather than
+          // swallowing it -- a silent "sent!" with no email arriving is worse,
+          // and there's no cross-account enumeration risk on one's own account.
+          console.error("Failed to send verification email", err);
+          return json(502, {
+            error: `Could not send the verification email: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
       }
       return json(200, { ok: true });
     }
