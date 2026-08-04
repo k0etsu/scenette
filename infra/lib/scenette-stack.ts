@@ -232,7 +232,6 @@ export class ScenetteStack extends cdk.Stack {
       });
     });
     const verificationFromAddress = `noreply@${mailDomain}`;
-    const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${mailDomain}`;
 
     // ---- WebSocket API ----
 
@@ -439,11 +438,17 @@ export class ScenetteStack extends cdk.Stack {
     roomsTable.grantReadWriteData(accountsFn);
     assetsTable.grantReadWriteData(accountsFn);
     emailVerificationsTable.grantReadWriteData(accountsFn);
-    // Send-only, scoped to the hanzomon.co identity -- the verification email.
+    // Send the verification email. SES authorizes SendEmail against every
+    // identity involved -- including the recipient (a verified recipient is an
+    // identity in sandbox mode) -- so scoping the resource to only the sender
+    // identity denies sends to real recipients. Resource is therefore "*",
+    // kept least-privilege via a From-address condition: this role can only
+    // ever send *from* our own noreply@ address.
     accountsFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["ses:SendEmail", "ses:SendRawEmail"],
-        resources: [mailIdentityArn],
+        resources: ["*"],
+        conditions: { StringEquals: { "ses:FromAddress": verificationFromAddress } },
       })
     );
     // Delete only -- the cascade never reads/writes an asset's actual
