@@ -165,6 +165,13 @@ describe("DynamoDB GSIs the accounts routes depend on", () => {
       GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({ IndexName: "byRoom" })]),
     });
   });
+
+  it("AccountsTable has a byEmail GSI (enforcing one email per room)", () => {
+    devTemplate.hasResourceProperties("AWS::DynamoDB::Table", {
+      TableName: "scenette-dev-accounts",
+      GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({ IndexName: "byEmail" })]),
+    });
+  });
 });
 
 describe("durability & abuse hardening", () => {

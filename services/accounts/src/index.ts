@@ -6,6 +6,7 @@ import { sendVerificationEmail } from "./email";
 import { setSessionCookie, clearSessionCookie, readSessionToken } from "./cookies";
 import {
   getAccount,
+  getEmailOwner,
   createAccount,
   createSession,
   getSessionUsername,
@@ -133,6 +134,10 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (email !== undefined && (typeof email !== "string" || (email !== "" && !EMAIL_PATTERN.test(email)))) {
         return json(400, { error: "email must be a valid address" });
       }
+      // One email per room -- reject up front if it already owns one elsewhere.
+      if (email && (await getEmailOwner(email as string))) {
+        return json(409, { error: "That email is already in use" });
+      }
 
       const { hash, salt } = await hashPassword(password);
       const created = await createAccount({
@@ -251,6 +256,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (email !== undefined && (typeof email !== "string" || (email !== "" && !EMAIL_PATTERN.test(email)))) {
         return json(400, { error: "email must be a valid address" });
       }
+      // One email per room -- reject if another account already owns it.
+      if (email) {
+        const owner = await getEmailOwner(email as string);
+        if (owner && owner !== username) {
+          return json(409, { error: "That email is already in use" });
+        }
+      }
 
       await updateAccountEmail(username, (email as string | undefined) || undefined);
       // Setting a (non-empty) email starts verification -- the address is
@@ -281,6 +293,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (account.email !== verification.email) {
         await deleteVerification(token);
         return html(400, "Link expired", "This link was for a different email address. Request a new one from scenette.");
+      }
+      // One email per room -- authoritative check (also covers a race between
+      // two accounts verifying the same address). If another account already
+      // owns it, don't create a second room.
+      const existingOwner = await getEmailOwner(verification.email);
+      if (existingOwner && existingOwner !== verification.username) {
+        await deleteVerification(token);
+        return html(400, "Email already in use", "That email address already belongs to another scenette account. Use a different email address.");
       }
 
       const roomId = await markEmailVerified(verification.username, randomUUID());

@@ -64,6 +64,21 @@ export async function getAccount(username: string): Promise<Account | undefined>
   return Item as Account | undefined;
 }
 
+// The username of the account that has this email VERIFIED, if any -- the
+// basis for "one email per room" (a verified email owns a room, and can only
+// do so on one account). Undefined if no account has verified this email.
+export async function getEmailOwner(email: string): Promise<string | undefined> {
+  const { Items = [] } = await ddb.send(
+    new QueryCommand({
+      TableName: ACCOUNTS_TABLE,
+      IndexName: "byEmail",
+      KeyConditionExpression: "email = :e",
+      ExpressionAttributeValues: { ":e": email },
+    })
+  );
+  return (Items as Account[]).find((a) => a.emailVerified)?.username;
+}
+
 export async function createAccount(account: Account): Promise<boolean> {
   try {
     await ddb.send(

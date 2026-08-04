@@ -126,6 +126,13 @@ export class ScenetteStack extends cdk.Stack {
       pointInTimeRecoverySpecification,
       removalPolicy,
     });
+    // "One email per room": enforce that a given email is verified on at most
+    // one account (see AccountsFn's register/change-email/verify). Sparse --
+    // only accounts that have set an email appear.
+    accountsTable.addGlobalSecondaryIndex({
+      indexName: "byEmail",
+      partitionKey: { name: "email", type: dynamodb.AttributeType.STRING },
+    });
 
     const sessionsTable = new dynamodb.Table(this, "SessionsTable", {
       tableName: `scenette-${envName}-sessions`,

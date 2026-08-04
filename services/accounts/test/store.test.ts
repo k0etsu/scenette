@@ -4,6 +4,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, UpdateCo
 import { S3Client, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import {
   getAccount,
+  getEmailOwner,
   createAccount,
   createSession,
   getSessionUsername,
@@ -113,6 +114,30 @@ describe("getAccount", () => {
   it("returns undefined when not found", async () => {
     ddbMock.on(GetCommand).resolves({ Item: undefined });
     await expect(getAccount("missing")).resolves.toBeUndefined();
+  });
+});
+
+describe("getEmailOwner", () => {
+  it("returns the username of the account that has the email VERIFIED", async () => {
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        { username: "bob", email: "x@y.com", emailVerified: false },
+        { username: "alice", email: "x@y.com", emailVerified: true },
+      ],
+    });
+    await expect(getEmailOwner("x@y.com")).resolves.toBe("alice");
+    const call = ddbMock.commandCalls(QueryCommand)[0];
+    expect(call.args[0].input.IndexName).toBe("byEmail");
+  });
+
+  it("returns undefined when the email exists but is unverified on all accounts", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [{ username: "bob", email: "x@y.com", emailVerified: false }] });
+    await expect(getEmailOwner("x@y.com")).resolves.toBeUndefined();
+  });
+
+  it("returns undefined when no account has the email", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    await expect(getEmailOwner("nobody@y.com")).resolves.toBeUndefined();
   });
 });
 

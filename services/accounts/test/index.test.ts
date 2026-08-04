@@ -3,6 +3,7 @@ import type { APIGatewayProxyEventV2 } from "aws-lambda";
 
 vi.mock("../src/store", () => ({
   getAccount: vi.fn(),
+  getEmailOwner: vi.fn(),
   createAccount: vi.fn(),
   createSession: vi.fn(),
   getSessionUsername: vi.fn(),
@@ -177,6 +178,76 @@ describe("POST /auth/register", () => {
     vi.mocked(store.createAccount).mockResolvedValue(false);
     const res: any = await handler(event("POST /auth/register", { body: validBody }), {} as any, undefined as any);
     expect(res.statusCode).toBe(409);
+  });
+});
+
+describe("one email per room", () => {
+  it("register rejects an email that already owns a room elsewhere", async () => {
+    vi.mocked(store.getEmailOwner).mockResolvedValue("someone-else");
+    const res: any = await handler(
+      event("POST /auth/register", {
+        body: JSON.stringify({ username: "newguy", email: "taken@example.com", password: "password123" }),
+      }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(409);
+    expect(jsonBody(res).error).toMatch(/already in use/i);
+    expect(store.createAccount).not.toHaveBeenCalled();
+  });
+
+  it("change-email rejects an email owned by another account", async () => {
+    vi.mocked(store.getEmailOwner).mockResolvedValue("someone-else");
+    const res: any = await handler(
+      authedEvent("POST /auth/change-email", "alice", { body: JSON.stringify({ email: "taken@example.com" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(409);
+    expect(store.updateAccountEmail).not.toHaveBeenCalled();
+  });
+
+  it("change-email allows re-setting an email the SAME account already owns", async () => {
+    vi.mocked(store.getEmailOwner).mockResolvedValue("alice");
+    vi.mocked(store.createVerification).mockResolvedValue({
+      token: "vt",
+      username: "alice",
+      email: "mine@example.com",
+      expiresAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    const res: any = await handler(
+      authedEvent("POST /auth/change-email", "alice", { body: JSON.stringify({ email: "mine@example.com" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(store.updateAccountEmail).toHaveBeenCalledWith("alice", "mine@example.com");
+  });
+
+  it("verify refuses to create a second room when another account already owns the email", async () => {
+    vi.mocked(store.getVerification).mockResolvedValue({
+      token: "vtok",
+      username: "bob",
+      email: "taken@example.com",
+      expiresAt: new Date(Date.now() + 10000).toISOString(),
+    });
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "bob",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "taken@example.com",
+      emailVerified: false,
+      createdAt: "t",
+    });
+    vi.mocked(store.getEmailOwner).mockResolvedValue("alice"); // already owned
+    const res: any = await handler(
+      event("GET /auth/verify", { queryStringParameters: { token: "vtok" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+    expect(store.markEmailVerified).not.toHaveBeenCalled();
+    expect(store.deleteVerification).toHaveBeenCalledWith("vtok");
   });
 });
 
