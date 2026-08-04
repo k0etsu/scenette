@@ -62,18 +62,36 @@ async function requireSession(
   return getSessionUsername(token);
 }
 
-// A minimal self-contained confirmation page for the emailed verify link
-// (which is opened directly in a browser, not via the SPA). Only static,
-// non-user-controlled text is interpolated -- no XSS surface.
-function html(statusCode: number, title: string, message: string): APIGatewayProxyResultV2 {
+// The control-ui origin, so the emailed verify page can send the user back
+// into the app (and auto-redirect on success). Set by CDK.
+const APP_URL = process.env.APP_URL;
+
+// A minimal, self-contained, dark-themed confirmation page for the emailed
+// verify link (opened directly in a browser, not the SPA). Only static,
+// non-user-controlled text is interpolated -- no XSS surface. On success it
+// auto-redirects into the app; every page also offers a manual link.
+function html(
+  statusCode: number,
+  title: string,
+  message: string,
+  { redirect = false }: { redirect?: boolean } = {}
+): APIGatewayProxyResultV2 {
+  const meta = redirect && APP_URL ? `<meta http-equiv="refresh" content="2;url=${APP_URL}">` : "";
+  const link = APP_URL
+    ? `<p style="margin-top:1.5rem"><a href="${APP_URL}" style="color:#6ea8fe">${
+        redirect ? "Continue to scenette" : "Go to scenette"
+      }</a></p>`
+    : "";
   return {
     statusCode,
     headers: { "Content-Type": "text/html; charset=utf-8" },
     body:
       `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
-      `<meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head>` +
-      `<body style="font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;text-align:center">` +
-      `<h1>${title}</h1><p>${message}</p></body></html>`,
+      `<meta name="viewport" content="width=device-width,initial-scale=1">${meta}<title>${title}</title></head>` +
+      `<body style="font-family:system-ui,sans-serif;background:#1e1f24;color:#e8e8ea;min-height:100vh;margin:0;` +
+      `display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:1rem">` +
+      `<div style="max-width:32rem"><h1 style="font-weight:600">${title}</h1>` +
+      `<p style="color:#b8bcc4;line-height:1.5">${message}</p>${link}</div></body></html>`,
   };
 }
 
@@ -268,7 +286,9 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const roomId = await markEmailVerified(verification.username, randomUUID());
       await putMembership({ accountId: verification.username, roomId, role: "owner" });
       await deleteVerification(token);
-      return html(200, "Email verified", "Your email is verified and your room is ready. Head back to scenette to start using it.");
+      return html(200, "Email verified", "Your email is verified and your room is ready. Taking you to scenette…", {
+        redirect: true,
+      });
     }
 
     case "POST /auth/resend-verification": {

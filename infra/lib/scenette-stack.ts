@@ -429,6 +429,8 @@ export class ScenetteStack extends cdk.Stack {
         // Scopes the session cookie to the whole zone so control-ui and both
         // APIs (all same-site subdomains) share it.
         COOKIE_DOMAIN: cookieDomain,
+        // control-ui origin -- the emailed verify page redirects here on success.
+        APP_URL: `https://${controlUiDomain}`,
       },
     });
     accountsTable.grantReadWriteData(accountsFn);
