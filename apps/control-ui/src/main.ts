@@ -22,6 +22,7 @@ import {
   listRooms,
   getRoomOwner,
   getBrowserSourceKey,
+  regenerateBrowserSourceKey,
   SessionInfo,
 } from "./auth";
 
@@ -55,6 +56,7 @@ const manageAccessButton = document.getElementById("manage-access-button");
 const accessModalEl = document.getElementById("access-modal");
 const settingsModalEl = document.getElementById("settings-modal");
 const copyBrowserSourceButton = document.getElementById("copy-browser-source-button");
+const regenerateBrowserSourceButton = document.getElementById("regenerate-browser-source-button");
 const dashboardButton = document.getElementById("dashboard-button");
 const statusEl = document.getElementById("status");
 
@@ -396,6 +398,30 @@ async function main(): Promise<void> {
     }
   });
 
+  regenerateBrowserSourceButton!.addEventListener("click", async () => {
+    if (!current || !current.isOwner) return;
+    // Destructive: the current URL stops working immediately, so confirm first.
+    if (
+      !window.confirm(
+        "Regenerate the browser source URL? The current URL will stop working immediately and must be replaced in OBS."
+      )
+    ) {
+      return;
+    }
+    try {
+      const obsKey = await regenerateBrowserSourceKey(httpApiUrl, current.roomId);
+      const url = `${browserSourceUrl}/?obs=${encodeURIComponent(obsKey)}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        statusEl!.textContent = "browser source URL regenerated and copied — update it in OBS";
+      } catch {
+        statusEl!.textContent = `browser source URL regenerated — update it in OBS: ${url}`;
+      }
+    } catch (err) {
+      statusEl!.textContent = `couldn't regenerate browser source URL: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  });
+
   dashboardButton!.addEventListener("click", () => {
     void goToDashboard(true);
   });
@@ -481,10 +507,11 @@ function enterRoom(
   const isOwner = roomId === session.personalRoomId;
   streamPreviewPanel.setIsOwner(isOwner);
 
-  // Copying the browser-source URL is owner-only -- it's the capability that
-  // lets someone render the room as an overlay, which a mod must not be able
-  // to lift for a room that isn't theirs.
+  // Copying (and rotating) the browser-source URL is owner-only -- it's the
+  // capability that lets someone render the room as an overlay, which a mod
+  // must not be able to lift for a room that isn't theirs.
   copyBrowserSourceButton!.style.display = isOwner ? "" : "none";
+  regenerateBrowserSourceButton!.style.display = isOwner ? "" : "none";
 
   // Header shows whose room this is. Known immediately when it's the current
   // user's own; resolved async for a mod-access room.

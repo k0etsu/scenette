@@ -102,6 +102,16 @@ export async function getBrowserSourceKey(httpApiUrl: string, roomId: string): P
   return data.obsKey;
 }
 
+// Owner-only: rotate the key, invalidating any previously-shared URL.
+export async function regenerateBrowserSourceKey(httpApiUrl: string, roomId: string): Promise<string> {
+  const res = await fetch(`${httpApiUrl}/auth/rooms/${encodeURIComponent(roomId)}/obs-url`, {
+    ...withCredentials,
+    method: "POST",
+  });
+  const data = await parseJsonOrThrow(res);
+  return data.obsKey;
+}
+
 export interface Member {
   accountId: string;
   roomId: string;

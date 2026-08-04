@@ -60,6 +60,7 @@ describe("browser-source URL obfuscation", () => {
     const routeKeys = Object.values(routes).map((r: any) => r.Properties?.RouteKey);
     expect(routeKeys).toContain("GET /auth/rooms/{roomId}/owner");
     expect(routeKeys).toContain("GET /auth/rooms/{roomId}/obs-url");
+    expect(routeKeys).toContain("POST /auth/rooms/{roomId}/obs-url"); // regenerate
     expect(routeKeys).toContain("GET /rooms/resolve");
   });
 });

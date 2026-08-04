@@ -315,6 +315,23 @@ export async function getOrCreateObsKey(roomId: string): Promise<string> {
   return Attributes!.obsKey as string;
 }
 
+// Unconditionally rotates the obsKey, revoking any URL that used the old one
+// (the byObsKey GSI drops the old value the moment this write lands, so
+// GET /rooms/resolve on the stale key immediately 404s). Owner-initiated --
+// see the owner-gated route.
+export async function regenerateObsKey(roomId: string): Promise<string> {
+  const obsKey = randomBytes(16).toString("base64url");
+  await ddb.send(
+    new UpdateCommand({
+      TableName: ROOMS_TABLE,
+      Key: { roomId },
+      UpdateExpression: "SET obsKey = :new",
+      ExpressionAttributeValues: { ":new": obsKey },
+    })
+  );
+  return obsKey;
+}
+
 export async function getRoomIdByObsKey(obsKey: string): Promise<string | undefined> {
   const { Items = [] } = await ddb.send(
     new QueryCommand({

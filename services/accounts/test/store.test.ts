@@ -18,6 +18,7 @@ import {
   deleteMembership,
   getRoomOwner,
   getOrCreateObsKey,
+  regenerateObsKey,
   getRoomIdByObsKey,
   createInvite,
   getInvite,
@@ -291,6 +292,15 @@ describe("browser-source obsKey", () => {
     const call = ddbMock.commandCalls(UpdateCommand)[0];
     expect(call.args[0].input.UpdateExpression).toBe("SET obsKey = if_not_exists(obsKey, :new)");
     expect(call.args[0].input.ReturnValues).toBe("ALL_NEW");
+  });
+
+  it("regenerateObsKey overwrites unconditionally (revoking the old key) and returns the new one", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const key = await regenerateObsKey("room1");
+    expect(typeof key).toBe("string");
+    const call = ddbMock.commandCalls(UpdateCommand)[0];
+    // No if_not_exists -- a straight overwrite, so the prior key stops resolving.
+    expect(call.args[0].input.UpdateExpression).toBe("SET obsKey = :new");
   });
 
   it("getRoomIdByObsKey resolves via the byObsKey GSI", async () => {

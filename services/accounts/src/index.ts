@@ -17,6 +17,7 @@ import {
   deleteMembership,
   getRoomOwner,
   getOrCreateObsKey,
+  regenerateObsKey,
   getRoomIdByObsKey,
   updateAccountPassword,
   deleteAllSessionsForUser,
@@ -368,6 +369,23 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       return json(200, { obsKey: await getOrCreateObsKey(roomId) });
+    }
+
+    // Owner-only: rotate the obsKey, revoking whatever URL was in use before.
+    // POST (a state change) as opposed to the idempotent GET above.
+    case "POST /auth/rooms/{roomId}/obs-url": {
+      const username = await requireSession(event.headers ?? {});
+      if (!username) return json(401, { error: "Invalid or missing session" });
+
+      const roomId = event.pathParameters?.roomId;
+      if (!roomId) return json(400, { error: "Missing roomId" });
+
+      const membership = await getMembership(username, roomId);
+      if (!membership || membership.role !== "owner") {
+        return json(403, { error: "Only the room owner can regenerate the browser source URL" });
+      }
+
+      return json(200, { obsKey: await regenerateObsKey(roomId) });
     }
 
     // Public (no session): browser-source, which is anonymous, exchanges the

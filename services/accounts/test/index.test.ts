@@ -14,6 +14,7 @@ vi.mock("../src/store", () => ({
   deleteMembership: vi.fn(),
   getRoomOwner: vi.fn(),
   getOrCreateObsKey: vi.fn(),
+  regenerateObsKey: vi.fn(),
   getRoomIdByObsKey: vi.fn(),
   updateAccountPassword: vi.fn(),
   deleteAllSessionsForUser: vi.fn(),
@@ -406,6 +407,30 @@ describe("browser-source URL obfuscation + room owner", () => {
     );
     expect(res.statusCode).toBe(403);
     expect(store.getOrCreateObsKey).not.toHaveBeenCalled();
+  });
+
+  it("POST /auth/rooms/{roomId}/obs-url rotates the key for the owner", async () => {
+    vi.mocked(store.getMembership).mockResolvedValue({ accountId: "alice", roomId: "r1", role: "owner" });
+    vi.mocked(store.regenerateObsKey).mockResolvedValue("fresh-key");
+    const res: any = await handler(
+      authedEvent("POST /auth/rooms/{roomId}/obs-url", "alice", { pathParameters: { roomId: "r1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res).obsKey).toBe("fresh-key");
+    expect(store.regenerateObsKey).toHaveBeenCalledWith("r1");
+  });
+
+  it("POST /auth/rooms/{roomId}/obs-url is forbidden to a mod", async () => {
+    vi.mocked(store.getMembership).mockResolvedValue({ accountId: "bob", roomId: "r1", role: "mod" });
+    const res: any = await handler(
+      authedEvent("POST /auth/rooms/{roomId}/obs-url", "bob", { pathParameters: { roomId: "r1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(403);
+    expect(store.regenerateObsKey).not.toHaveBeenCalled();
   });
 
   it("GET /rooms/resolve maps an obsKey to its roomId with no session", async () => {

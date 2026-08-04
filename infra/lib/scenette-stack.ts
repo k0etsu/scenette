@@ -503,7 +503,7 @@ export class ScenetteStack extends cdk.Stack {
     });
     httpApi.addRoutes({
       path: "/auth/rooms/{roomId}/obs-url",
-      methods: [apigwv2.HttpMethod.GET],
+      methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
       integration: accountsIntegration,
     });
     httpApi.addRoutes({
