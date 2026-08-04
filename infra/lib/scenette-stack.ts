@@ -217,11 +217,20 @@ export class ScenetteStack extends cdk.Stack {
     // setting lifted once via an AWS Support request -- unrelated to any
     // deploy. See docs/deploy-cookie-auth.md.
     const mailDomain = envName === "prod" ? HANZOMON_ZONE_NAME : `dev.${HANZOMON_ZONE_NAME}`;
-    // SES identity temporarily removed to force a clean recreate (fresh DKIM
-    // tokens + an immediate re-verification cycle) -- the identity was stuck in
-    // "pending" because earlier failed deploys left it backed off. Re-added in
-    // the very next deploy. The From-address/ARN below are plain strings, valid
-    // regardless of whether the identity currently exists.
+    const mailIdentity = new ses.EmailIdentity(this, "MailIdentity", {
+      identity: ses.Identity.domain(mailDomain),
+    });
+    // Correct DKIM CNAMEs. record.name is already the fully-qualified DKIM host
+    // (<token>._domainkey.<mailDomain>); the trailing dot marks it absolute so
+    // CnameRecord doesn't append the zone again (which produced the broken
+    // <...>.dev.hanzomon.co.hanzomon.co names on an earlier deploy).
+    mailIdentity.dkimRecords.forEach((record, i) => {
+      new route53.CnameRecord(this, `DkimCname${i}`, {
+        zone: hostedZone,
+        recordName: record.name.endsWith(".") ? record.name : `${record.name}.`,
+        domainName: record.value,
+      });
+    });
     const verificationFromAddress = `noreply@${mailDomain}`;
     const mailIdentityArn = `arn:aws:ses:${this.region}:${this.account}:identity/${mailDomain}`;
 
