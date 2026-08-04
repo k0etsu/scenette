@@ -223,8 +223,17 @@ export class ScenetteStack extends cdk.Stack {
     mailIdentity.dkimRecords.forEach((record, i) => {
       new route53.CnameRecord(this, `MailDkimRecord${i}`, {
         zone: hostedZone,
-        recordName: record.name,
+        // record.name is already the fully-qualified DKIM host
+        // (<token>._domainkey.<mailDomain>). CnameRecord otherwise appends the
+        // zone name again -> <token>._domainkey.dev.hanzomon.co.hanzomon.co,
+        // which never matches what SES looks for. The trailing dot marks it
+        // absolute so CDK leaves it as-is.
+        recordName: record.name.endsWith(".") ? record.name : `${record.name}.`,
         domainName: record.value,
+        // Overwrite any record already at this name rather than failing the
+        // deploy on a conflict -- lets the corrected record replace a
+        // hand-created or previously-mis-generated one cleanly.
+        deleteExisting: true,
       });
     });
     const verificationFromAddress = `noreply@${mailDomain}`;
