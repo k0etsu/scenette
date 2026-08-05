@@ -116,6 +116,12 @@ interface RoomSession {
   // so switching rooms doesn't leave a timer still polling a room this
   // connection has left.
   pollTimer?: ReturnType<typeof setInterval>;
+  // Set true once the first room:snapshot of this session has been fed to the
+  // stream-preview panel via enterRoom() (a one-time reset of local-only view
+  // toggles -- embed/interactive/opacity). Later snapshots go through the
+  // seq-guarded applySettings() instead, so periodic polls and reconnects
+  // don't keep re-resetting those toggles. See the room:snapshot case.
+  streamPreviewEntered?: boolean;
 }
 
 let current: RoomSession | undefined;
@@ -689,13 +695,26 @@ function enterRoom(
           // the raw (potentially stale-for-an-in-flight-edit) snapshot.
           sidebar.setAssets(canvas.getAllAssets());
           soundPanel.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
-          // enterRoom (not applySettings) -- this panel is a singleton that
-          // survives every room switch, so a plain seq-guarded apply here
-          // would compare this room's stored seq against whatever this
-          // browser last applied in the PREVIOUS room, silently rejecting
-          // the new room's real settings as "stale" whenever that happened
-          // to be lower. See streamPreview.ts's enterRoom() doc comment.
-          streamPreviewPanel.enterRoom(message.streamPreviewSettings, message.streamPreviewSettingsSeq);
+          // First snapshot of this room session uses enterRoom (not
+          // applySettings): this panel is a singleton that survives every
+          // room switch, so a plain seq-guarded apply would compare this
+          // room's stored seq against whatever this browser last applied in
+          // the PREVIOUS room, silently rejecting the new room's real
+          // settings as "stale" whenever that happened to be lower. But
+          // enterRoom also RESETS the local-only view toggles (embed /
+          // interactive / opacity), so it must run exactly once per entry --
+          // NOT on every periodic room:snapshot poll (line ~583), which would
+          // keep unchecking the user's embed toggle and tearing down the
+          // iframe a few seconds after they set it. Later snapshots (polls,
+          // reconnects) use the seq-guarded applySettings, which leaves those
+          // local toggles alone. See streamPreview.ts's enterRoom() /
+          // applySettings() doc comments.
+          if (room.streamPreviewEntered) {
+            streamPreviewPanel.applySettings(message.streamPreviewSettings, message.streamPreviewSettingsSeq);
+          } else {
+            streamPreviewPanel.enterRoom(message.streamPreviewSettings, message.streamPreviewSettingsSeq);
+            room.streamPreviewEntered = true;
+          }
           canvas.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
           variablesPanel.setVariables(message.variables);
           connectedUsersPanel.setPresence(message.presence);

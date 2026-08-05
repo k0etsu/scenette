@@ -419,6 +419,27 @@ describe("StreamPreviewPanel -- applySettings (live broadcast within the same ro
     enableEmbed();
     expect(iframeEl().src).toContain("channel=third");
   });
+
+  // Regression: main.ts routes every room:snapshot AFTER the first through
+  // applySettings (only the first per entry goes through enterRoom). The
+  // periodic snapshot poll therefore lands here every few seconds, so
+  // applySettings must NOT touch the local-only embed toggle -- otherwise a
+  // poll would silently uncheck "embed" and tear down the iframe moments
+  // after the user turned it on. enterRoom owns that reset; applySettings
+  // leaves it alone.
+  it("does not disturb a user-enabled embed toggle (so periodic poll snapshots don't tear down the iframe)", () => {
+    const panel = makePanel();
+    panel.applySettings({ platform: "twitch", twitchChannel: "chan", youtubeChannelId: "" }, 1);
+    enableEmbed();
+    expect(checkbox("embed").checked).toBe(true);
+    expect(iframeEl().style.display).toBe("block");
+
+    // A later poll snapshot for the same room arrives via applySettings.
+    panel.applySettings({ platform: "twitch", twitchChannel: "chan", youtubeChannelId: "" }, 2);
+
+    expect(checkbox("embed").checked).toBe(true);
+    expect(iframeEl().style.display).toBe("block");
+  });
 });
 
 describe("StreamPreviewPanel -- enterRoom (switching rooms)", () => {
