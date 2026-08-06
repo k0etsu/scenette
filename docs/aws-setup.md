@@ -188,16 +188,3 @@ Repo Settings → Secrets and variables → Actions → Variables:
 These are role ARNs, not credentials — safe to be plain (non-secret)
 repo variables, and readable in workflow logs without exposing anything
 exploitable.
-
-## 5. Provision OAuth app secrets in Secrets Manager (per environment)
-
-Register OAuth apps with Twitch, Google (YouTube), and Discord, then store each
-provider's client id/secret pair directly in Secrets Manager — never in
-GitHub, never in CDK code:
-
-```bash
-aws secretsmanager create-secret \
-  --name scenette/dev/oauth/twitch \
-  --secret-string '{"clientId":"...","clientSecret":"..."}'
-# repeat for youtube, discord, and for the prod/ prefix with prod app credentials
-```

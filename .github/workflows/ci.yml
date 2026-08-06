@@ -1,31 +1,43 @@
+# Validates PRs, including from forks, before merge -- deliberately requests
+# no permissions and touches no secrets/OIDC, since it only builds/lints/
+# synths and never deploys. This is the only validation a feature branch gets
+# on its own: deploy-dev.yml no longer auto-deploys feature-branch pushes
+# (only the shared `dev` branch), so CI on `pull_request` is what guards a
+# branch's build/synth health before it's merged or manually deployed.
 name: CI
 
-# Runs on every push and PR, including from forks. Deliberately requests no
-# permissions and touches no secrets/OIDC — safe to run untrusted PR code
-# against, since it only builds/lints/synths and never deploys.
 on:
-  push:
-    branches-ignore: [main]
   pull_request:
 
 permissions:
   contents: read
 
+# A new push to the same PR supersedes the last one -- no point finishing a
+# stale validation run, unlike an actual deploy (see deploy.yml) where an
+# in-progress run must never be cut off mid-way.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: "20"
+          node-version: "24"
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
 
       - name: Build all workspaces
         run: npm run build
+
+      - name: Run tests
+        run: npm test
 
       - name: CDK synth (no deploy)
         working-directory: infra

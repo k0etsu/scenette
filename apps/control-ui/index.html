@@ -1,0 +1,1035 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>scenette control ui</title>
+    <!-- Loaded here (not just browser-source) so a text asset's font
+         renders the same in this editor preview as it does to viewers --
+         only the families actually available on Google Fonts under these
+         exact names; the rest of TEXT_FONT_FAMILIES (packages/protocol/src/
+         textStyle.ts) fall back to the browser's default sans-serif on
+         machines that don't happen to have them installed locally. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;200;300;400;500;600;700;800;900&family=Roboto+Mono:wght@100;200;300;400;500;600;700&family=Space+Mono:wght@400;700&family=Comic+Neue:wght@300;400;700&family=Redressed&family=Averia+Serif+Libre:wght@300;400;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #1e1f24;
+        color: #eee;
+        font-family: system-ui, sans-serif;
+        overflow: hidden;
+        /* A fast mouse drag over asset labels/panel text (dragging an
+           asset, panning, or just moving quickly across the sidebar)
+           otherwise starts a native text selection, which paints every
+           text node the cursor crosses with the browser's blue selection
+           highlight -- distracting and not an actual feature here, since
+           there's no text in this app worth copy-selecting outside of
+           form fields. Re-enabled explicitly on inputs/textareas below. */
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      input, textarea {
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      #app-view {
+        display: none;
+        flex-direction: column;
+        height: 100%;
+      }
+      #toolbar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 12px;
+        background: #26272e;
+        border-bottom: 1px solid #333;
+      }
+      #status {
+        margin-left: auto;
+        font-size: 13px;
+        color: #9aa;
+      }
+      .toolbar-button {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        background: #34353e;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        padding: 6px 10px;
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        box-sizing: border-box;
+      }
+      .toolbar-button:hover {
+        background: #3a3b44;
+        border-color: #4da3ff;
+      }
+      #dashboard-button {
+        display: inline-flex;
+        align-items: center;
+        background: none;
+        border: none;
+        color: #4da3ff;
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        padding: 6px 4px;
+      }
+      #dashboard-button:hover {
+        text-decoration: underline;
+      }
+      #main-area {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+      /* Top/bottom split: two independently-scrolling halves, each taking
+         half the sidebar's height regardless of how much content is in the
+         other -- matches the reference tool's layout, where the top half
+         (sound/objects/connected-users/variables) and the bottom half
+         (the selected asset's controls) scroll separately rather than one
+         long shared column. */
+      #sidebar {
+        width: 280px;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: #24252b;
+        border-right: 1px solid #333;
+      }
+      #sidebar-top, #sidebar-bottom {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+      }
+      /* The default scrollbar (esp. Chromium's ~17px-wide one) ate a
+         noticeable chunk of this sidebar's narrow 280px width -- a slim,
+         theme-colored one instead of the OS default in every scrollable
+         region here (the two halves, plus the objects list's own internal
+         scroll). scrollbar-width covers Firefox; the ::-webkit- rules cover
+         Chromium/WebKit (OBS's browser source and most users' browsers). */
+      #sidebar-top, #sidebar-bottom, .objects-list {
+        scrollbar-width: thin;
+        scrollbar-color: #454650 #24252b;
+      }
+      #sidebar-top::-webkit-scrollbar, #sidebar-bottom::-webkit-scrollbar, .objects-list::-webkit-scrollbar {
+        width: 6px;
+      }
+      #sidebar-top::-webkit-scrollbar-track, #sidebar-bottom::-webkit-scrollbar-track, .objects-list::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      #sidebar-top::-webkit-scrollbar-thumb, #sidebar-bottom::-webkit-scrollbar-thumb, .objects-list::-webkit-scrollbar-thumb {
+        background: #454650;
+        border-radius: 3px;
+      }
+      #sidebar-top {
+        border-bottom: 1px solid #333;
+      }
+      #stream-preview-panel, #sound-panel, #objects-panel, #connected-users-panel, #variables-panel, #properties-panel {
+        flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
+        background: #2b2c34;
+        margin: 8px 8px 0;
+        border-radius: 6px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #variables-panel, #properties-panel {
+        margin-bottom: 8px;
+      }
+      /* Objects is the one card that still benefits from an internal cap +
+         scroll (a room can easily have far more assets than fit on screen)
+         -- a fixed budget here keeps it from pushing every other card in
+         the top half out of view. */
+      #objects-panel {
+        max-height: 260px;
+      }
+      .panel-collapsed > *:not(.sidebar-header) {
+        display: none !important;
+      }
+      .sidebar-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 13px;
+        font-weight: 600;
+        color: #ccc;
+        padding: 2px 2px 8px;
+        flex-shrink: 0;
+      }
+      .objects-storage {
+        font-size: 11px;
+        color: #999;
+        padding: 0 2px 6px;
+        flex-shrink: 0;
+      }
+      /* Lives inside the delete/hide/lock/duplicate .properties-buttons flex
+         row -- pushed to the right edge, vertically centered against the
+         icon buttons. */
+      .prop-file-size {
+        font-size: 12px;
+        color: #999;
+        margin-left: auto;
+        align-self: center;
+      }
+      .objects-list {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .object-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 6px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .object-row:hover {
+        background: #34353e;
+      }
+      .object-row.selected {
+        background: #3a4a63;
+      }
+      .object-icon {
+        flex-shrink: 0;
+      }
+      .object-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sidebar-icon-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: none;
+        color: #ccc;
+        cursor: pointer;
+        font-size: 14px;
+        padding: 2px 4px;
+        border-radius: 3px;
+        flex-shrink: 0;
+        line-height: 0;
+      }
+      .sidebar-icon-button:hover {
+        background: #454650;
+      }
+      .sidebar-icon-button.danger:hover {
+        background: #6b2b2b;
+      }
+      .playback-button {
+        width: 28px;
+        height: 28px;
+        border: 1px solid #454650;
+        background: #34353e;
+      }
+      #properties-panel {
+        display: none;
+      }
+      .properties-buttons {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      .sidebar-flip-button {
+        flex: 1;
+        background: #34353e;
+        border: 1px solid #454650;
+        color: #ccc;
+        border-radius: 4px;
+        padding: 4px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .sidebar-flip-button.active {
+        background: #4da3ff;
+        color: #12151a;
+        border-color: #4da3ff;
+      }
+      .prop-label {
+        display: block;
+        font-size: 11px;
+        color: #999;
+        margin: 6px 0 2px;
+      }
+      .prop-row-pair {
+        display: flex;
+        gap: 8px;
+      }
+      .prop-row-pair > div {
+        flex: 1;
+      }
+      .prop-slider-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin: 6px 0 2px;
+      }
+      .prop-slider-row .prop-label {
+        margin: 0;
+      }
+      #properties-panel .prop-slider-number {
+        /* flex-basis (not width) so this reliably wins the main-axis size
+           against the #properties-panel input[type="number"] rule's
+           width: 100% below -- flex-basis takes priority over width for a
+           flex item's sizing regardless of which rule has higher CSS
+           specificity or comes later in the stylesheet. */
+        flex: 0 0 64px;
+        min-width: 0;
+      }
+      #properties-panel input[type="number"],
+      #properties-panel input[type="text"],
+      #properties-panel textarea,
+      #properties-panel select,
+      #variables-panel input,
+      #variables-panel select {
+        width: 100%;
+        box-sizing: border-box;
+        background: #1e1f24;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 13px;
+      }
+      #properties-panel textarea {
+        /* Only vertical growth -- the field already spans the sidebar's
+           full width (see width: 100% above), so letting the user also
+           drag it wider would just overflow the card/sidebar. */
+        resize: vertical;
+        min-height: 4.5em;
+      }
+      #properties-panel input[type="range"],
+      #sound-panel input[type="range"] {
+        width: 100%;
+      }
+      .prop-name-input {
+        flex: 1;
+        min-width: 0;
+        font-weight: 600;
+        margin-right: 6px;
+      }
+      .prop-name-suffix {
+        color: #999;
+        font-weight: 400;
+        flex-shrink: 0;
+      }
+      .color-swap-row {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        margin: 6px 0 2px;
+      }
+      .color-field {
+        flex: 1;
+        min-width: 0;
+      }
+      .color-field input[type="color"] {
+        width: 100%;
+        height: 26px;
+        padding: 2px;
+        margin-bottom: 4px;
+      }
+      .presence-row, .variable-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 2px;
+        font-size: 13px;
+      }
+      .presence-elapsed {
+        margin-left: auto;
+        color: #999;
+        font-size: 12px;
+      }
+      .variable-name {
+        flex: 1;
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .variable-name:hover {
+        text-decoration: underline;
+      }
+      .variable-stepper {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .variable-value {
+        min-width: 24px;
+        text-align: center;
+        font-size: 13px;
+      }
+      .variable-value-text {
+        color: #999;
+        max-width: 100px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .variables-help {
+        font-size: 12px;
+        color: #999;
+        line-height: 1.4;
+        margin: 8px 0;
+      }
+      .variables-help code {
+        background: #1e1f24;
+        border-radius: 3px;
+        padding: 1px 4px;
+      }
+      .variables-form {
+        margin-top: 8px;
+        border-top: 1px solid #383838;
+        padding-top: 8px;
+      }
+      .prop-checkbox {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+        color: #ccc;
+      }
+      .media-controls-widget {
+        background: #1e1f24;
+        border: 1px solid #454650;
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 12px;
+        color: #ccc;
+        white-space: nowrap;
+      }
+      .media-controls-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .media-controls-row + .media-controls-row {
+        margin-top: 6px;
+      }
+      .media-controls-row input[type="range"] {
+        width: 100px;
+      }
+      #canvas-container {
+        position: relative;
+        flex: 1;
+        overflow: hidden;
+        background: #14151a;
+        cursor: default;
+      }
+      #canvas-inner {
+        position: absolute;
+        inset: 0;
+        /* Must outrank #stream-preview-overlay's z-index (both are
+           position:absolute siblings under #canvas-container) so canvas
+           assets render *in front of* the stream preview, not behind it --
+           the whole point of the preview is to see assets composited over
+           the real stream, not have it cover them. */
+        z-index: 10;
+      }
+      /* Sibling of #canvas-inner (not a child of it) so CanvasView's own
+         dispose()-on-room-switch (which wipes #canvas-inner's contents
+         entirely) never touches this -- see streamPreview.ts. Below
+         #canvas-inner's z-index so assets/embed cover the placeholder
+         shown here when no channel is configured. */
+      #stream-preview-overlay {
+        display: none;
+        pointer-events: none;
+        z-index: 1;
+      }
+      /* A separate element (not nested inside #stream-preview-overlay,
+         which sits *below* canvas assets) so its always-on-top boundary
+         line can render *above* assets too -- the whole point is staying
+         visible even when an asset is dragged across the boundary. */
+      #stream-preview-border {
+        display: none;
+        pointer-events: none;
+        z-index: 20;
+      }
+      .stream-preview-border-strip {
+        position: absolute;
+        backdrop-filter: invert(1);
+        -webkit-backdrop-filter: invert(1);
+      }
+      .stream-preview-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+        color: #ccc;
+        margin-bottom: 6px;
+      }
+      .stream-preview-row label {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+      }
+      .stream-preview-row select {
+        margin-left: auto;
+        background: #1e1f24;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        font-size: 12px;
+        padding: 2px 4px;
+      }
+      #stream-settings-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 210;
+        background: rgba(0, 0, 0, 0.5);
+        align-items: center;
+        justify-content: center;
+      }
+      .stream-settings-content {
+        width: 320px;
+        background: #26272e;
+        border: 1px solid #444;
+        border-radius: 8px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+        padding: 12px;
+        box-sizing: border-box;
+      }
+      .stream-settings-content input[type="text"] {
+        width: 100%;
+        box-sizing: border-box;
+        background: #1e1f24;
+        border: 1px solid #454650;
+        color: #eee;
+        border-radius: 4px;
+        padding: 4px 6px;
+        font-size: 13px;
+        margin-bottom: 4px;
+      }
+      .stream-settings-content .toolbar-button {
+        width: 100%;
+        margin-top: 8px;
+        justify-content: center;
+      }
+      #canvas-container img,
+      #canvas-container video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        -webkit-user-drag: none;
+        user-drag: none;
+      }
+      #upload-indicator {
+        /* Always on screen -- idles as the minimized round button (the
+           collapsed class, applied from construction) rather than hiding
+           entirely between uploads. */
+        display: flex;
+        flex-direction: column;
+        position: absolute;
+        bottom: 12px;
+        right: 12px;
+        /* Above #canvas-inner (10) and #stream-preview-border (20) -- a
+           transient status card should never hide behind canvas content. */
+        z-index: 30;
+        min-width: 220px;
+        max-width: 320px;
+        background: #26272e;
+        border: 1px solid #444;
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+        padding: 6px 8px;
+        box-sizing: border-box;
+        /* The whole card toggles collapse on click -- see uploadIndicator.ts. */
+        cursor: pointer;
+        user-select: none;
+      }
+      /* Collapsed, the card shrinks to a small round chevron button pinned
+         to the same bottom-right corner (matching the reference tool)
+         rather than staying a full-width bar -- the list and summary go
+         away entirely and only the (flipped) chevron remains, centered. */
+      #upload-indicator.upload-indicator-collapsed {
+        min-width: 0;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        padding: 0;
+        align-items: center;
+        justify-content: center;
+      }
+      .upload-indicator-collapsed .upload-indicator-list,
+      .upload-indicator-collapsed .upload-indicator-summary {
+        display: none;
+      }
+      .upload-indicator-collapsed .upload-indicator-chevron svg {
+        transform: rotate(180deg);
+      }
+      .upload-indicator-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 12px;
+        color: #9aa;
+      }
+      .upload-indicator-chevron {
+        line-height: 0;
+      }
+      .upload-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 2px;
+        font-size: 13px;
+        flex-wrap: wrap;
+      }
+      .upload-row-status {
+        flex-shrink: 0;
+        line-height: 0;
+      }
+      .upload-row-status.done {
+        color: #57c46b;
+      }
+      .upload-row-status.failed {
+        color: #ff6b6b;
+      }
+      .upload-spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 2px solid #454650;
+        border-top-color: #4da3ff;
+        animation: upload-spin 0.8s linear infinite;
+      }
+      @keyframes upload-spin {
+        to { transform: rotate(360deg); }
+      }
+      /* Scoped under the ID so this outranks the #canvas-container img rule
+         below (width/height 100%, object-fit contain), which would otherwise
+         win on specificity and blow the thumbnail up to fill the card. */
+      #upload-indicator .upload-thumb {
+        width: 28px;
+        height: 28px;
+        border-radius: 4px;
+        flex-shrink: 0;
+        object-fit: cover;
+        background: #1e1f24;
+      }
+      .upload-thumb-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #9aa;
+      }
+      .upload-row-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .upload-row-error {
+        flex-basis: 100%;
+        font-size: 11px;
+        color: #ff6b6b;
+        word-break: break-word;
+      }
+      #context-menu {
+        display: none;
+        position: fixed;
+        z-index: 100;
+        min-width: 160px;
+        background: #26272e;
+        border: 1px solid #444;
+        border-radius: 6px;
+        overflow: hidden;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      }
+      #access-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        background: rgba(0, 0, 0, 0.5);
+        align-items: center;
+        justify-content: center;
+      }
+      .access-modal-content {
+        width: 360px;
+        max-height: 80vh;
+        overflow-y: auto;
+        background: #26272e;
+        border: 1px solid #444;
+        border-radius: 8px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+        padding: 12px;
+        box-sizing: border-box;
+      }
+      .access-section {
+        background: #2b2c34;
+        border-radius: 6px;
+        padding: 8px;
+        margin-top: 8px;
+      }
+      .access-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 2px;
+        font-size: 13px;
+      }
+      .access-row-label {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .access-row-sub {
+        color: #999;
+        font-size: 11px;
+      }
+      .access-empty {
+        color: #888;
+        font-size: 12px;
+        padding: 4px 2px;
+      }
+      .access-status {
+        color: #4da3ff;
+        font-size: 12px;
+        min-height: 14px;
+        margin-top: 6px;
+      }
+      #settings-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        background: rgba(0, 0, 0, 0.5);
+        align-items: center;
+        justify-content: center;
+      }
+      .settings-input {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px;
+        margin-top: 6px;
+        border-radius: 4px;
+        border: 1px solid #444;
+        background: #1e1f24;
+        color: #eee;
+        font-family: inherit;
+      }
+      .access-section .toolbar-button {
+        width: 100%;
+        margin-top: 8px;
+        justify-content: center;
+      }
+      .toolbar-button.danger {
+        background: #4a2323;
+        border-color: #6b2b2b;
+      }
+      .toolbar-button.danger:hover {
+        background: #5c2a2a;
+        border-color: #ff6b6b;
+      }
+      #context-menu .context-menu-header {
+        padding: 8px 12px;
+        font-size: 12px;
+        color: #888;
+        border-bottom: 1px solid #383838;
+      }
+      #context-menu button {
+        display: block;
+        width: 100%;
+        padding: 8px 12px;
+        text-align: left;
+        background: none;
+        border: none;
+        color: #eee;
+        cursor: pointer;
+      }
+      #context-menu button:hover {
+        background: #3a3b44;
+      }
+      #login-view {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+      }
+      #login-form {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        width: 260px;
+        padding: 24px;
+        background: #26272e;
+        border-radius: 8px;
+      }
+      #login-form input {
+        padding: 8px;
+        border-radius: 4px;
+        border: 1px solid #444;
+        background: #1e1f24;
+        color: #eee;
+      }
+      #login-form .toolbar-button {
+        width: 100%;
+        justify-content: center;
+      }
+      .login-divider {
+        border-top: 1px solid #383838;
+        margin: 4px 0 0;
+      }
+      .login-toggle-row {
+        text-align: center;
+        font-size: 13px;
+        color: #999;
+      }
+      .login-link-button {
+        background: none;
+        border: none;
+        color: #4da3ff;
+        font-family: inherit;
+        font-size: 13px;
+        cursor: pointer;
+        padding: 0;
+        margin-left: 4px;
+      }
+      .login-link-button:hover {
+        text-decoration: underline;
+      }
+      #login-error {
+        color: #ff6b6b;
+        font-size: 13px;
+        min-height: 16px;
+      }
+      #login-message {
+        color: #4da3ff;
+        font-size: 13px;
+        min-height: 16px;
+      }
+      #login-hint {
+        color: #888;
+        font-size: 12px;
+      }
+      #room-picker-view {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+      }
+      #room-picker {
+        display: flex;
+        flex-direction: column;
+        width: 400px;
+        max-height: 80vh;
+        overflow-y: auto;
+        padding: 24px;
+        background: #26272e;
+        border-radius: 8px;
+        box-sizing: border-box;
+      }
+      .room-picker-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 14px;
+      }
+      #room-picker h2 {
+        margin: 0;
+        font-size: 16px;
+      }
+      .room-picker-header-buttons {
+        display: flex;
+        gap: 12px;
+      }
+      .room-picker-logout {
+        background: none;
+        border: none;
+        color: #999;
+        font-size: 13px;
+        font-family: inherit;
+        cursor: pointer;
+        padding: 4px;
+      }
+      .room-picker-logout:hover {
+        color: #eee;
+        text-decoration: underline;
+      }
+      [data-role="room-picker-list"] {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .room-picker-row {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px 14px;
+        border-radius: 6px;
+        background: #2b2c34;
+        border: 1px solid #383838;
+        cursor: pointer;
+        text-align: left;
+        color: #eee;
+        font: inherit;
+      }
+      .room-picker-row:hover {
+        background: #34353e;
+        border-color: #4da3ff;
+      }
+      .room-picker-row-title {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .room-picker-row-sub {
+        font-size: 12px;
+        color: #999;
+      }
+      .room-picker-section-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #888;
+        margin-top: 12px;
+      }
+      .room-picker-loading {
+        color: #888;
+        padding: 16px 0;
+      }
+      .room-picker-announcement {
+        white-space: pre-wrap;
+        background: #2a2f3a;
+        border: 1px solid #3a4150;
+        border-left: 3px solid #6ea8fe;
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-bottom: 14px;
+        color: #cdd3df;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+      .room-picker-verify {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 14px;
+        border-radius: 6px;
+        background: #2b2c34;
+        border: 1px solid #383838;
+        border-left: 3px solid #e0a94b;
+      }
+      .room-picker-verify-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #eee;
+      }
+      .room-picker-verify-sub {
+        font-size: 12px;
+        color: #999;
+        line-height: 1.45;
+      }
+      .room-picker-verify button {
+        align-self: flex-start;
+        margin-top: 6px;
+        padding: 6px 12px;
+        border-radius: 5px;
+        background: #3a3b45;
+        border: 1px solid #4a4b57;
+        color: #eee;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        text-decoration: none;
+      }
+      .room-picker-verify button:hover {
+        background: #45464f;
+        border-color: #6ea8fe;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="login-view">
+      <form id="login-form">
+        <input id="login-username" type="text" placeholder="Username" autocomplete="username" minlength="3" />
+        <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" minlength="8" />
+        <input id="login-email" type="email" placeholder="Email (optional)" autocomplete="email" style="display: none" />
+        <div id="login-hint" style="display: none">Registering requires a username of 3+ characters and a password of 8+ characters. Email is optional.</div>
+        <div id="login-error"></div>
+        <div id="login-message"></div>
+        <button id="login-submit-button" type="submit" class="toolbar-button">Log in</button>
+        <div class="login-divider"></div>
+        <div class="login-toggle-row">
+          <span id="login-toggle-text">Don't have an account?</span>
+          <button type="button" id="login-mode-toggle" class="login-link-button">Create one</button>
+        </div>
+      </form>
+    </div>
+    <div id="room-picker-view"></div>
+    <div id="settings-modal"></div>
+    <div id="app-view">
+      <div id="toolbar">
+        <button id="dashboard-button" type="button">&laquo; Dashboard</button>
+        <input id="upload-input" type="file" accept="image/*,video/*,audio/*" style="display: none" />
+        <button id="manage-access-button" class="toolbar-button">Manage access</button>
+        <button id="copy-browser-source-button" class="toolbar-button">Copy browser source URL</button>
+        <button id="regenerate-browser-source-button" class="toolbar-button">Regenerate URL</button>
+        <span id="status"></span>
+      </div>
+      <div id="main-area">
+        <div id="sidebar">
+          <div id="sidebar-top">
+            <div id="stream-preview-panel"></div>
+            <div id="sound-panel"></div>
+            <div id="objects-panel"></div>
+            <div id="connected-users-panel"></div>
+            <div id="variables-panel"></div>
+          </div>
+          <div id="sidebar-bottom">
+            <div id="properties-panel"></div>
+          </div>
+        </div>
+        <div id="canvas-container">
+          <div id="canvas-inner"></div>
+          <div id="stream-preview-overlay"></div>
+          <div id="stream-preview-border"></div>
+          <div id="upload-indicator"></div>
+        </div>
+      </div>
+      <div id="context-menu">
+        <div class="context-menu-header">Create</div>
+        <button id="context-menu-text" type="button">Text</button>
+        <button id="context-menu-media" type="button">Media</button>
+      </div>
+      <div id="access-modal"></div>
+      <div id="stream-settings-modal"></div>
+    </div>
+    <script src="./main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,72 @@
+# Reusable workflow: the actual build+deploy steps, called by deploy-dev.yml
+# and deploy-prod.yml with different (environment, stack, IAM role) inputs
+# rather than duplicating the whole job in both. Environment-specific
+# gating (e.g. the "prod" GitHub Environment's deployment-branch policy
+# restricting it to main) still applies via the `environment:` field below,
+# unaffected by living in a shared workflow -- it's evaluated per-call using
+# whatever `environment` input the caller passed.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      stack-name:
+        required: true
+        type: string
+      role-arn:
+        required: true
+        type: string
+      aws-region:
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    # GitHub labels a called reusable-workflow job as "<caller job id> /
+    # <this name>" -- without this, both the caller's job id and this job's
+    # default name are literally "deploy", rendering as the unhelpful
+    # "deploy / deploy" in the Actions UI. This makes it "deploy / cdk
+    # deploy Scenette-dev" (or -prod) instead.
+    name: cdk deploy ${{ inputs.stack-name }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    # One deploy at a time per environment -- rapid successive pushes to the
+    # same branch previously could (and, before this existed, once did)
+    # trigger overlapping `cdk deploy` runs against the same CloudFormation
+    # stack, where a second UPDATE_IN_PROGRESS on top of a still-running one
+    # just fails outright. cancel-in-progress stays false: a deploy that's
+    # already underway should always finish rather than being cut off
+    # mid-stack-update, so later pushes queue behind it instead of
+    # cancelling it.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ inputs.role-arn }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: cdk deploy ${{ inputs.stack-name }}
+        working-directory: infra
+        run: npx cdk deploy ${{ inputs.stack-name }} --require-approval never
