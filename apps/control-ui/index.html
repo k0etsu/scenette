@@ -553,16 +553,28 @@
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
         padding: 6px 8px;
         box-sizing: border-box;
+        /* The whole card toggles collapse on click -- see uploadIndicator.ts. */
+        cursor: pointer;
+        user-select: none;
       }
-      .upload-indicator-collapsed .upload-indicator-list {
+      /* Collapsed, the card shrinks to a small round chevron button pinned
+         to the same bottom-right corner (matching the reference tool)
+         rather than staying a full-width bar -- the list and summary go
+         away entirely and only the (flipped) chevron remains, centered. */
+      #upload-indicator.upload-indicator-collapsed {
+        min-width: 0;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        padding: 0;
+        align-items: center;
+        justify-content: center;
+      }
+      .upload-indicator-collapsed .upload-indicator-list,
+      .upload-indicator-collapsed .upload-indicator-summary {
         display: none;
       }
-      /* The one-line summary only earns its space when the row list is
-         collapsed -- expanded, the rows themselves already say all of it. */
-      #upload-indicator:not(.upload-indicator-collapsed) .upload-indicator-summary {
-        visibility: hidden;
-      }
-      .upload-indicator-collapsed [data-role="collapse"] svg {
+      .upload-indicator-collapsed .upload-indicator-chevron svg {
         transform: rotate(180deg);
       }
       .upload-indicator-footer {
@@ -572,6 +584,9 @@
         gap: 8px;
         font-size: 12px;
         color: #9aa;
+      }
+      .upload-indicator-chevron {
+        line-height: 0;
       }
       .upload-row {
         display: flex;

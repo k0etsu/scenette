@@ -90,11 +90,26 @@ describe("UploadIndicator", () => {
     expect(root.style.display).toBe("flex");
   });
 
-  it("collapse hides the rows and shows a summary instead", () => {
+  it("toggles collapsed each time the card itself is clicked", () => {
     indicator.begin(makeFile("a.png", "image/png"));
-    root.querySelector<HTMLElement>('[data-role="collapse"]')!.click();
 
+    root.click();
     expect(root.classList.contains("upload-indicator-collapsed")).toBe(true);
+    expect(root.title).toBe("Expand");
+
+    root.click();
+    expect(root.classList.contains("upload-indicator-collapsed")).toBe(false);
+    expect(root.title).toBe("Collapse");
+  });
+
+  it("a click on the chevron toggles exactly once (bubbles to the card's single listener)", () => {
+    indicator.begin(makeFile("a.png", "image/png"));
+    root.querySelector<HTMLElement>(".upload-indicator-chevron")!.click();
+    expect(root.classList.contains("upload-indicator-collapsed")).toBe(true);
+  });
+
+  it("keeps the footer summary line current", () => {
+    indicator.begin(makeFile("a.png", "image/png"));
     expect(root.querySelector(".upload-indicator-summary")!.textContent).toBe("uploading 1 file...");
   });
 });

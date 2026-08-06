@@ -33,16 +33,22 @@ export class UploadIndicator {
       <div class="upload-indicator-list"></div>
       <div class="upload-indicator-footer">
         <span class="upload-indicator-summary"></span>
-        <button type="button" class="sidebar-icon-button" data-role="collapse" title="Collapse">${ICON_CHEVRON_DOWN}</button>
+        <span class="upload-indicator-chevron">${ICON_CHEVRON_DOWN}</span>
       </div>
     `;
     this.list = root.querySelector(".upload-indicator-list")!;
     this.summary = root.querySelector(".upload-indicator-summary")!;
 
-    const collapseButton = root.querySelector<HTMLElement>('[data-role="collapse"]')!;
-    collapseButton.addEventListener("click", () => {
+    // The whole card is the toggle target (matching the reference tool),
+    // not just the chevron -- collapsed it shrinks to a small round button
+    // in the bottom-right corner (see #upload-indicator's collapsed CSS)
+    // whose entire face needs to be clickable, and making only the
+    // expanded state's tiny chevron clickable would leave the two states
+    // inconsistent. The chevron is purely a visual affordance.
+    root.title = "Collapse";
+    root.addEventListener("click", () => {
       const collapsed = root.classList.toggle("upload-indicator-collapsed");
-      collapseButton.title = collapsed ? "Expand" : "Collapse";
+      root.title = collapsed ? "Expand" : "Collapse";
     });
   }
 
