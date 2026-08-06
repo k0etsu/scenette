@@ -8,6 +8,12 @@ import { ServerMessage } from "@scenette/protocol";
 // so nothing is ever visibly dropped mid-session.
 const RECONNECT_BEFORE_LIMIT_MS = 100 * 60 * 1000; // reconnect at the 100-minute mark
 const RETRY_BACKOFF_MS = [1000, 2000, 5000, 10000, 30000];
+// Last-resort watchdog: if there is ever no live connection, no attempt in
+// flight, and no retry pending, open one. The retry chain above should make
+// this unreachable, but OBS's embedded browser can suspend or drop timers
+// (source hidden, scene collection changes), and a lost retry timer would
+// otherwise leave the browser source looking broken until a manual refresh.
+const WATCHDOG_INTERVAL_MS = 15 * 1000;
 
 export interface ConnectionOptions {
   wsUrl: string;
@@ -20,8 +26,17 @@ export interface ConnectionOptions {
 }
 
 export class ResilientConnection {
+  // The confirmed-live socket. Only ever assigned inside onopen — a socket
+  // that never opened must never become `socket`, or the close-handler
+  // bookkeeping below falls apart.
   private socket?: WebSocket;
+  // The in-flight connection attempt, distinct from the live socket so a
+  // failed attempt (closed before ever opening) is recognized as retryable
+  // instead of being mistaken for the old socket of a proactive swap.
+  private pending?: WebSocket;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private watchdogTimer?: ReturnType<typeof setInterval>;
   private retryAttempt = 0;
   private closedByUs = false;
   // Set once and reused across every reconnect (proactive swap or
@@ -35,6 +50,9 @@ export class ResilientConnection {
 
   start(): void {
     this.open();
+    this.watchdogTimer = setInterval(() => {
+      if (!this.socket && !this.pending && !this.retryTimer) this.open();
+    }, WATCHDOG_INTERVAL_MS);
   }
 
   send(payload: unknown): void {
@@ -42,13 +60,19 @@ export class ResilientConnection {
   }
 
   private open(): void {
+    // One attempt at a time — the watchdog or a straggling timer must not
+    // stack a second attempt on top of one already connecting.
+    if (this.pending) return;
+
     // Auth is via the HttpOnly session cookie sent on the WS upgrade
     // handshake (same-site), not a URL token -- an anonymous browser-source
     // connection simply has no cookie and stays read-only.
     const url = `${this.options.wsUrl}?roomId=${encodeURIComponent(this.options.roomId)}&connectedAt=${encodeURIComponent(this.sessionStartedAt)}`;
     const next = new WebSocket(url);
+    this.pending = next;
 
     next.onopen = () => {
+      this.pending = undefined;
       this.retryAttempt = 0;
       const previous = this.socket;
       this.socket = next;
@@ -70,9 +94,20 @@ export class ResilientConnection {
     };
 
     next.onclose = () => {
-      if (this.socket === next && !this.closedByUs) {
+      if (this.closedByUs) return;
+      if (this.pending === next) {
+        // The attempt failed before ever opening — retry it. (Without this,
+        // one failed reconnect attempt would end the retry chain for good.)
+        this.pending = undefined;
+        this.scheduleRetry();
+      } else if (this.socket === next) {
+        // The live connection dropped (e.g. API Gateway's 2-hour kill
+        // arriving before a proactive swap landed).
+        this.socket = undefined;
         this.scheduleRetry();
       }
+      // Otherwise it's the old socket being torn down after a successful
+      // proactive swap — expected, nothing to do.
     };
 
     next.onerror = () => {
@@ -86,14 +121,23 @@ export class ResilientConnection {
   }
 
   private scheduleRetry(): void {
+    // A retry may already be pending when both the live socket and a swap
+    // attempt die close together — one timer is enough.
+    if (this.retryTimer) return;
     const delay = RETRY_BACKOFF_MS[Math.min(this.retryAttempt, RETRY_BACKOFF_MS.length - 1)];
     this.retryAttempt += 1;
-    setTimeout(() => this.open(), delay);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      this.open();
+    }, delay);
   }
 
   stop(): void {
     this.closedByUs = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.pending?.close();
     this.socket?.close();
   }
 }
