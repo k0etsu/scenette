@@ -21,6 +21,10 @@ import {
 
 const s3 = new S3Client({});
 const ASSETS_BUCKET = process.env.ASSETS_BUCKET!;
+// Advertised to clients in room:snapshot so the sidebar can show usage
+// against the quota; the actual enforcement lives in upload-url (same env
+// var, same value from the stack).
+const ROOM_STORAGE_QUOTA_BYTES = Number(process.env.ROOM_STORAGE_QUOTA_BYTES!);
 
 // Server-verified rather than trusting whatever the client claims -- the
 // client already awaited its own PUT to this exact key before sending
@@ -82,6 +86,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           streamPreviewSettingsSeq: room.streamPreviewSettingsSeq,
           variables: Object.values(room.variables),
           presence,
+          storageQuotaBytes: ROOM_STORAGE_QUOTA_BYTES,
         });
         break;
       }

@@ -43,6 +43,10 @@ const TYPE_ICON: Record<AssetType, string> = {
 export class Sidebar {
   private assets = new Map<string, Asset>();
   private selectedAssetId?: string;
+  // Advertised by the server in room:snapshot; undefined until the first
+  // snapshot lands (or against an older server that doesn't send it), in
+  // which case the label shows plain usage without a denominator.
+  private storageQuotaBytes?: number;
 
   // Two independent reasons a rebuild must be deferred (see upsertAsset):
   // a slider mid-drag (mousedown without mouseup yet -- explicitly tracked
@@ -58,6 +62,7 @@ export class Sidebar {
   }
 
   private readonly objectsList: HTMLElement;
+  private readonly storageLabel: HTMLElement;
   private readonly propertiesPanel: HTMLElement;
 
   constructor(
@@ -70,9 +75,11 @@ export class Sidebar {
         <span>Objects</span>
         <button type="button" data-role="create-button" class="sidebar-icon-button">+</button>
       </div>
+      <div class="objects-storage" data-role="storage"></div>
       <div class="objects-list"></div>
     `;
     this.objectsList = this.objectsPanelRoot.querySelector(".objects-list")!;
+    this.storageLabel = this.objectsPanelRoot.querySelector('[data-role="storage"]')!;
     this.objectsPanelRoot.querySelector('[data-role="create-button"]')!.addEventListener("click", () => {
       this.callbacks.onCreateClick();
     });
@@ -112,6 +119,11 @@ export class Sidebar {
 
   dispose(): void {
     window.removeEventListener("mouseup", this.handleWindowMouseUp);
+  }
+
+  setStorageQuota(quotaBytes: number | undefined): void {
+    this.storageQuotaBytes = quotaBytes;
+    this.renderStorageLabel();
   }
 
   setAssets(assets: Asset[]): void {
@@ -157,7 +169,23 @@ export class Sidebar {
     this.renderProperties();
   }
 
+  // Mirrors the server's sumRoomStorageBytes: each distinct S3 object
+  // counts once even when duplicateAsset() rows share its s3Key, so the
+  // number shown here matches what upload-url actually enforces against.
+  private renderStorageLabel(): void {
+    const bytesByS3Key = new Map<string, number>();
+    for (const asset of this.assets.values()) {
+      if (asset.s3Key && asset.fileSize) bytesByS3Key.set(asset.s3Key, asset.fileSize);
+    }
+    const used = [...bytesByS3Key.values()].reduce((sum, b) => sum + b, 0);
+    this.storageLabel.textContent =
+      this.storageQuotaBytes !== undefined
+        ? `${formatBytes(used)} / ${formatBytes(this.storageQuotaBytes)} used`
+        : `${formatBytes(used)} used`;
+  }
+
   private renderObjectsList(): void {
+    this.renderStorageLabel();
     const scrollTop = this.objectsList.scrollTop;
     this.objectsList.innerHTML = "";
     const sorted = [...this.assets.values()].sort((a, b) => b.zIndex - a.zIndex);
@@ -246,6 +274,7 @@ export class Sidebar {
         <button type="button" data-role="toggle-hidden" class="sidebar-icon-button">${asset.hidden ? ICON_EYE_OFF : ICON_EYE}</button>
         <button type="button" data-role="toggle-locked" class="sidebar-icon-button">${asset.locked ? ICON_LOCK : ICON_UNLOCK}</button>
         <button type="button" data-role="duplicate" class="sidebar-icon-button">${ICON_DUPLICATE}</button>
+        ${asset.fileSize !== undefined ? `<span class="prop-file-size">File size: ${formatBytes(asset.fileSize)}</span>` : ""}
       </div>
       <div class="prop-row">
         <label class="prop-label">Z-index</label>
@@ -590,6 +619,17 @@ function textSettingsHtml(asset: Asset): string {
       <input type="range" data-role="outline-width" min="0" max="20" value="${s.outlineWidth}" />
     </div>
   `;
+}
+
+// Exported for the storage label / file-size line tests.
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${trimTrailingZero((bytes / (1024 * 1024)).toFixed(1))} MB`;
+  if (bytes >= 1024) return `${trimTrailingZero((bytes / 1024).toFixed(1))} KB`;
+  return `${bytes} B`;
+}
+
+function trimTrailingZero(value: string): string {
+  return value.replace(/\.0$/, "");
 }
 
 function displayName(asset: Asset): string {

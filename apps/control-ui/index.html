@@ -171,6 +171,21 @@
         padding: 2px 2px 8px;
         flex-shrink: 0;
       }
+      .objects-storage {
+        font-size: 11px;
+        color: #999;
+        padding: 0 2px 6px;
+        flex-shrink: 0;
+      }
+      /* Lives inside the delete/hide/lock/duplicate .properties-buttons flex
+         row -- pushed to the right edge, vertically centered against the
+         icon buttons. */
+      .prop-file-size {
+        font-size: 12px;
+        color: #999;
+        margin-left: auto;
+        align-self: center;
+      }
       .objects-list {
         flex: 1;
         min-height: 0;
@@ -524,6 +539,118 @@
         object-fit: contain;
         -webkit-user-drag: none;
         user-drag: none;
+      }
+      #upload-indicator {
+        display: none;
+        flex-direction: column;
+        position: absolute;
+        bottom: 12px;
+        right: 12px;
+        /* Above #canvas-inner (10) and #stream-preview-border (20) -- a
+           transient status card should never hide behind canvas content. */
+        z-index: 30;
+        min-width: 220px;
+        max-width: 320px;
+        background: #26272e;
+        border: 1px solid #444;
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+        padding: 6px 8px;
+        box-sizing: border-box;
+        /* The whole card toggles collapse on click -- see uploadIndicator.ts. */
+        cursor: pointer;
+        user-select: none;
+      }
+      /* Collapsed, the card shrinks to a small round chevron button pinned
+         to the same bottom-right corner (matching the reference tool)
+         rather than staying a full-width bar -- the list and summary go
+         away entirely and only the (flipped) chevron remains, centered. */
+      #upload-indicator.upload-indicator-collapsed {
+        min-width: 0;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        padding: 0;
+        align-items: center;
+        justify-content: center;
+      }
+      .upload-indicator-collapsed .upload-indicator-list,
+      .upload-indicator-collapsed .upload-indicator-summary {
+        display: none;
+      }
+      .upload-indicator-collapsed .upload-indicator-chevron svg {
+        transform: rotate(180deg);
+      }
+      .upload-indicator-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 12px;
+        color: #9aa;
+      }
+      .upload-indicator-chevron {
+        line-height: 0;
+      }
+      .upload-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 2px;
+        font-size: 13px;
+        flex-wrap: wrap;
+      }
+      .upload-row-status {
+        flex-shrink: 0;
+        line-height: 0;
+      }
+      .upload-row-status.done {
+        color: #57c46b;
+      }
+      .upload-row-status.failed {
+        color: #ff6b6b;
+      }
+      .upload-spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 2px solid #454650;
+        border-top-color: #4da3ff;
+        animation: upload-spin 0.8s linear infinite;
+      }
+      @keyframes upload-spin {
+        to { transform: rotate(360deg); }
+      }
+      /* Scoped under the ID so this outranks the #canvas-container img rule
+         below (width/height 100%, object-fit contain), which would otherwise
+         win on specificity and blow the thumbnail up to fill the card. */
+      #upload-indicator .upload-thumb {
+        width: 28px;
+        height: 28px;
+        border-radius: 4px;
+        flex-shrink: 0;
+        object-fit: cover;
+        background: #1e1f24;
+      }
+      .upload-thumb-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #9aa;
+      }
+      .upload-row-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .upload-row-error {
+        flex-basis: 100%;
+        font-size: 11px;
+        color: #ff6b6b;
+        word-break: break-word;
       }
       #context-menu {
         display: none;
@@ -889,6 +1016,7 @@
           <div id="canvas-inner"></div>
           <div id="stream-preview-overlay"></div>
           <div id="stream-preview-border"></div>
+          <div id="upload-indicator"></div>
         </div>
       </div>
       <div id="context-menu">

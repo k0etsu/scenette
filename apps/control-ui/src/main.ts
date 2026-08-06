@@ -6,6 +6,7 @@ import { SoundPanel } from "./sound";
 import { ConnectedUsersPanel } from "./connectedUsers";
 import { VariablesPanel } from "./variablesPanel";
 import { uploadFile } from "./upload";
+import { UploadIndicator } from "./uploadIndicator";
 import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
 import { SettingsModal } from "./settingsModal";
@@ -53,6 +54,7 @@ const soundPanelEl = document.getElementById("sound-panel");
 const connectedUsersPanelEl = document.getElementById("connected-users-panel");
 const variablesPanelEl = document.getElementById("variables-panel");
 const uploadInput = document.getElementById("upload-input") as HTMLInputElement | null;
+const uploadIndicatorEl = document.getElementById("upload-indicator");
 const manageAccessButton = document.getElementById("manage-access-button");
 const accessModalEl = document.getElementById("access-modal");
 const settingsModalEl = document.getElementById("settings-modal");
@@ -71,7 +73,7 @@ if (
   !loginError || !loginMessage || !roomPickerViewEl ||
   !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
-  !variablesPanelEl || !uploadInput || !manageAccessButton || !accessModalEl || !settingsModalEl ||
+  !variablesPanelEl || !uploadInput || !uploadIndicatorEl || !manageAccessButton || !accessModalEl || !settingsModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
   !contextMenuTextButton || !contextMenuMediaButton
 ) {
@@ -300,10 +302,14 @@ async function main(): Promise<void> {
     uploadInput!.click();
   }
 
+  // Like the context-menu wiring above: bound to a static element that
+  // persists across room switches, so created exactly once.
+  const uploadIndicator = new UploadIndicator(uploadIndicatorEl!);
+
   async function handleUpload(file: File): Promise<void> {
     if (!current) return;
     const { roomId, canvas, connection } = current;
-    statusEl!.textContent = `uploading ${file.name}...`;
+    const indicator = uploadIndicator.begin(file);
     try {
       const result = await uploadFile(httpApiUrl, roomId, file);
       const viewport = canvas.getViewport();
@@ -340,9 +346,9 @@ async function main(): Promise<void> {
           paused: result.type === "video" || result.type === "audio" ? true : undefined,
         },
       });
-      if (current) statusEl!.textContent = `${current.ownerName || session!.username}'s room`;
+      indicator.succeed();
     } catch (err) {
-      statusEl!.textContent = `upload failed: ${err instanceof Error ? err.message : String(err)}`;
+      indicator.fail(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -694,6 +700,7 @@ function enterRoom(
           // to accept after its own seq/dragging/inline-edit guards, not
           // the raw (potentially stale-for-an-in-flight-edit) snapshot.
           sidebar.setAssets(canvas.getAllAssets());
+          sidebar.setStorageQuota(message.storageQuotaBytes);
           soundPanel.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
           // First snapshot of this room session uses enterRoom (not
           // applySettings): this panel is a singleton that survives every

@@ -90,6 +90,8 @@ describe("message handler -- write-action gate", () => {
     const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
     const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
     expect(payload.type).toBe("room:snapshot");
+    // Test env sets ROOM_STORAGE_QUOTA_BYTES=1000 -- see vitest.config.mts.
+    expect(payload.storageQuotaBytes).toBe(1000);
   });
 
   it("rejects a message whose roomId doesn't match the connection's actual room", async () => {
