@@ -1,5 +1,6 @@
 import { StreamPreviewSettings } from "@scenette/protocol";
 import { ICON_EXPAND, ICON_SETTINGS, ICON_VIDEO } from "./icons";
+import { LiveEdgeMonitor, LivePlayer } from "./liveEdge";
 
 type Platform = StreamPreviewSettings["platform"];
 
@@ -51,7 +52,46 @@ function embedUrl(settings: StreamPreviewSettings): string | undefined {
   // Resolves to whatever's currently live on that channel with no need to
   // know the specific video ID -- falls back to the channel page if
   // nothing's live, so this doubles as a no-API-key live/offline signal.
-  return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(settings.youtubeChannelId)}`;
+  //
+  // enablejsapi/origin exist purely for the live-edge resync (see
+  // liveEdge.ts): they let the IFrame API attach to this iframe so drift
+  // behind the live head can be measured and corrected. origin is the
+  // API's recommended companion to enablejsapi -- it restricts who may
+  // postMessage commands into the player to this exact page.
+  return (
+    `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(settings.youtubeChannelId)}` +
+    `&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`
+  );
+}
+
+type YouTubePlayerCtor = new (
+  el: HTMLIFrameElement,
+  opts: { events: { onReady: () => void } }
+) => LivePlayer;
+
+// Loaded once per page, on first use -- the official IFrame API script is
+// the only supported way to talk to an embedded player (the underlying
+// postMessage protocol is undocumented), and it announces readiness solely
+// through the global onYouTubeIframeAPIReady callback.
+let youTubeApiPromise: Promise<YouTubePlayerCtor> | undefined;
+function ensureYouTubeApi(): Promise<YouTubePlayerCtor> {
+  if (!youTubeApiPromise) {
+    youTubeApiPromise = new Promise((resolve) => {
+      const w = window as unknown as {
+        YT?: { Player: YouTubePlayerCtor };
+        onYouTubeIframeAPIReady?: () => void;
+      };
+      if (w.YT?.Player) {
+        resolve(w.YT.Player);
+        return;
+      }
+      w.onYouTubeIframeAPIReady = () => resolve(w.YT!.Player);
+      const script = document.createElement("script");
+      script.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(script);
+    });
+  }
+  return youTubeApiPromise;
 }
 
 // Positioned entirely *outside* the wrapper's own edge (a negative offset
@@ -116,6 +156,11 @@ export class StreamPreviewPanel {
   // persists across reloads/sessions, so a fresh session's counter
   // restarting at 0 would almost always lose the server's staleness check).
   private lastSeq = 0;
+  // Live-edge drift correction for the YouTube embed only -- Twitch's
+  // player manages its own catch-up (and its embed exposes no latency
+  // control at all, see embedUrl's twitch branch). Started when a YouTube
+  // src is loaded, stopped whenever that src is replaced or hidden.
+  private readonly liveEdgeMonitor = new LiveEdgeMonitor();
 
   private readonly embedCheckbox: HTMLInputElement;
   private readonly interactiveCheckbox: HTMLInputElement;
@@ -355,13 +400,41 @@ export class StreamPreviewPanel {
       this.iframe.style.display = "block";
       this.placeholder.style.display = "none";
       if (this.lastAssignedSrc !== url) {
+        this.liveEdgeMonitor.stop();
         this.iframe.src = url;
         this.lastAssignedSrc = url;
+        if (this.settings.platform === "youtube") this.attachLiveEdgeSync(url);
       }
     } else {
+      this.liveEdgeMonitor.stop();
       this.iframe.style.display = "none";
       this.placeholder.style.display = "flex";
     }
+  }
+
+  // Only ever called for a freshly-assigned YouTube src. Deliberately does
+  // NOT destroy() the YT.Player on teardown -- destroy() removes the
+  // player's iframe from the DOM, and this panel owns and reuses that
+  // iframe across platform/channel switches; a dormant player object whose
+  // monitor has been stopped is harmless.
+  private attachLiveEdgeSync(url: string): void {
+    void ensureYouTubeApi().then((Player) => {
+      // The world may have moved on while the API script loaded -- a
+      // platform/channel switch, embed unchecked, or a room change all
+      // reassign or clear the src this sync was created for.
+      if (this.lastAssignedSrc !== url || !this.embedCheckbox.checked) return;
+      const player = new Player(this.iframe, {
+        events: {
+          onReady: () => {
+            // Re-checked at ready time too -- the src can move on again
+            // between player construction and this callback, and a stale
+            // ready must not restart a monitor that render() just stopped.
+            if (this.lastAssignedSrc !== url || !this.embedCheckbox.checked) return;
+            this.liveEdgeMonitor.start(player);
+          },
+        },
+      });
+    });
   }
 
   // Wall-clock-based, not a simple session-local counter -- see

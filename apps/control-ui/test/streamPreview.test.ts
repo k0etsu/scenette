@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { StreamPreviewPanel, StreamPreviewCallbacks } from "../src/streamPreview";
 
 let root: HTMLElement;
@@ -524,5 +524,122 @@ describe("StreamPreviewPanel -- settings modal", () => {
 
     settingsModal.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(settingsModal.style.display).toBe("none");
+  });
+});
+
+// A 100s-behind playhead on a 500s live stream -- comfortably past
+// liveEdge.ts's DRIFT_THRESHOLD_S so a single poll tick must resync.
+class FakeYouTubePlayer {
+  static instances: FakeYouTubePlayer[] = [];
+  readonly onReady: () => void;
+  readonly seekTo = vi.fn();
+  constructor(
+    readonly el: HTMLIFrameElement,
+    opts: { events: { onReady: () => void } }
+  ) {
+    this.onReady = opts.events.onReady;
+    FakeYouTubePlayer.instances.push(this);
+  }
+  getDuration(): number {
+    return 500;
+  }
+  getCurrentTime(): number {
+    return 400;
+  }
+  getPlayerState(): number {
+    return 1; // YT.PlayerState.PLAYING
+  }
+}
+
+describe("StreamPreviewPanel -- YouTube live-edge resync", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeYouTubePlayer.instances = [];
+    (window as any).YT = { Player: FakeYouTubePlayer };
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (window as any).YT;
+  });
+
+  // streamPreview.ts caches its IFrame-API promise at module level, and an
+  // earlier test in this file may already have created it (unresolved, its
+  // resolver parked on window.onYouTubeIframeAPIReady). Resolve whichever
+  // state it's in: fire the parked callback if there is one; otherwise the
+  // stubbed window.YT resolved it immediately on first use.
+  async function flushYouTubeApi(): Promise<void> {
+    (window as any).onYouTubeIframeAPIReady?.();
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+
+  function makeYouTubePanel(): StreamPreviewPanel {
+    const panel = makePanel();
+    panel.applySettings({ platform: "youtube", twitchChannel: "", youtubeChannelId: "UCdrift" }, 1);
+    enableEmbed();
+    return panel;
+  }
+
+  it("requests the embed with enablejsapi + origin so the player can be monitored", () => {
+    makeYouTubePanel();
+    expect(iframeEl().src).toContain("enablejsapi=1");
+    expect(iframeEl().src).toContain(`origin=${encodeURIComponent(window.location.origin)}`);
+  });
+
+  it("does not add API params to the Twitch embed, which has no latency/API control at all", () => {
+    const panel = makePanel();
+    configureTwitchChannel(panel, "shroud");
+    enableEmbed();
+    expect(iframeEl().src).not.toContain("enablejsapi");
+  });
+
+  it("seeks a drifted, playing embed back to the live head on the poll tick", async () => {
+    makeYouTubePanel();
+    await flushYouTubeApi();
+
+    const player = FakeYouTubePlayer.instances.at(-1)!;
+    expect(player.el).toBe(iframeEl());
+    player.onReady();
+
+    vi.advanceTimersByTime(10_000);
+    expect(player.seekTo).toHaveBeenCalledWith(500, true);
+  });
+
+  it("stops polling when the embed is hidden again", async () => {
+    makeYouTubePanel();
+    await flushYouTubeApi();
+    const player = FakeYouTubePlayer.instances.at(-1)!;
+    player.onReady();
+
+    checkbox("embed").checked = false;
+    checkbox("embed").dispatchEvent(new Event("change"));
+
+    vi.advanceTimersByTime(30_000);
+    expect(player.seekTo).not.toHaveBeenCalled();
+  });
+
+  it("stops polling when the platform switches to Twitch", async () => {
+    const panel = makeYouTubePanel();
+    await flushYouTubeApi();
+    const player = FakeYouTubePlayer.instances.at(-1)!;
+    player.onReady();
+
+    panel.applySettings({ platform: "twitch", twitchChannel: "shroud", youtubeChannelId: "UCdrift" }, 2);
+
+    vi.advanceTimersByTime(30_000);
+    expect(player.seekTo).not.toHaveBeenCalled();
+  });
+
+  it("ignores a stale onReady that fires after the src has already moved on", async () => {
+    const panel = makeYouTubePanel();
+    await flushYouTubeApi();
+    const stale = FakeYouTubePlayer.instances.at(-1)!;
+
+    panel.applySettings({ platform: "twitch", twitchChannel: "shroud", youtubeChannelId: "UCdrift" }, 2);
+    stale.onReady();
+
+    vi.advanceTimersByTime(30_000);
+    expect(stale.seekTo).not.toHaveBeenCalled();
   });
 });
