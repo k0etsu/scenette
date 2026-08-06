@@ -525,6 +525,103 @@
         -webkit-user-drag: none;
         user-drag: none;
       }
+      #upload-indicator {
+        display: none;
+        flex-direction: column;
+        position: absolute;
+        bottom: 12px;
+        right: 12px;
+        /* Above #canvas-inner (10) and #stream-preview-border (20) -- a
+           transient status card should never hide behind canvas content. */
+        z-index: 30;
+        min-width: 220px;
+        max-width: 320px;
+        background: #26272e;
+        border: 1px solid #444;
+        border-radius: 8px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+        padding: 6px 8px;
+        box-sizing: border-box;
+      }
+      .upload-indicator-collapsed .upload-indicator-list {
+        display: none;
+      }
+      /* The one-line summary only earns its space when the row list is
+         collapsed -- expanded, the rows themselves already say all of it. */
+      #upload-indicator:not(.upload-indicator-collapsed) .upload-indicator-summary {
+        visibility: hidden;
+      }
+      .upload-indicator-collapsed [data-role="collapse"] svg {
+        transform: rotate(180deg);
+      }
+      .upload-indicator-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        font-size: 12px;
+        color: #9aa;
+      }
+      .upload-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 2px;
+        font-size: 13px;
+        flex-wrap: wrap;
+      }
+      .upload-row-status {
+        flex-shrink: 0;
+        line-height: 0;
+      }
+      .upload-row-status.done {
+        color: #57c46b;
+      }
+      .upload-row-status.failed {
+        color: #ff6b6b;
+      }
+      .upload-spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 2px solid #454650;
+        border-top-color: #4da3ff;
+        animation: upload-spin 0.8s linear infinite;
+      }
+      @keyframes upload-spin {
+        to { transform: rotate(360deg); }
+      }
+      /* Scoped under the ID so this outranks the #canvas-container img rule
+         below (width/height 100%, object-fit contain), which would otherwise
+         win on specificity and blow the thumbnail up to fill the card. */
+      #upload-indicator .upload-thumb {
+        width: 28px;
+        height: 28px;
+        border-radius: 4px;
+        flex-shrink: 0;
+        object-fit: cover;
+        background: #1e1f24;
+      }
+      .upload-thumb-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #9aa;
+      }
+      .upload-row-name {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .upload-row-error {
+        flex-basis: 100%;
+        font-size: 11px;
+        color: #ff6b6b;
+        word-break: break-word;
+      }
       #context-menu {
         display: none;
         position: fixed;
@@ -889,6 +986,7 @@
           <div id="canvas-inner"></div>
           <div id="stream-preview-overlay"></div>
           <div id="stream-preview-border"></div>
+          <div id="upload-indicator"></div>
         </div>
       </div>
       <div id="context-menu">
