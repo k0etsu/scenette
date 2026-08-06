@@ -541,7 +541,10 @@
         user-drag: none;
       }
       #upload-indicator {
-        display: none;
+        /* Always on screen -- idles as the minimized round button (the
+           collapsed class, applied from construction) rather than hiding
+           entirely between uploads. */
+        display: flex;
         flex-direction: column;
         position: absolute;
         bottom: 12px;

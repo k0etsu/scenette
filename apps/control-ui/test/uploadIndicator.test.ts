@@ -29,14 +29,26 @@ afterEach(() => {
 });
 
 describe("UploadIndicator", () => {
-  it("shows a spinner row with the file name while uploading", () => {
-    expect(root.style.display).toBe("");
+  it("idles minimized, then expands with a spinner row when an upload starts", () => {
+    // Present from construction as the minimized round button -- never
+    // hidden outright, so the panel doesn't look broken between uploads.
+    expect(root.classList.contains("upload-indicator-collapsed")).toBe(true);
+
     indicator.begin(makeFile("clip.mp4", "video/mp4"));
 
-    expect(root.style.display).toBe("flex");
+    expect(root.classList.contains("upload-indicator-collapsed")).toBe(false);
     const row = root.querySelector(".upload-row")!;
     expect(row.querySelector(".upload-spinner")).not.toBeNull();
     expect(row.querySelector(".upload-row-name")!.textContent).toBe("clip.mp4");
+  });
+
+  it("re-expands for a new upload even after being manually minimized", () => {
+    indicator.begin(makeFile("a.png", "image/png"));
+    root.click();
+    expect(root.classList.contains("upload-indicator-collapsed")).toBe(true);
+
+    indicator.begin(makeFile("b.png", "image/png"));
+    expect(root.classList.contains("upload-indicator-collapsed")).toBe(false);
   });
 
   it("uses an object-URL thumbnail for images", () => {
@@ -55,8 +67,9 @@ describe("UploadIndicator", () => {
 
     vi.advanceTimersByTime(4000);
     expect(root.querySelector(".upload-row")).toBeNull();
-    // Empty again -- the whole card hides and the thumbnail URL is released.
-    expect(root.style.display).toBe("none");
+    // Empty again -- back to the idle minimized button (still on screen,
+    // never hidden) and the thumbnail URL is released.
+    expect(root.classList.contains("upload-indicator-collapsed")).toBe(true);
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:fake");
   });
 
@@ -83,11 +96,12 @@ describe("UploadIndicator", () => {
     first.succeed();
     vi.advanceTimersByTime(4000);
 
-    // The finished row cleared; the in-flight one (and the card) remain.
+    // The finished row cleared; the in-flight one remains and the card
+    // stays expanded (it only re-minimizes once every row is gone).
     const rows = root.querySelectorAll(".upload-row");
     expect(rows).toHaveLength(1);
     expect(rows[0].querySelector(".upload-row-name")!.textContent).toBe("b.png");
-    expect(root.style.display).toBe("flex");
+    expect(root.classList.contains("upload-indicator-collapsed")).toBe(false);
   });
 
   it("toggles collapsed each time the card itself is clicked", () => {
@@ -109,6 +123,7 @@ describe("UploadIndicator", () => {
   });
 
   it("keeps the footer summary line current", () => {
+    expect(root.querySelector(".upload-indicator-summary")!.textContent).toBe("no active uploads");
     indicator.begin(makeFile("a.png", "image/png"));
     expect(root.querySelector(".upload-indicator-summary")!.textContent).toBe("uploading 1 file...");
   });

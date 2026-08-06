@@ -45,11 +45,20 @@ export class UploadIndicator {
     // whose entire face needs to be clickable, and making only the
     // expanded state's tiny chevron clickable would leave the two states
     // inconsistent. The chevron is purely a visual affordance.
-    root.title = "Collapse";
     root.addEventListener("click", () => {
-      const collapsed = root.classList.toggle("upload-indicator-collapsed");
-      root.title = collapsed ? "Expand" : "Collapse";
+      this.setCollapsed(!root.classList.contains("upload-indicator-collapsed"));
     });
+
+    // Always present, idling as the minimized round button until an upload
+    // starts -- rather than appearing/disappearing entirely, which read as
+    // the panel being broken when nothing was in flight.
+    this.setCollapsed(true);
+    this.updateSummary();
+  }
+
+  private setCollapsed(collapsed: boolean): void {
+    this.root.classList.toggle("upload-indicator-collapsed", collapsed);
+    this.root.title = collapsed ? "Expand" : "Collapse";
   }
 
   begin(file: File): UploadHandle {
@@ -69,7 +78,9 @@ export class UploadIndicator {
     row.append(statusEl, this.buildThumbnail(file, entry), name);
     this.list.appendChild(row);
     this.entries.add(entry);
-    this.root.style.display = "flex";
+    // A new upload always expands the card so progress is visible without
+    // any interaction -- even if the user had minimized it earlier.
+    this.setCollapsed(false);
     this.updateSummary();
 
     return {
@@ -88,7 +99,8 @@ export class UploadIndicator {
     }
     this.entries.clear();
     this.list.innerHTML = "";
-    this.root.style.display = "none";
+    this.setCollapsed(true);
+    this.updateSummary();
   }
 
   private buildThumbnail(file: File, entry: Entry): HTMLElement {
@@ -131,7 +143,10 @@ export class UploadIndicator {
     if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
     entry.row.remove();
     this.entries.delete(entry);
-    if (this.entries.size === 0) this.root.style.display = "none";
+    // Back to the idle minimized button once the last lingering row clears
+    // -- the card stays on screen, it never fully hides. A user who
+    // expanded it manually while idle keeps it open (nothing was removed).
+    if (this.entries.size === 0) this.setCollapsed(true);
     this.updateSummary();
   }
 
@@ -143,6 +158,8 @@ export class UploadIndicator {
         ? `uploading ${uploading} file${uploading === 1 ? "" : "s"}...`
         : failed > 0
           ? `${failed} upload${failed === 1 ? "" : "s"} failed`
-          : "uploads complete";
+          : this.entries.size > 0
+            ? "uploads complete"
+            : "no active uploads";
   }
 }
