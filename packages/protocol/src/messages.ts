@@ -246,6 +246,11 @@ export type ServerMessage =
       streamPreviewSettingsSeq: number;
       variables: Variable[];
       presence: PresenceEntry[];
+      // Optional so a client bundle deployed ahead of the message Lambda
+      // (or vice versa during a rolling deploy) stays type-honest: absent
+      // means "server doesn't advertise a quota", and the UI shows plain
+      // usage without a denominator.
+      storageQuotaBytes?: number;
     }
   | { type: "asset:added"; asset: Asset }
   | {

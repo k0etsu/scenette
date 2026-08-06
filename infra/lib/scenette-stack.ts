@@ -278,6 +278,14 @@ export class ScenetteStack extends cdk.Stack {
     // read access too (announcing presence:left).
     connectionsTable.grantReadWriteData(disconnectFn);
 
+    // Adjustable per-room cap on total (deduplicated-by-s3Key) stored bytes
+    // -- same for dev/prod since there's no cost-driven reason to differ.
+    // See upload-url/src/index.ts for why this is enforced coarsely
+    // (already-over-quota blocks further uploads) rather than precisely.
+    // Also advertised to clients via MessageFn's room:snapshot so the
+    // sidebar can show usage against it.
+    const ROOM_STORAGE_QUOTA_BYTES = 500 * 1024 * 1024; // 500 MB
+
     const messageFn = new lambdaNode.NodejsFunction(this, "MessageFn", {
       entry: path.join(__dirname, "../../services/websocket-handlers/src/message.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
@@ -287,6 +295,7 @@ export class ScenetteStack extends cdk.Stack {
         ASSETS_TABLE: assetsTable.tableName,
         ROOMS_TABLE: roomsTable.tableName,
         ASSETS_BUCKET: assetsBucket.bucketName,
+        ROOM_STORAGE_QUOTA_BYTES: String(ROOM_STORAGE_QUOTA_BYTES),
       },
     });
     connectionsTable.grantReadWriteData(messageFn);
@@ -378,12 +387,6 @@ export class ScenetteStack extends cdk.Stack {
     if (httpDefaultStage) httpDefaultStage.defaultRouteSettings = defaultRouteSettings;
 
     // ---- Upload URL (HTTP API) ----
-
-    // Adjustable per-room cap on total (deduplicated-by-s3Key) stored bytes
-    // -- same for dev/prod since there's no cost-driven reason to differ.
-    // See upload-url/src/index.ts for why this is enforced coarsely
-    // (already-over-quota blocks further uploads) rather than precisely.
-    const ROOM_STORAGE_QUOTA_BYTES = 500 * 1024 * 1024; // 500 MB
 
     const uploadUrlFn = new lambdaNode.NodejsFunction(this, "UploadUrlFn", {
       entry: path.join(__dirname, "../../services/upload-url/src/index.ts"),

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Asset } from "@scenette/protocol";
-import { Sidebar, SidebarCallbacks } from "../src/sidebar";
+import { Sidebar, SidebarCallbacks, formatBytes } from "../src/sidebar";
 
 function makeAsset(overrides: Partial<Asset> = {}): Asset {
   return {
@@ -580,5 +580,69 @@ describe("setAssets / selection lifecycle", () => {
     ]);
     const rows = [...objectsPanel.querySelectorAll(".object-row")];
     expect(rows).toHaveLength(3);
+  });
+});
+
+describe("room storage label", () => {
+  it("shows deduplicated usage against the advertised quota", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setStorageQuota(500 * 1024 * 1024);
+    sidebar.setAssets([
+      makeAsset({ assetId: "a1", s3Key: "room1/a/x.png", fileSize: 1024 * 1024 }),
+      // A duplicateAsset() row reusing the same S3 object -- must not
+      // double-count, matching the server's sumRoomStorageBytes.
+      makeAsset({ assetId: "a2", s3Key: "room1/a/x.png", fileSize: 1024 * 1024 }),
+      makeAsset({ assetId: "a3", s3Key: "room1/b/y.png", fileSize: 512 * 1024 }),
+    ]);
+
+    expect(objectsPanel.querySelector('[data-role="storage"]')!.textContent).toBe("1.5 MB / 500 MB used");
+  });
+
+  it("shows plain usage when no quota has been advertised (older server)", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ assetId: "a1", s3Key: "room1/a/x.png", fileSize: 512 * 1024 })]);
+
+    expect(objectsPanel.querySelector('[data-role="storage"]')!.textContent).toBe("512 KB used");
+  });
+
+  it("updates as assets are added and removed", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setStorageQuota(500 * 1024 * 1024);
+    sidebar.setAssets([]);
+    expect(objectsPanel.querySelector('[data-role="storage"]')!.textContent).toBe("0 B / 500 MB used");
+
+    sidebar.upsertAsset(makeAsset({ assetId: "a1", s3Key: "room1/a/x.png", fileSize: 1024 * 1024 }));
+    expect(objectsPanel.querySelector('[data-role="storage"]')!.textContent).toBe("1 MB / 500 MB used");
+
+    sidebar.removeAsset("a1");
+    expect(objectsPanel.querySelector('[data-role="storage"]')!.textContent).toBe("0 B / 500 MB used");
+  });
+});
+
+describe("properties file size", () => {
+  it("shows the file size for a selected media asset", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ assetId: "a1", s3Key: "room1/a/x.png", fileSize: 2.5 * 1024 * 1024 })]);
+    sidebar.setSelected("a1");
+
+    expect(propertiesPanel.querySelector(".prop-file-size")!.textContent!.trim()).toBe("File size: 2.5 MB");
+  });
+
+  it("omits the file size line for assets without one (e.g. text)", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ assetId: "t1", type: "text", text: "hi" })]);
+    sidebar.setSelected("t1");
+
+    expect(propertiesPanel.querySelector(".prop-file-size")).toBeNull();
+  });
+});
+
+describe("formatBytes", () => {
+  it("picks sensible units and trims trailing .0", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1536)).toBe("1.5 KB");
+    expect(formatBytes(1024 * 1024)).toBe("1 MB");
+    expect(formatBytes(39.76 * 1024 * 1024)).toBe("39.8 MB");
   });
 });

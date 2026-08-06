@@ -700,6 +700,7 @@ function enterRoom(
           // to accept after its own seq/dragging/inline-edit guards, not
           // the raw (potentially stale-for-an-in-flight-edit) snapshot.
           sidebar.setAssets(canvas.getAllAssets());
+          sidebar.setStorageQuota(message.storageQuotaBytes);
           soundPanel.setGlobalVolume(message.globalVolume, message.globalVolumeSeq);
           // First snapshot of this room session uses enterRoom (not
           // applySettings): this panel is a singleton that survives every
