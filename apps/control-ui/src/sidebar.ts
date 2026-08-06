@@ -274,6 +274,7 @@ export class Sidebar {
         <button type="button" data-role="toggle-hidden" class="sidebar-icon-button">${asset.hidden ? ICON_EYE_OFF : ICON_EYE}</button>
         <button type="button" data-role="toggle-locked" class="sidebar-icon-button">${asset.locked ? ICON_LOCK : ICON_UNLOCK}</button>
         <button type="button" data-role="duplicate" class="sidebar-icon-button">${ICON_DUPLICATE}</button>
+        ${asset.fileSize !== undefined ? `<span class="prop-file-size">File size: ${formatBytes(asset.fileSize)}</span>` : ""}
       </div>
       <div class="prop-row">
         <label class="prop-label">Z-index</label>
@@ -318,9 +319,6 @@ export class Sidebar {
         <button type="button" data-role="flip-x" class="sidebar-flip-button${asset.flipX ? " active" : ""}">Flip H</button>
         <button type="button" data-role="flip-y" class="sidebar-flip-button${asset.flipY ? " active" : ""}">Flip V</button>
       </div>
-      ${asset.fileSize !== undefined ? `
-        <div class="prop-file-size">File size: ${formatBytes(asset.fileSize)}</div>
-      ` : ""}
       ${asset.type === "text" ? textSettingsHtml(asset) : ""}
       ${asset.type === "video" || asset.type === "audio" ? `
         <div class="sidebar-header"><span>Playback</span></div>

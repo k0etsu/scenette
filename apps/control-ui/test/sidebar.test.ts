@@ -626,6 +626,9 @@ describe("properties file size", () => {
     sidebar.setSelected("a1");
 
     expect(propertiesPanel.querySelector(".prop-file-size")!.textContent!.trim()).toBe("File size: 2.5 MB");
+    // Placed inside the delete/hide/lock/duplicate button row at the top of
+    // the panel, not as its own standalone line further down.
+    expect(propertiesPanel.querySelector(".properties-buttons .prop-file-size")).not.toBeNull();
   });
 
   it("omits the file size line for assets without one (e.g. text)", () => {

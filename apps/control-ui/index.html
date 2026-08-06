@@ -177,10 +177,14 @@
         padding: 0 2px 6px;
         flex-shrink: 0;
       }
+      /* Lives inside the delete/hide/lock/duplicate .properties-buttons flex
+         row -- pushed to the right edge, vertically centered against the
+         icon buttons. */
       .prop-file-size {
         font-size: 12px;
         color: #999;
-        margin: 2px 0 4px;
+        margin-left: auto;
+        align-self: center;
       }
       .objects-list {
         flex: 1;
