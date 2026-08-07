@@ -1,4 +1,12 @@
-import { AssetAddMessage, ServerMessage, DEFAULT_TEXT_STYLE } from "@scenette/protocol";
+import {
+  AssetAddMessage,
+  ServerMessage,
+  DEFAULT_TEXT_STYLE,
+  DEFAULT_CLOCK_FORMAT,
+  ClockFields,
+  computeClockDisplay,
+  localTimezone,
+} from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { CanvasView, MIN_ASSET_SIZE } from "./canvas";
 import { Sidebar } from "./sidebar";
@@ -67,6 +75,7 @@ const statusEl = document.getElementById("status");
 const contextMenu = document.getElementById("context-menu");
 const contextMenuTextButton = document.getElementById("context-menu-text");
 const contextMenuMediaButton = document.getElementById("context-menu-media");
+const contextMenuClockButton = document.getElementById("context-menu-clock");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !loginHint ||
@@ -76,7 +85,7 @@ if (
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !uploadIndicatorEl || !manageAccessButton || !accessModalEl || !settingsModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
-  !contextMenuTextButton || !contextMenuMediaButton
+  !contextMenuTextButton || !contextMenuMediaButton || !contextMenuClockButton
 ) {
   throw new Error("Missing required DOM elements");
 }
@@ -326,6 +335,32 @@ async function main(): Promise<void> {
     });
   }
 
+  function createClockAsset(): void {
+    if (!current) return;
+    // Defaults to a live time-of-day clock in the viewer's own timezone.
+    const clock: ClockFields = {
+      clockMode: "clock",
+      clockTimezone: localTimezone(),
+      clockFormat: DEFAULT_CLOCK_FORMAT,
+      clockRunning: true,
+    };
+    // Size the box to the initial rendered time up front (same as text), so it
+    // appears already fitted rather than self-correcting on the first tick.
+    const { width, height } = measureTextBoxSize(computeClockDisplay(clock, Date.now()), DEFAULT_TEXT_STYLE, MIN_ASSET_SIZE);
+    const viewport = current.canvas.getViewport();
+    const pos = current.createPosition ?? {
+      x: viewport.x + viewport.width / 2 - width / 2,
+      y: viewport.y + viewport.height / 2 - height / 2,
+    };
+    current.createPosition = undefined;
+
+    current.connection.send({
+      action: "asset:add",
+      roomId: current.roomId,
+      asset: { assetId: crypto.randomUUID(), type: "clock", x: pos.x, y: pos.y, width, height, ...clock },
+    });
+  }
+
   contextMenuTextButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     createTextAsset();
@@ -401,6 +436,11 @@ async function main(): Promise<void> {
   contextMenuMediaButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     triggerMediaUpload();
+  });
+
+  contextMenuClockButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    createClockAsset();
   });
 
   const streamPreviewPanel = new StreamPreviewPanel(
@@ -627,6 +667,9 @@ function enterRoom(
       },
       onSelectionChange: (assetId) => {
         room.sidebar.setSelected(assetId);
+        // Selecting an asset clears any variable selection/highlight so only
+        // one thing is ever focused in the properties card at a time.
+        if (assetId) variablesPanel.setSelectedKey(undefined);
       },
       // The stream-preview overlay is a sibling of #canvas-inner, not a
       // child of it, so it survives room switches (CanvasView.dispose()
@@ -680,6 +723,8 @@ function enterRoom(
       room.createPosition = undefined; // sidebar-triggered creates default to viewport center
       showContextMenu(rect.right + 4, rect.top);
     },
+    onVariableSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
+    onVariableDelete: (key) => room.connection.send({ action: "variable:delete", roomId, key }),
   });
   room.sidebar = sidebar;
 
@@ -698,7 +743,18 @@ function enterRoom(
   room.connectedUsersPanel = connectedUsersPanel;
 
   const variablesPanel = new VariablesPanel(variablesPanelEl!, {
-    onSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
+    // Selecting a variable focuses it in the shared properties card; clear any
+    // canvas asset selection so only one thing is ever "selected" at a time.
+    onSelect: (variable) => {
+      canvas.selectAsset(undefined);
+      sidebar.selectVariable(variable);
+      variablesPanel.setSelectedKey(variable.key);
+    },
+    onAdd: () => {
+      canvas.selectAsset(undefined);
+      sidebar.startNewVariable();
+      variablesPanel.setSelectedKey(undefined);
+    },
     onDelete: (key) => room.connection.send({ action: "variable:delete", roomId, key }),
   });
 
@@ -757,6 +813,9 @@ function enterRoom(
           }
           canvas.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
           variablesPanel.setVariables(message.variables);
+          // Keep the properties card's variable (if any) in sync with the
+          // authoritative snapshot -- refresh its value or drop it if deleted.
+          sidebar.reconcileVariables(message.variables);
           connectedUsersPanel.setPresence(message.presence);
           break;
         case "asset:added":
@@ -799,10 +858,12 @@ function enterRoom(
         case "variable:updated":
           variablesPanel.upsertVariable(message.variable);
           canvas.upsertVariable(message.variable);
+          sidebar.refreshVariable(message.variable);
           break;
         case "variable:deleted":
           variablesPanel.removeVariable(message.key);
           canvas.removeVariable(message.key);
+          sidebar.onVariableDeleted(message.key);
           break;
         case "presence:joined":
           connectedUsersPanel.addPresence(message.entry);

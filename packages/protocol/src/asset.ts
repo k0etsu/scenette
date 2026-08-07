@@ -1,6 +1,11 @@
-export type AssetType = "image" | "gif" | "video" | "audio" | "text";
+import { ClockFields } from "./clock";
 
-export interface Asset {
+export type AssetType = "image" | "gif" | "video" | "audio" | "text" | "clock";
+
+// Clock-type assets additionally carry the ClockFields (mode/target/timezone/
+// etc., all optional) -- they're ignored for every other type, exactly like
+// the text-style fields below.
+export interface Asset extends ClockFields {
   roomId: string;
   assetId: string;
   type: AssetType;

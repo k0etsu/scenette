@@ -1,4 +1,18 @@
-import { Asset, AssetPatch, AssetType, TEXT_FONT_FAMILIES, TEXT_FONT_WEIGHTS, resolveTextStyle } from "@scenette/protocol";
+import {
+  Asset,
+  AssetPatch,
+  AssetType,
+  ClockMode,
+  ClockTimeFormat,
+  DEFAULT_CLOCK_DURATION_MS,
+  DEFAULT_CLOCK_FORMAT,
+  TEXT_FONT_FAMILIES,
+  TEXT_FONT_WEIGHTS,
+  Variable,
+  VariableType,
+  localTimezone,
+  resolveTextStyle,
+} from "@scenette/protocol";
 import {
   ICON_EYE,
   ICON_EYE_OFF,
@@ -12,6 +26,9 @@ import {
   ICON_IMAGE,
   ICON_VIDEO,
   ICON_AUDIO,
+  ICON_CLOCK,
+  ICON_MINUS,
+  ICON_PLUS,
 } from "./icons";
 
 export interface SidebarCallbacks {
@@ -26,6 +43,10 @@ export interface SidebarCallbacks {
   onMove: (assetId: string, x: number, y: number) => void;
   onResize: (assetId: string, width: number, height: number) => void;
   onCreateClick: () => void;
+  // Variable editing happens in the shared properties card (see the variable
+  // card below), so the sidebar sends variable upserts/deletes too.
+  onVariableSet: (key: string, type: VariableType, value: string) => void;
+  onVariableDelete: (key: string) => void;
 }
 
 const TYPE_ICON: Record<AssetType, string> = {
@@ -34,6 +55,7 @@ const TYPE_ICON: Record<AssetType, string> = {
   gif: ICON_IMAGE,
   video: ICON_VIDEO,
   audio: ICON_AUDIO,
+  clock: ICON_CLOCK,
 };
 
 // Objects list + properties panel — lets a streamer/mod adjust an existing
@@ -43,6 +65,11 @@ const TYPE_ICON: Record<AssetType, string> = {
 export class Sidebar {
   private assets = new Map<string, Asset>();
   private selectedAssetId?: string;
+  // The properties card shows EITHER a selected asset, a selected variable, or
+  // the "new variable" form -- these three are mutually exclusive. Selecting
+  // any one clears the others (see setSelected / selectVariable / newVariable).
+  private selectedVariable?: Variable;
+  private newVariableMode = false;
   // Advertised by the server in room:snapshot; undefined until the first
   // snapshot lands (or against an older server that doesn't send it), in
   // which case the label shows plain usage without a denominator.
@@ -165,8 +192,56 @@ export class Sidebar {
 
   setSelected(assetId: string | undefined): void {
     this.selectedAssetId = assetId;
+    // Selecting an asset takes over the card from any variable selection.
+    this.selectedVariable = undefined;
+    this.newVariableMode = false;
     this.renderObjectsList();
     this.renderProperties();
+  }
+
+  // Show a variable's properties in the card (from a click in the variables
+  // list). Clears any asset selection so the two never both show.
+  selectVariable(variable: Variable): void {
+    this.selectedVariable = variable;
+    this.newVariableMode = false;
+    this.selectedAssetId = undefined;
+    this.renderObjectsList();
+    this.renderProperties();
+  }
+
+  // Show a blank "new variable" form in the card (the variables list "+").
+  startNewVariable(): void {
+    this.newVariableMode = true;
+    this.selectedVariable = undefined;
+    this.selectedAssetId = undefined;
+    this.renderObjectsList();
+    this.renderProperties();
+  }
+
+  // A variable changed elsewhere (or via this card's own edit round-tripping
+  // back): if it's the one on show, refresh the card with its new value --
+  // unless the user is mid-edit, matching the asset-side interacting guard.
+  refreshVariable(variable: Variable): void {
+    if (this.selectedVariable?.key !== variable.key) return;
+    this.selectedVariable = variable;
+    if (!this.interacting) this.renderProperties();
+  }
+
+  // The on-show variable was deleted (here or by another client): drop the card.
+  onVariableDeleted(key: string): void {
+    if (this.selectedVariable?.key === key) {
+      this.selectedVariable = undefined;
+      this.renderProperties();
+    }
+  }
+
+  // Full-snapshot reconcile: keep the card in sync with the authoritative list
+  // (refresh the selected variable's value, or clear it if it's gone).
+  reconcileVariables(variables: Variable[]): void {
+    if (!this.selectedVariable) return;
+    const match = variables.find((v) => v.key === this.selectedVariable!.key);
+    if (match) this.refreshVariable(match);
+    else this.onVariableDeleted(this.selectedVariable.key);
   }
 
   // Mirrors the server's sumRoomStorageBytes: each distinct S3 object
@@ -247,6 +322,14 @@ export class Sidebar {
   }
 
   private renderProperties(): void {
+    if (this.newVariableMode) {
+      this.renderNewVariableCard();
+      return;
+    }
+    if (this.selectedVariable) {
+      this.renderVariableCard(this.selectedVariable);
+      return;
+    }
     const asset = this.selectedAssetId ? this.assets.get(this.selectedAssetId) : undefined;
     if (!asset) {
       this.propertiesPanel.innerHTML = "";
@@ -320,6 +403,7 @@ export class Sidebar {
         <button type="button" data-role="flip-y" class="sidebar-flip-button${asset.flipY ? " active" : ""}">Flip V</button>
       </div>
       ${asset.type === "text" ? textSettingsHtml(asset) : ""}
+      ${asset.type === "clock" ? clockSettingsHtml(asset) : ""}
       ${asset.type === "video" || asset.type === "audio" ? `
         <div class="sidebar-header"><span>Playback</span></div>
         <div class="properties-buttons">
@@ -371,7 +455,11 @@ export class Sidebar {
       // for up to the throttle window with no further typing left to
       // eventually carry it.
       textArea.addEventListener("blur", () => this.callbacks.onTextEditBlur(assetId));
+    }
 
+    // Clocks reuse the same text-style controls (font/colors/shadow/outline)
+    // as text assets, so these are wired for both types.
+    if (asset.type === "text" || asset.type === "clock") {
       el<HTMLInputElement>("font-size").addEventListener("change", (e) =>
         patch({ fontSize: Number((e.target as HTMLInputElement).value) })
       );
@@ -447,6 +535,8 @@ export class Sidebar {
       );
     }
 
+    if (asset.type === "clock") this.wireClockControls(assetId);
+
     el<HTMLInputElement>("zindex").addEventListener("change", (e) =>
       patch({ zIndex: Number((e.target as HTMLInputElement).value) })
     );
@@ -497,6 +587,208 @@ export class Sidebar {
     }
   }
 
+  // A selected variable's editable properties, shown in the shared card:
+  // type, value, and quick controls (+/-/reset for numbers, set for text).
+  private renderVariableCard(variable: Variable): void {
+    this.propertiesPanel.style.display = "flex";
+    const key = variable.key;
+    const isNumber = variable.type === "number";
+    this.propertiesPanel.innerHTML = `
+      <div class="sidebar-header">
+        <span class="prop-name-input" title="Variable key (immutable)">${escapeHtml(key)}</span>
+        <span class="prop-name-suffix">- variable</span>
+      </div>
+      <div class="properties-buttons">
+        <button type="button" data-role="var-delete" class="sidebar-icon-button danger">${ICON_TRASH}</button>
+      </div>
+      <label class="prop-label">type:
+        <select data-role="var-type">
+          <option value="number">number</option>
+          <option value="text">text</option>
+        </select>
+      </label>
+      <label class="prop-label">value:</label>
+      ${
+        isNumber
+          ? `<div class="variable-stepper">
+               <button type="button" data-role="var-minus" class="sidebar-icon-button">${ICON_MINUS}</button>
+               <input type="number" data-role="var-value" value="${escapeHtml(variable.value)}" />
+               <button type="button" data-role="var-plus" class="sidebar-icon-button">${ICON_PLUS}</button>
+               <button type="button" data-role="var-reset" class="sidebar-flip-button">Reset</button>
+             </div>`
+          : `<div class="variable-set-row">
+               <input type="text" data-role="var-value" value="${escapeHtml(variable.value)}" />
+               <button type="button" data-role="var-set" class="sidebar-flip-button">Set</button>
+             </div>`
+      }
+      <p class="variables-help">Use this variable in Text objects by wrapping its key in curly braces, like <code>{${escapeHtml(key)}}</code>.</p>
+    `;
+
+    const q = <T extends HTMLElement>(role: string) =>
+      this.propertiesPanel.querySelector<T>(`[data-role="${role}"]`)!;
+    const valueInput = q<HTMLInputElement>("var-value");
+    // Optimistically advance the on-hand value so rapid +/- clicks accumulate
+    // rather than all computing off the same pre-round-trip value.
+    const set = (value: string, type: VariableType = variable.type) => {
+      this.selectedVariable = { ...variable, type, value };
+      valueInput.value = value;
+      this.callbacks.onVariableSet(key, type, value);
+    };
+    const currentNumber = () => Number(this.selectedVariable?.value ?? variable.value) || 0;
+
+    const typeSelect = q<HTMLSelectElement>("var-type");
+    typeSelect.value = variable.type;
+    typeSelect.addEventListener("change", () => {
+      this.callbacks.onVariableSet(key, typeSelect.value as VariableType, valueInput.value);
+      this.selectedVariable = { ...variable, type: typeSelect.value as VariableType, value: valueInput.value };
+      this.renderProperties();
+    });
+
+    q<HTMLButtonElement>("var-delete").addEventListener("click", () => this.callbacks.onVariableDelete(key));
+
+    if (isNumber) {
+      valueInput.addEventListener("change", () => set(valueInput.value));
+      q<HTMLButtonElement>("var-minus").addEventListener("click", () => set(String(currentNumber() - 1)));
+      q<HTMLButtonElement>("var-plus").addEventListener("click", () => set(String(currentNumber() + 1)));
+      q<HTMLButtonElement>("var-reset").addEventListener("click", () => set("0"));
+    } else {
+      const commit = () => set(valueInput.value);
+      q<HTMLButtonElement>("var-set").addEventListener("click", commit);
+      valueInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") commit();
+      });
+    }
+  }
+
+  // The "new variable" form (from the variables list "+"). Key is editable
+  // here only -- it's immutable once created (rename = delete + re-create).
+  private renderNewVariableCard(): void {
+    this.propertiesPanel.style.display = "flex";
+    this.propertiesPanel.innerHTML = `
+      <div class="sidebar-header"><span class="prop-name-suffix">new variable</span></div>
+      <label class="prop-label">variable key:</label>
+      <input type="text" data-role="new-var-key" placeholder="e.g. kills" />
+      <label class="prop-label">type:
+        <select data-role="new-var-type">
+          <option value="number">number</option>
+          <option value="text">text</option>
+        </select>
+      </label>
+      <label class="prop-label">value:</label>
+      <input data-role="new-var-value" value="0" />
+      <p class="variables-help">Variables let you keep common numbers or text handy to adjust quickly. Use one in a Text object by wrapping its key in braces, like <code>{variable}</code>.</p>
+      <div class="properties-buttons">
+        <button type="button" data-role="new-var-create">Create</button>
+        <button type="button" data-role="new-var-cancel">Cancel</button>
+      </div>
+    `;
+    const q = <T extends HTMLElement>(role: string) =>
+      this.propertiesPanel.querySelector<T>(`[data-role="${role}"]`)!;
+    const keyInput = q<HTMLInputElement>("new-var-key");
+    const typeSelect = q<HTMLSelectElement>("new-var-type");
+    const valueInput = q<HTMLInputElement>("new-var-value");
+    valueInput.type = "number";
+    typeSelect.addEventListener("change", () => {
+      valueInput.type = typeSelect.value === "number" ? "number" : "text";
+    });
+
+    q<HTMLButtonElement>("new-var-create").addEventListener("click", () => {
+      const key = keyInput.value.trim();
+      if (!key) {
+        keyInput.focus();
+        return;
+      }
+      this.callbacks.onVariableSet(key, typeSelect.value as VariableType, valueInput.value);
+      // Round-trips back as variable:updated and appears in the list; clear the
+      // form -- the user clicks the new row to keep editing it.
+      this.newVariableMode = false;
+      this.renderProperties();
+    });
+    q<HTMLButtonElement>("new-var-cancel").addEventListener("click", () => {
+      this.newVariableMode = false;
+      this.renderProperties();
+    });
+    keyInput.focus();
+  }
+
+  // Clock mode/config/start-pause-reset controls. Clock fields are ordinary
+  // AssetPatch fields, so these just route through the same onPatch path as
+  // every other property edit -- a ticking clock itself costs no traffic (each
+  // client computes the display locally; see canvas.ts's tickClocks and the
+  // shared computeClockDisplay), only config changes are ever sent.
+  private wireClockControls(assetId: string): void {
+    const q = <T extends HTMLElement>(role: string) =>
+      this.propertiesPanel.querySelector<T>(`[data-role="${role}"]`);
+    const patch = (p: AssetPatch) => this.callbacks.onPatch(assetId, p);
+
+    q<HTMLSelectElement>("clock-mode")?.addEventListener("change", (e) => {
+      const clockMode = (e.target as HTMLSelectElement).value as ClockMode;
+      const p: AssetPatch = { clockMode };
+      const current = this.assets.get(assetId);
+      // Seed the defaults a newly-chosen mode needs so its fields render
+      // populated rather than blank on the re-render below.
+      if (clockMode === "countdown" && current?.clockDurationMs === undefined) {
+        p.clockDurationMs = DEFAULT_CLOCK_DURATION_MS;
+      }
+      if (clockMode === "clock") {
+        if (current?.clockTimezone === undefined) p.clockTimezone = localTimezone();
+        if (current?.clockFormat === undefined) p.clockFormat = DEFAULT_CLOCK_FORMAT;
+      }
+      if (clockMode === "countup" || clockMode === "countdown") {
+        // Entering a timer mode starts it fresh and stopped.
+        p.clockElapsedMs = 0;
+        p.clockRunning = false;
+      }
+      patch(p);
+      this.renderProperties();
+    });
+
+    const minEl = q<HTMLInputElement>("clock-min");
+    const secEl = q<HTMLInputElement>("clock-sec");
+    const sendDuration = () => {
+      const mm = Math.max(0, Math.floor(Number(minEl?.value) || 0));
+      const ss = Math.max(0, Math.floor(Number(secEl?.value) || 0));
+      patch({ clockDurationMs: (mm * 60 + ss) * 1000, clockElapsedMs: 0 });
+    };
+    minEl?.addEventListener("change", sendDuration);
+    secEl?.addEventListener("change", sendDuration);
+
+    q<HTMLInputElement>("clock-target")?.addEventListener("change", (e) => {
+      const ms = Date.parse((e.target as HTMLInputElement).value);
+      if (!Number.isNaN(ms)) patch({ clockTargetMs: ms });
+    });
+
+    q<HTMLSelectElement>("clock-format")?.addEventListener("change", (e) =>
+      patch({ clockFormat: (e.target as HTMLSelectElement).value as ClockTimeFormat })
+    );
+    q<HTMLSelectElement>("clock-timezone")?.addEventListener("change", (e) =>
+      patch({ clockTimezone: (e.target as HTMLSelectElement).value })
+    );
+
+    q<HTMLButtonElement>("clock-toggle")?.addEventListener("click", () => {
+      const current = this.assets.get(assetId);
+      if (!current) return;
+      if (current.clockRunning) {
+        // Pause: fold the currently-running span into the accumulated elapsed.
+        const base = current.clockElapsedMs ?? 0;
+        const elapsed =
+          typeof current.clockAnchorMs === "number"
+            ? base + Math.max(0, Date.now() - current.clockAnchorMs)
+            : base;
+        patch({ clockRunning: false, clockElapsedMs: elapsed });
+      } else {
+        // Start/resume: re-anchor to now, keeping accumulated elapsed.
+        patch({ clockRunning: true, clockAnchorMs: Date.now() });
+      }
+      this.renderProperties();
+    });
+
+    q<HTMLButtonElement>("clock-reset")?.addEventListener("click", () => {
+      patch({ clockElapsedMs: 0, clockAnchorMs: Date.now(), clockRunning: false });
+      this.renderProperties();
+    });
+  }
+
   // Wires a slider + its paired numeric input together: dragging the slider
   // live-updates the number, typing in the number live-updates the slider,
   // and either one sends the patch. Both fire a final renderProperties() on
@@ -542,6 +834,127 @@ function normalizeRotation(deg: number): number {
 }
 
 function textSettingsHtml(asset: Asset): string {
+  return `
+    <div class="sidebar-header"><span>text settings</span></div>
+    <label class="prop-label">Text</label>
+    <textarea data-role="text-content" rows="3">${escapeHtml(asset.text ?? "")}</textarea>
+    ${textStyleControlsHtml(asset)}
+  `;
+}
+
+// Curated IANA timezone list for the clock-mode picker. The asset's own
+// stored zone is prepended at render time if it isn't already here, so a zone
+// set elsewhere (or a future addition) is never lost from the dropdown.
+const CLOCK_TIMEZONES = [
+  "UTC",
+  "America/Los_Angeles",
+  "America/Denver",
+  "America/Chicago",
+  "America/New_York",
+  "America/Sao_Paulo",
+  "Europe/London",
+  "Europe/Paris",
+  "Europe/Berlin",
+  "Europe/Moscow",
+  "Asia/Dubai",
+  "Asia/Kolkata",
+  "Asia/Shanghai",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
+
+// The datetime-local input wants "YYYY-MM-DDTHH:mm" in the viewer's local time.
+function targetLocalValue(ms: number | undefined): string {
+  const d = ms !== undefined ? new Date(ms) : new Date(Date.now() + DEFAULT_CLOCK_DURATION_MS);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function clockRunControlsHtml(asset: Asset): string {
+  const running = asset.clockRunning ?? false;
+  return `
+    <div class="properties-buttons">
+      <button type="button" data-role="clock-toggle" class="sidebar-flip-button${running ? " active" : ""}">${running ? "Pause" : "Start"}</button>
+      <button type="button" data-role="clock-reset" class="sidebar-flip-button">Reset</button>
+    </div>
+  `;
+}
+
+function clockSettingsHtml(asset: Asset): string {
+  const mode: ClockMode = asset.clockMode ?? "clock";
+  const modeOptions = (
+    [
+      ["clock", "Clock (time of day)"],
+      ["countup", "Count up"],
+      ["countdown", "Count down"],
+      ["countdown-to", "Countdown to a time"],
+    ] as const
+  )
+    .map(([v, label]) => `<option value="${v}"${v === mode ? " selected" : ""}>${label}</option>`)
+    .join("");
+
+  let modeFields = "";
+  if (mode === "countdown") {
+    const totalSec = Math.floor((asset.clockDurationMs ?? DEFAULT_CLOCK_DURATION_MS) / 1000);
+    modeFields = `
+      <div class="prop-row-pair">
+        <div>
+          <label class="prop-label">Minutes</label>
+          <input type="number" data-role="clock-min" value="${Math.floor(totalSec / 60)}" min="0" />
+        </div>
+        <div>
+          <label class="prop-label">Seconds</label>
+          <input type="number" data-role="clock-sec" value="${totalSec % 60}" min="0" max="59" />
+        </div>
+      </div>
+      ${clockRunControlsHtml(asset)}
+    `;
+  } else if (mode === "countup") {
+    modeFields = clockRunControlsHtml(asset);
+  } else if (mode === "countdown-to") {
+    modeFields = `
+      <label class="prop-label">Target date/time</label>
+      <input type="datetime-local" data-role="clock-target" value="${escapeHtml(targetLocalValue(asset.clockTargetMs))}" />
+    `;
+  } else {
+    const fmt: ClockTimeFormat = asset.clockFormat ?? DEFAULT_CLOCK_FORMAT;
+    const fmtOptions = (
+      [
+        ["24h-seconds", "24-hour · with seconds"],
+        ["24h", "24-hour"],
+        ["12h-seconds", "12-hour · with seconds"],
+        ["12h", "12-hour"],
+      ] as const
+    )
+      .map(([v, label]) => `<option value="${v}"${v === fmt ? " selected" : ""}>${label}</option>`)
+      .join("");
+    const tz = asset.clockTimezone ?? localTimezone();
+    const zones = CLOCK_TIMEZONES.includes(tz) ? CLOCK_TIMEZONES : [tz, ...CLOCK_TIMEZONES];
+    const tzOptions = zones
+      .map((z) => `<option value="${escapeHtml(z)}"${z === tz ? " selected" : ""}>${escapeHtml(z)}</option>`)
+      .join("");
+    modeFields = `
+      <label class="prop-label">Format</label>
+      <select data-role="clock-format">${fmtOptions}</select>
+      <label class="prop-label">Timezone</label>
+      <select data-role="clock-timezone">${tzOptions}</select>
+    `;
+  }
+
+  return `
+    <div class="sidebar-header"><span>clock settings</span></div>
+    <label class="prop-label">Mode</label>
+    <select data-role="clock-mode">${modeOptions}</select>
+    ${modeFields}
+    <div class="sidebar-header"><span>clock style</span></div>
+    ${textStyleControlsHtml(asset)}
+  `;
+}
+
+// The font/color/shadow/outline controls shared by text and clock assets
+// (a clock is styled text). Text assets prepend the editable text content
+// (see textSettingsHtml); clocks don't (their content is the computed time).
+function textStyleControlsHtml(asset: Asset): string {
   const s = resolveTextStyle(asset);
   const fontOptions = TEXT_FONT_FAMILIES.map(
     (f) => `<option value="${f}"${f === s.fontFamily ? " selected" : ""}>${f}</option>`
@@ -554,9 +967,6 @@ function textSettingsHtml(asset: Asset): string {
     .join("");
 
   return `
-    <div class="sidebar-header"><span>text settings</span></div>
-    <label class="prop-label">Text</label>
-    <textarea data-role="text-content" rows="3">${escapeHtml(asset.text ?? "")}</textarea>
     <div class="prop-row-pair">
       <div>
         <label class="prop-label">Size:</label>
@@ -638,6 +1048,7 @@ function displayName(asset: Asset): string {
     const text = asset.text ?? "";
     return text.length > 24 ? text.slice(0, 24) + "…" : text || "(empty text)";
   }
+  if (asset.type === "clock") return "Clock";
   if (asset.s3Key) {
     const fileName = asset.s3Key.split("/").pop() ?? asset.s3Key;
     return fileName;

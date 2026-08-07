@@ -1,17 +1,22 @@
-import { Variable, VariableType } from "@scenette/protocol";
-import { ICON_EXPAND, ICON_MINUS, ICON_PLUS, ICON_TRASH } from "./icons";
+import { Variable } from "@scenette/protocol";
+import { ICON_EXPAND, ICON_PLUS, ICON_TRASH } from "./icons";
 
 export interface VariablesCallbacks {
-  // Upsert -- covers both creating a new variable and editing/incrementing
-  // an existing one's value (key is immutable once created).
-  onSet: (key: string, type: VariableType, value: string) => void;
+  // Clicking a variable selects it and focuses it in the properties card
+  // (the bottom half of the sidebar) -- editing happens there, not inline.
+  onSelect: (variable: Variable) => void;
+  // The "+" header button -- opens a blank variable form in the properties card.
+  onAdd: () => void;
   onDelete: (key: string) => void;
 }
 
+// The variables LIST (upper sidebar). Just names + current values, selectable;
+// all editing lives in the shared properties card (see Sidebar's variable
+// card), so a click here never expands anything in place.
 export class VariablesPanel {
   private variables = new Map<string, Variable>();
+  private selectedKey?: string;
   private readonly list: HTMLElement;
-  private readonly form: HTMLElement;
 
   constructor(private readonly root: HTMLElement, private readonly callbacks: VariablesCallbacks) {
     root.innerHTML = `
@@ -21,12 +26,10 @@ export class VariablesPanel {
         <button type="button" class="sidebar-icon-button" data-role="add">${ICON_PLUS}</button>
       </div>
       <div class="variables-list"></div>
-      <div class="variables-form" style="display: none"></div>
     `;
     this.list = root.querySelector(".variables-list")!;
-    this.form = root.querySelector(".variables-form")!;
 
-    root.querySelector('[data-role="add"]')!.addEventListener("click", () => this.openForm());
+    root.querySelector('[data-role="add"]')!.addEventListener("click", () => this.callbacks.onAdd());
     const expandButton = root.querySelector<HTMLElement>('[data-role="expand"]')!;
     expandButton.addEventListener("click", () => {
       const collapsed = root.classList.toggle("panel-collapsed");
@@ -36,6 +39,7 @@ export class VariablesPanel {
 
   setVariables(variables: Variable[]): void {
     this.variables = new Map(variables.map((v) => [v.key, v]));
+    if (this.selectedKey && !this.variables.has(this.selectedKey)) this.selectedKey = undefined;
     this.renderList();
   }
 
@@ -46,8 +50,15 @@ export class VariablesPanel {
 
   removeVariable(key: string): void {
     this.variables.delete(key);
+    if (this.selectedKey === key) this.selectedKey = undefined;
     this.renderList();
-    if (this.form.dataset.editingKey === key) this.closeForm();
+  }
+
+  // Which row to highlight -- driven by the shared selection (cleared when an
+  // asset is selected instead). Set by main.ts, kept in sync with the card.
+  setSelectedKey(key: string | undefined): void {
+    this.selectedKey = key;
+    this.renderList();
   }
 
   private renderList(): void {
@@ -55,111 +66,30 @@ export class VariablesPanel {
     const sorted = [...this.variables.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     for (const variable of sorted) {
       const row = document.createElement("div");
-      row.className = "variable-row";
+      row.className = "variable-row" + (variable.key === this.selectedKey ? " selected" : "");
 
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
       deleteButton.className = "sidebar-icon-button";
       deleteButton.innerHTML = ICON_TRASH;
       deleteButton.title = "Delete";
-      deleteButton.addEventListener("click", () => this.callbacks.onDelete(variable.key));
+      deleteButton.addEventListener("click", (event) => {
+        // Don't also select the row we're deleting.
+        event.stopPropagation();
+        this.callbacks.onDelete(variable.key);
+      });
 
       const name = document.createElement("span");
       name.className = "variable-name";
       name.textContent = variable.key;
-      name.title = "Click to edit";
-      name.addEventListener("click", () => this.openForm(variable));
 
-      row.append(deleteButton, name);
+      const value = document.createElement("span");
+      value.className = "variable-value" + (variable.type === "text" ? " variable-value-text" : "");
+      value.textContent = variable.value;
 
-      if (variable.type === "number") {
-        const stepper = document.createElement("div");
-        stepper.className = "variable-stepper";
-
-        const minus = document.createElement("button");
-        minus.type = "button";
-        minus.className = "sidebar-icon-button";
-        minus.innerHTML = ICON_MINUS;
-        minus.addEventListener("click", () => {
-          const current = this.variables.get(variable.key);
-          if (current) this.callbacks.onSet(current.key, "number", String((Number(current.value) || 0) - 1));
-        });
-
-        const value = document.createElement("span");
-        value.className = "variable-value";
-        value.textContent = variable.value;
-
-        const plus = document.createElement("button");
-        plus.type = "button";
-        plus.className = "sidebar-icon-button";
-        plus.innerHTML = ICON_PLUS;
-        plus.addEventListener("click", () => {
-          const current = this.variables.get(variable.key);
-          if (current) this.callbacks.onSet(current.key, "number", String((Number(current.value) || 0) + 1));
-        });
-
-        stepper.append(minus, value, plus);
-        row.appendChild(stepper);
-      } else {
-        const value = document.createElement("span");
-        value.className = "variable-value variable-value-text";
-        value.textContent = variable.value;
-        row.appendChild(value);
-      }
-
+      row.append(deleteButton, name, value);
+      row.addEventListener("click", () => this.callbacks.onSelect(variable));
       this.list.appendChild(row);
     }
   }
-
-  private openForm(existing?: Variable): void {
-    this.form.dataset.editingKey = existing?.key ?? "";
-    this.form.style.display = "block";
-    this.form.innerHTML = `
-      <label class="prop-label">variable key:</label>
-      <input type="text" data-role="key" value="${escapeHtml(existing?.key ?? "")}" ${existing ? "disabled" : ""} />
-      <label class="prop-label">value:</label>
-      <input data-role="value" value="${escapeHtml(existing?.value ?? "0")}" />
-      <label class="prop-label">type:
-        <select data-role="type">
-          <option value="number">number</option>
-          <option value="text">text</option>
-        </select>
-      </label>
-      <p class="variables-help">Variables let you keep around common numbers or text to adjust quickly! Use them in Text objects by wrapping the variable key in curly braces, like this: <code>{variable}</code></p>
-      <p class="variables-help">Future API endpoints will allow for powerful integrations.</p>
-      <div class="properties-buttons">
-        <button type="button" data-role="save">Save</button>
-        <button type="button" data-role="cancel">Cancel</button>
-      </div>
-    `;
-
-    const keyInput = this.form.querySelector<HTMLInputElement>('[data-role="key"]')!;
-    const valueInput = this.form.querySelector<HTMLInputElement>('[data-role="value"]')!;
-    const typeSelect = this.form.querySelector<HTMLSelectElement>('[data-role="type"]')!;
-    typeSelect.value = existing?.type ?? "number";
-    valueInput.type = typeSelect.value === "number" ? "number" : "text";
-    typeSelect.addEventListener("change", () => {
-      valueInput.type = typeSelect.value === "number" ? "number" : "text";
-    });
-
-    this.form.querySelector('[data-role="save"]')!.addEventListener("click", () => {
-      const key = existing ? existing.key : keyInput.value.trim();
-      if (!key) return;
-      this.callbacks.onSet(key, typeSelect.value as VariableType, valueInput.value);
-      this.closeForm();
-    });
-    this.form.querySelector('[data-role="cancel"]')!.addEventListener("click", () => this.closeForm());
-  }
-
-  private closeForm(): void {
-    delete this.form.dataset.editingKey;
-    this.form.style.display = "none";
-    this.form.innerHTML = "";
-  }
-}
-
-function escapeHtml(value: string): string {
-  const div = document.createElement("div");
-  div.textContent = value;
-  return div.innerHTML;
 }

@@ -141,6 +141,56 @@ describe("parseClientMessage", () => {
       const asset = { ...base.asset, [key]: undefined };
       expect(() => send({ ...base, asset })).toThrow(`Missing/invalid asset.${key}`);
     });
+
+    it("accepts a clock asset and carries its clock fields", () => {
+      const asset = {
+        assetId: "c1",
+        type: "clock",
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 40,
+        clockMode: "countdown",
+        clockRunning: true,
+        clockAnchorMs: 123,
+        clockElapsedMs: 0,
+        clockDurationMs: 300000,
+        clockTargetMs: 999,
+        clockTimezone: "UTC",
+        clockFormat: "24h-seconds",
+      };
+      const result = send({ action: "asset:add", roomId: "room1", asset });
+      expect(result).toMatchObject({
+        asset: {
+          type: "clock",
+          clockMode: "countdown",
+          clockRunning: true,
+          clockAnchorMs: 123,
+          clockDurationMs: 300000,
+          clockTargetMs: 999,
+          clockTimezone: "UTC",
+          clockFormat: "24h-seconds",
+        },
+      });
+    });
+
+    it("drops invalid clock enum values (clockMode/clockFormat)", () => {
+      const asset = {
+        assetId: "c1",
+        type: "clock",
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 40,
+        clockMode: "bogus",
+        clockFormat: "13h",
+      };
+      const result = send({ action: "asset:add", roomId: "room1", asset }) as {
+        asset: Record<string, unknown>;
+      };
+      expect(result.asset.clockMode).toBeUndefined();
+      expect(result.asset.clockFormat).toBeUndefined();
+    });
   });
 
   describe("asset:move", () => {
@@ -182,6 +232,12 @@ describe("parseClientMessage", () => {
     it("parses a patch with only the changed fields", () => {
       const msg = { action: "asset:update", roomId: "room1", assetId: "a1", seq: 1, patch: { paused: true } };
       expect(send(msg)).toEqual(msg);
+    });
+
+    it("carries clock fields in a patch (e.g. start/pause/mode changes)", () => {
+      const patch = { clockRunning: false, clockElapsedMs: 4200, clockMode: "countup" };
+      const msg = { action: "asset:update", roomId: "room1", assetId: "a1", seq: 2, patch };
+      expect(send(msg)).toMatchObject({ patch });
     });
 
     it("picks out every recognized patch field and drops unrecognized ones", () => {
