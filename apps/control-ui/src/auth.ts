@@ -16,8 +16,23 @@ export interface SessionInfo {
 // (cross-subdomain, same-site).
 const withCredentials: RequestInit = { credentials: "include" };
 
+// Called whenever the server reports the session is gone (any authed request
+// returning 401, or the periodic session poll finding no session). The app
+// registers a handler that bounces the user to the login screen -- object
+// edits go over the WebSocket, which silently downgrades a lapsed session to
+// an anonymous read-only socket and drops writes with no error, so without
+// this nothing surfaces until the user manually reloads.
+let sessionExpiredHandler: (() => void) | undefined;
+export function onSessionExpired(handler: () => void): void {
+  sessionExpiredHandler = handler;
+}
+function notifySessionExpired(): void {
+  sessionExpiredHandler?.();
+}
+
 async function parseJsonOrThrow(res: Response): Promise<any> {
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) notifySessionExpired();
   if (!res.ok) throw new Error(data.error ?? `Request failed: ${res.status}`);
   return data;
 }
@@ -60,6 +75,11 @@ export async function login(httpApiUrl: string, username: string, password: stri
 // callers use this purely to decide "show the login form or not."
 export async function checkSession(httpApiUrl: string): Promise<SessionInfo | null> {
   const res = await fetch(`${httpApiUrl}/auth/session`, withCredentials);
+  // 401 is a definitive "logged out" -- fire the handler so an active session
+  // that lapsed mid-use kicks to login. Other non-ok statuses (e.g. a
+  // transient 5xx) are treated as "unknown", not logged-out, so a blip doesn't
+  // eject the user. A network error rejects the fetch (handled by callers).
+  if (res.status === 401) notifySessionExpired();
   if (!res.ok) return null;
   return toSessionInfo(await res.json());
 }

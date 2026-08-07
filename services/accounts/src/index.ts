@@ -10,6 +10,7 @@ import {
   createAccount,
   createSession,
   getSessionUsername,
+  touchSession,
   deleteSession,
   putMembership,
   listMemberships,
@@ -196,18 +197,30 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     case "GET /auth/session": {
-      const username = await requireSession(event);
-      if (!username) return json(401, { error: "Invalid or missing session" });
+      const token = readSessionToken(event);
+      const username = token ? await getSessionUsername(token) : undefined;
+      if (!token || !username) return json(401, { error: "Invalid or missing session" });
 
       const account = await getAccount(username);
       if (!account) return json(401, { error: "Account no longer exists" });
 
-      return json(200, {
-        username,
-        personalRoomId: account.personalRoomId,
-        email: account.email,
-        emailVerified: account.emailVerified ?? false,
-      });
+      // Sliding renewal: the app polls this endpoint periodically, so each
+      // check rolls the server-side TTL and the cookie's Max-Age forward. An
+      // active user's 30-day window is thus measured from last activity, and a
+      // long-open tab's cookie is continually refreshed -- keeping it alive
+      // well within any browser lifetime cap shorter than the nominal 30 days.
+      await touchSession(token);
+
+      return json(
+        200,
+        {
+          username,
+          personalRoomId: account.personalRoomId,
+          email: account.email,
+          emailVerified: account.emailVerified ?? false,
+        },
+        [setSessionCookie(token)]
+      );
     }
 
     case "POST /auth/logout": {

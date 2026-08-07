@@ -17,6 +17,7 @@ import {
   register,
   login,
   checkSession,
+  onSessionExpired,
   logout,
   redeemInvite,
   resendVerification,
@@ -91,6 +92,14 @@ if (
 // *collaborator's* drift, not the primary (already near-real-time) sync
 // path for this browser's own edits.
 const SNAPSHOT_POLL_INTERVAL_MS = 5000;
+
+// How often to re-check the session while logged in. Each check slides the
+// session TTL and re-issues the cookie server-side (keeping a long-open tab's
+// cookie alive within any browser lifetime cap), and a 401 back from it is
+// what detects a lapsed session and bounces the user to login -- so this also
+// bounds how long object edits can silently no-op against an anonymous-
+// downgraded WebSocket before the user is told to re-auth.
+const SESSION_POLL_INTERVAL_MS = 2 * 60 * 1000;
 
 // module-level `let`s so teardownCurrentRoom() has one thing to null out
 // and the toolbar/context-menu handlers below (bound once, not per room)
@@ -170,6 +179,30 @@ async function main(): Promise<void> {
   }
 
   loginView!.style.display = "none";
+
+  // Bounce back to the login screen the moment the session is gone. Reloading
+  // re-runs main(), whose checkSession() now 401s and falls through to
+  // promptLogin -- reusing the existing logout-reload path rather than tearing
+  // the logged-in view down by hand. Idempotent: a burst of 401s (e.g. the
+  // poll and an in-flight action together) only navigates once.
+  let reauthing = false;
+  function forceReauth(): void {
+    if (reauthing) return;
+    reauthing = true;
+    teardownCurrentRoom();
+    window.location.href = window.location.pathname;
+  }
+  // Registered only now (post-login) so a 401 during the login flow itself --
+  // e.g. wrong credentials -- doesn't trigger a reauth reload.
+  onSessionExpired(forceReauth);
+  // Periodic session check: drives the server-side sliding renewal above and,
+  // on a 401, invokes forceReauth via onSessionExpired.
+  const sessionPollTimer = setInterval(() => {
+    void checkSession(httpApiUrl).catch(() => {
+      // Network blip -- ignore; a real logout comes back as a 401, not a throw.
+    });
+  }, SESSION_POLL_INTERVAL_MS);
+  window.addEventListener("beforeunload", () => clearInterval(sessionPollTimer));
 
   const settingsModal = new SettingsModal(settingsModalEl!);
 

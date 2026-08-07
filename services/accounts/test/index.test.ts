@@ -7,6 +7,7 @@ vi.mock("../src/store", () => ({
   createAccount: vi.fn(),
   createSession: vi.fn(),
   getSessionUsername: vi.fn(),
+  touchSession: vi.fn(),
   deleteSession: vi.fn(),
   putMembership: vi.fn(),
   listMemberships: vi.fn(),
@@ -309,6 +310,41 @@ describe("POST /auth/login", () => {
 
     const res: any = await handler(event("POST /auth/login", { body: loginBody }), {} as any, undefined as any);
     expect(res.statusCode).toBe(401);
+  });
+});
+
+describe("GET /auth/session", () => {
+  it("returns the session and slides renewal (touchSession + re-issued cookie)", async () => {
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "alice@example.com",
+      emailVerified: true,
+      personalRoomId: "room1",
+      createdAt: "t",
+    });
+
+    const res: any = await handler(authedEvent("GET /auth/session", "alice"), {} as any, undefined as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(jsonBody(res)).toMatchObject({ username: "alice", personalRoomId: "room1", emailVerified: true });
+    // Sliding renewal: the row's TTL is pushed out and the cookie re-issued
+    // (same token) so a long-open tab's cookie keeps getting refreshed.
+    expect(store.touchSession).toHaveBeenCalledWith("faketoken");
+    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=faketoken")]);
+    expect(res.cookies[0]).toContain("Max-Age=");
+  });
+
+  it("401s and does not renew when there is no valid session", async () => {
+    vi.mocked(store.getSessionUsername).mockResolvedValue(undefined);
+    const res: any = await handler(
+      event("GET /auth/session", { cookies: ["scenette_session=stale"] }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(401);
+    expect(store.touchSession).not.toHaveBeenCalled();
   });
 });
 

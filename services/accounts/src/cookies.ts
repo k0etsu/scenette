@@ -7,7 +7,15 @@
 // shared across the control-ui, HTTP API, and WS API via a common
 // registrable-domain cookie. SameSite=Lax is enough because all three are
 // same-site subdomains of the one zone.
-const SESSION_COOKIE = "scenette_session";
+// Env-scoped cookie NAME. The cookie's Domain is .hanzomon.co so it can span
+// each env's control-ui / api / ws subdomains -- but that same Domain means
+// dev (dev.hanzomon.co) and prod (hanzomon.co) share one cookie jar for the
+// registrable domain, so a shared name would make each env's login silently
+// overwrite the other's (whichever wrote last wins; the other env then
+// receives a token its SessionsTable doesn't know → 401 / anonymous WS). A
+// per-env name lets both coexist. Falls back to the bare name locally, where
+// there's only one env and no Domain is set.
+const SESSION_COOKIE = process.env.SESSION_COOKIE_NAME ?? "scenette_session";
 const SESSION_COOKIE_MAX_AGE = 30 * 24 * 60 * 60; // 30 days, matches the session TTL
 const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN; // e.g. ".hanzomon.co"; unset locally
 

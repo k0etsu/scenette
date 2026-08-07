@@ -206,6 +206,13 @@ export class ScenetteStack extends cdk.Stack {
     const apiDomain = envName === "prod" ? `api.${HANZOMON_ZONE_NAME}` : `dev-api.${HANZOMON_ZONE_NAME}`;
     const wsDomain = envName === "prod" ? `ws.${HANZOMON_ZONE_NAME}` : `dev-ws.${HANZOMON_ZONE_NAME}`;
     const cookieDomain = `.${HANZOMON_ZONE_NAME}`;
+    // Per-env cookie NAME. cookieDomain is the shared registrable domain, so
+    // dev (dev.hanzomon.co) and prod (hanzomon.co) live in one cookie jar --
+    // a shared name would make each env's login clobber the other's token
+    // (the overwritten env then 401s / drops to an anonymous WS). Scoping the
+    // name by env lets both sessions coexist. Read by every function that
+    // touches the cookie: accounts, upload-url, and the WS $connect handler.
+    const sessionCookieName = `scenette_session_${envName}`;
 
     const hostedZone = route53.HostedZone.fromHostedZoneAttributes(this, "HostedZone", {
       hostedZoneId: HANZOMON_ZONE_ID,
@@ -256,6 +263,7 @@ export class ScenetteStack extends cdk.Stack {
         CONNECTIONS_TABLE: connectionsTable.tableName,
         SESSIONS_TABLE: sessionsTable.tableName,
         MEMBERSHIPS_TABLE: membershipsTable.tableName,
+        SESSION_COOKIE_NAME: sessionCookieName,
       },
     });
     // Read+write: still writes its own connection row, but also needs read
@@ -397,6 +405,7 @@ export class ScenetteStack extends cdk.Stack {
         SESSIONS_TABLE: sessionsTable.tableName,
         MEMBERSHIPS_TABLE: membershipsTable.tableName,
         ROOM_STORAGE_QUOTA_BYTES: String(ROOM_STORAGE_QUOTA_BYTES),
+        SESSION_COOKIE_NAME: sessionCookieName,
       },
     });
     // Write-only on the bucket — this Lambda only ever needs to mint
@@ -439,6 +448,7 @@ export class ScenetteStack extends cdk.Stack {
         // Scopes the session cookie to the whole zone so control-ui and both
         // APIs (all same-site subdomains) share it.
         COOKIE_DOMAIN: cookieDomain,
+        SESSION_COOKIE_NAME: sessionCookieName,
         // control-ui origin -- the emailed verify page redirects here on success.
         APP_URL: `https://${controlUiDomain}`,
       },

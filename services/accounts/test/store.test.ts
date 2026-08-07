@@ -8,6 +8,7 @@ import {
   createAccount,
   createSession,
   getSessionUsername,
+  touchSession,
   deleteSession,
   deleteAllSessionsForUser,
   updateAccountPassword,
@@ -154,6 +155,33 @@ describe("sessions", () => {
   it("deleteSession does not throw", async () => {
     ddbMock.on(DeleteCommand).resolves({});
     await expect(deleteSession("some-token")).resolves.toBeUndefined();
+  });
+
+  it("touchSession pushes the ttl out (conditional on the row existing)", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const before = Math.floor(Date.now() / 1000);
+
+    await touchSession("tok");
+
+    const call = ddbMock.commandCalls(UpdateCommand)[0];
+    expect(call.args[0].input).toMatchObject({
+      Key: { sessionToken: "tok" },
+      ConditionExpression: "attribute_exists(sessionToken)",
+      UpdateExpression: "SET #ttl = :ttl",
+    });
+    const newTtl = (call.args[0].input as any).ExpressionAttributeValues[":ttl"];
+    // 30-day window from now.
+    expect(newTtl).toBeGreaterThanOrEqual(before + 30 * 24 * 60 * 60);
+  });
+
+  it("touchSession swallows a missing-row conditional failure (no resurrect)", async () => {
+    ddbMock.on(UpdateCommand).rejects(conditionalCheckFailed);
+    await expect(touchSession("gone")).resolves.toBeUndefined();
+  });
+
+  it("touchSession rethrows unexpected errors", async () => {
+    ddbMock.on(UpdateCommand).rejects(new Error("boom"));
+    await expect(touchSession("tok")).rejects.toThrow("boom");
   });
 
   it("deleteAllSessionsForUser scans (filtered by username) and deletes every matching row", async () => {

@@ -114,6 +114,30 @@ export async function getSessionUsername(sessionToken: string): Promise<string |
   return Item?.username;
 }
 
+// Sliding-session renewal: push the row's TTL back out to the full window on
+// activity, so a session's lifetime is measured from last use rather than from
+// login. The caller (GET /auth/session) re-issues the cookie alongside this,
+// which also resets any browser-side cookie-lifetime cap shorter than our
+// 30-day Max-Age. Conditional on the row still existing so a just-expired or
+// deleted session is never resurrected -- a missing row is a no-op, not an error.
+export async function touchSession(sessionToken: string): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: SESSIONS_TABLE,
+        Key: { sessionToken },
+        UpdateExpression: "SET #ttl = :ttl",
+        ConditionExpression: "attribute_exists(sessionToken)",
+        ExpressionAttributeNames: { "#ttl": "ttl" },
+        ExpressionAttributeValues: { ":ttl": now + SESSION_TTL_SECONDS },
+      })
+    );
+  } catch (err) {
+    if ((err as { name?: string }).name !== "ConditionalCheckFailedException") throw err;
+  }
+}
+
 export async function deleteSession(sessionToken: string): Promise<void> {
   await ddb.send(new DeleteCommand({ TableName: SESSIONS_TABLE, Key: { sessionToken } }));
 }
