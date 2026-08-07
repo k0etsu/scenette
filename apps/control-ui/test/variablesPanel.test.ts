@@ -26,14 +26,15 @@ beforeEach(() => {
 });
 
 describe("list rendering", () => {
-  it("renders a row per variable, sorted by createdAt", () => {
+  it("renders a row per variable in insertion order (not sorted)", () => {
     const panel = new VariablesPanel(root, makeCallbacks());
     panel.setVariables([
       variable("second", "2", "number", "2026-01-02T00:00:00.000Z"),
       variable("first", "1", "number", "2026-01-01T00:00:00.000Z"),
     ]);
-    const names = [...root.querySelectorAll(".variable-name")].map((n) => n.textContent);
-    expect(names).toEqual(["first", "second"]);
+    const names = () => [...root.querySelectorAll(".variable-name")].map((n) => n.textContent);
+    // Deliberately NOT reordered by name/createdAt -- keeps the given order.
+    expect(names()).toEqual(["second", "first"]);
   });
 
   it("shows a -/+ stepper for number variables and a plain value for text (no inline form)", () => {
@@ -74,6 +75,43 @@ describe("list rendering", () => {
     panel.setVariables([variable("kills", "4")]);
     panel.removeVariable("kills");
     expect(root.querySelector(".variable-row")).toBeFalsy();
+  });
+});
+
+describe("stable ordering (linked-list behavior)", () => {
+  const names = () => [...document.querySelectorAll(".variable-name")].map((n) => n.textContent);
+
+  it("upsert keeps an existing key in place; a new key appends at the bottom", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    panel.setVariables([variable("a", "1"), variable("b", "2"), variable("c", "3")]);
+    panel.upsertVariable(variable("b", "99")); // edit in the middle
+    expect(names()).toEqual(["a", "b", "c"]);
+    panel.upsertVariable(variable("d", "0")); // new
+    expect(names()).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("removing a middle row leaves a gap; the next new variable appends at the bottom", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    panel.setVariables([variable("a", "1"), variable("b", "2"), variable("c", "3")]);
+    panel.removeVariable("b");
+    expect(names()).toEqual(["a", "c"]);
+    panel.upsertVariable(variable("new", "0"));
+    expect(names()).toEqual(["a", "c", "new"]);
+  });
+
+  it("renameKey swaps the key in place, not moving the row to the bottom", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    panel.setVariables([variable("a", "1"), variable("b", "2"), variable("c", "3")]);
+    panel.renameKey("b", "beta", variable("beta", "2"));
+    expect(names()).toEqual(["a", "beta", "c"]);
+  });
+
+  it("a snapshot reconcile preserves existing order and appends new keys", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    panel.setVariables([variable("a", "1"), variable("b", "2")]);
+    // Server sends the same set in a different order, plus a new key.
+    panel.setVariables([variable("b", "2"), variable("z", "9"), variable("a", "1")]);
+    expect(names()).toEqual(["a", "b", "z"]);
   });
 });
 

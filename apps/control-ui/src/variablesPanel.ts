@@ -39,12 +39,29 @@ export class VariablesPanel {
     });
   }
 
+  // Rows keep a stable insertion order (not sorted by name/createdAt), so
+  // renaming or editing a variable never makes it jump position and a deleted
+  // middle row leaves a gap that new variables append past -- see renderList,
+  // which iterates this Map in insertion order. Reconciled against each
+  // snapshot so existing keys keep their slot and only genuinely-new keys are
+  // appended (server map order is not guaranteed stable across snapshots).
   setVariables(variables: Variable[]): void {
-    this.variables = new Map(variables.map((v) => [v.key, v]));
+    const incoming = new Map(variables.map((v) => [v.key, v]));
+    const next = new Map<string, Variable>();
+    for (const key of this.variables.keys()) {
+      const v = incoming.get(key);
+      if (v) next.set(key, v); // keep known keys in their current position
+    }
+    for (const v of variables) {
+      if (!next.has(v.key)) next.set(v.key, v); // append new keys at the bottom
+    }
+    this.variables = next;
     if (this.selectedKey && !this.variables.has(this.selectedKey)) this.selectedKey = undefined;
     this.renderList();
   }
 
+  // Map.set keeps an existing key's position (updating its value in place) and
+  // appends a genuinely new key -- exactly the wanted linked-list behavior.
   upsertVariable(variable: Variable): void {
     this.variables.set(variable.key, variable);
     this.renderList();
@@ -53,6 +70,23 @@ export class VariablesPanel {
   removeVariable(key: string): void {
     this.variables.delete(key);
     if (this.selectedKey === key) this.selectedKey = undefined;
+    this.renderList();
+  }
+
+  // Rename in place: swap the key at its current position rather than
+  // delete-then-append (which would move the row to the bottom).
+  renameKey(oldKey: string, newKey: string, variable: Variable): void {
+    if (!this.variables.has(oldKey)) {
+      this.variables.set(newKey, variable);
+    } else {
+      const next = new Map<string, Variable>();
+      for (const [key, v] of this.variables) {
+        if (key === oldKey) next.set(newKey, variable);
+        else next.set(key, v);
+      }
+      this.variables = next;
+    }
+    if (this.selectedKey === oldKey) this.selectedKey = newKey;
     this.renderList();
   }
 
@@ -80,8 +114,9 @@ export class VariablesPanel {
 
   private renderList(): void {
     this.list.innerHTML = "";
-    const sorted = [...this.variables.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    for (const variable of sorted) {
+    // Insertion order (the Map's natural iteration order) -- deliberately not
+    // sorted, so positions stay stable across renames/edits/deletes.
+    for (const variable of this.variables.values()) {
       const row = document.createElement("div");
       row.className = "variable-row" + (variable.key === this.selectedKey ? " selected" : "");
 

@@ -738,8 +738,9 @@ function enterRoom(
       const renamed = { ...existing, key: newKey };
       room.connection.send({ action: "variable:set", roomId, key: newKey, type: existing.type, value: existing.value });
       room.connection.send({ action: "variable:delete", roomId, key: oldKey });
-      variablesPanel.removeVariable(oldKey);
-      variablesPanel.upsertVariable(renamed);
+      // Rename in place so the row keeps its position (delete+append would move
+      // it to the bottom). The old key's later variable:deleted echo is a no-op.
+      variablesPanel.renameKey(oldKey, newKey, renamed);
       variablesPanel.setSelectedKey(newKey);
       sidebar.selectVariable(renamed);
     },
