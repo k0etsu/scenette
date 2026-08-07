@@ -1,7 +1,10 @@
 # browser-source
 
-The page OBS loads as a browser source. Renders the current viewport state (whatever assets intersect the fixed viewport rectangle) independently of whether anyone is connected to the control UI — see the plan's "browser source resilience" section.
+The read-only page OBS loads as a browser source. It renders the current viewport state (whatever assets intersect the fixed viewport rectangle) independently of whether anyone is connected to the control UI.
 
-On load: fetches the current room-state snapshot, then opens its own WebSocket connection for live updates. Runs a background reconnect routine to survive API Gateway's 2-hour WebSocket connection limit without any visible flicker.
+The URL carries an opaque `?obs=<key>` rather than the roomId itself — so a mod who knows the roomId can't reconstruct another room's source, and the owner can rotate the key to revoke a previously-shared URL. On load it reads `/config.json` for this env's endpoints (query params override for local testing), exchanges the `obs` key for the real roomId via the accounts service, fetches the current room-state snapshot, then opens its own **anonymous, read-only** WebSocket connection for live updates.
 
-Not yet scaffolded — infra and CI/CD are being stood up first.
+It uses the shared `@scenette/ws-client`, whose background reconnect routine survives API Gateway's 2-hour WebSocket connection limit and idle drops without visible flicker.
+
+- `src/main.ts` — config/key resolution, the WebSocket connection, and applying incoming room updates.
+- `src/render.ts` — draws the viewport and its assets.

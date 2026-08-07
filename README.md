@@ -8,36 +8,51 @@ Built as an open-source, AWS-hosted alternative to overlay tools that are moving
 
 ## Status
 
-Early scaffold — infrastructure and CI/CD are being stood up before feature code. See `docs/` for architecture and setup notes.
+Live — both environments are deployed via CDK and CI/CD:
+
+- **dev** — https://dev.hanzomon.co (API `dev-api`, WS `dev-ws`, browser source `dev-obs`)
+- **prod** — https://hanzomon.co (API `api`, WS `ws`, browser source `obs`)
+
+Working today: username/password accounts with `HttpOnly` cookie sessions, real-time collaborative canvas (drag/zoom/pan, images/gifs/videos/audio), text and template-variable assets, a Twitch/YouTube stream-embed preview, invite-based mod access, owner-rotatable browser-source URLs, per-room storage quotas, and an admin announcement banner.
+
+> **Prod caveat:** SES production access has not been granted for this AWS account, so the accounts service can only send verification email to SES-verified addresses. Because verifying an email is what creates a user's personal room, **room creation is effectively unavailable on prod** until sandbox access is lifted — the dashboard shows an announcement to that effect. Everything else (mod access to existing rooms, the canvas, the browser source) works. See "Deploying".
 
 ## Repo layout
 
 ```
-infra/                  CDK app (TypeScript) — defines all AWS resources, parameterized per environment (dev/prod)
+infra/                   CDK app (TypeScript) — all AWS resources, parameterized per env (dev/prod)
+packages/
+  protocol/              Shared client/server message types + validation (geometry, assets, text style, variables)
+  ws-client/             Reconnecting WebSocket client (survives API Gateway's 2h/idle limits), used by both apps
 services/
-  websocket-handlers/    Lambda handlers for the API Gateway WebSocket API ($connect / $disconnect / message routes)
-  accounts/              Username/password auth (HTTP API) — registration, login, room membership grants, and email verification via SES (verifying an email is what creates a user's own room; mods on someone else's room don't need to)
+  websocket-handlers/    Lambda handlers for the WebSocket API ($connect / $disconnect / message) — the live sync path
+  accounts/              Username/password auth over the HTTP API: register/login (HttpOnly session cookie), room
+                         membership + invites, and SES email verification (verifying an email creates that user's own
+                         room; mods on someone else's room don't need to)
+  upload-url/            Mints scoped, presigned S3 PUT URLs for media upload; enforces the per-room storage quota
   retention-job/         Scheduled Lambda that garbage-collects unused media assets
 apps/
-  control-ui/            Streamer/mod-facing canvas editor
-  browser-source/        The page OBS loads as a browser source; renders live viewport state independently of the control UI
-.github/workflows/       CI (build/lint/synth on every push) + separate dev/prod deploy workflows via GitHub OIDC
+  control-ui/            Streamer/mod-facing canvas editor (plain TS + esbuild)
+  browser-source/        The read-only page OBS loads; renders live viewport state independently of the control UI
+.github/workflows/       CI (build/test/cdk synth on PRs) + separate dev/prod deploy workflows via GitHub OIDC
 ```
 
 ## Environments
 
-Single AWS account for now, split by CDK stack name: `Scenette-dev` and `Scenette-prod`, each with independent DynamoDB tables, S3 buckets, and API Gateway stages. Non-`main` pushes/PRs deploy `Scenette-dev`; merges to `main` deploy `Scenette-prod`. A future move to fully separate AWS accounts only requires re-pointing the OIDC role ARNs used by the deploy workflows — no stack rework.
+One AWS account, split by CDK stack name — `Scenette-dev` and `Scenette-prod` — each with independent DynamoDB tables, S3 buckets, a DKIM'd SES sender identity, custom domains, and API Gateway stages. **Pushes to `dev` deploy `Scenette-dev`; merges to `main` deploy `Scenette-prod`.** Feature branches do **not** auto-deploy — deploy one on demand via the Actions "Run workflow" button (`workflow_dispatch`), so an unfinished branch can't overwrite the shared dev environment. Moving to fully separate AWS accounts later only requires re-pointing the OIDC role ARNs — no stack rework.
+
+Each front end fetches `/config.json` (written next to the static build at deploy time) for this env's WebSocket/HTTP endpoints, so there's no build-time or query-param configuration in normal use. Sessions use an `HttpOnly; Secure; SameSite=Lax` cookie scoped to `.hanzomon.co`, named **per environment** (`scenette_session_dev` / `scenette_session_prod`) so dev and prod can share the domain without clobbering each other's login.
 
 ## Deploying
 
-Deploys run exclusively through GitHub Actions via OIDC-federated IAM roles — there are no long-lived AWS credentials anywhere in this repo or in GitHub secrets. See `.github/workflows/deploy-dev.yml` and `.github/workflows/deploy-prod.yml`.
+Deploys run exclusively through GitHub Actions via OIDC-federated IAM roles — there are no long-lived AWS credentials in this repo or in GitHub secrets. See `.github/workflows/deploy-dev.yml`, `deploy-prod.yml`, and the shared `deploy.yml` they both call (npm ci → build → test → `cdk deploy`).
 
-Required one-time AWS setup (not automated, done directly in the console/CLI once):
-1. Create the `scenette-dev-deploy` and `scenette-prod-deploy` IAM roles with an OIDC trust policy scoped to this repo (prod role additionally scoped to `ref:refs/heads/main` only).
-2. Store their role ARNs as GitHub Actions **variables** (not secrets — they're not sensitive) `AWS_DEPLOY_ROLE_ARN_DEV` / `AWS_DEPLOY_ROLE_ARN_PROD`.
-3. Request SES production access (AWS Support Center → Create case → Service limit increase → SES sending limits) for the account/region this deploys to. New SES accounts start in sandbox mode, which can only send to verified recipient addresses — real users can't receive their verification email until this is granted. This is an account+region-level setting, independent of any stack deploy. (The DKIM'd sender *identity* each env sends from — `hanzomon.co` for prod, `dev.hanzomon.co` for dev — is provisioned automatically by that env's own CDK stack; this step only lifts the account-wide sandbox restriction.)
+Required one-time AWS setup (done once by hand — see `docs/aws-setup.md`):
+1. Create the `scenette-dev-deploy` / `scenette-prod-deploy` IAM roles with an OIDC trust policy scoped to this repo. The prod role's trust is additionally scoped to the `environment:prod` subject claim, and the "prod" GitHub Environment has a deployment-branch policy restricting it to `main` — so no branch other than `main` can obtain a prod deploy token.
+2. Store the role ARNs as GitHub Actions **variables** (not secrets — they're not sensitive) `AWS_DEPLOY_ROLE_ARN_DEV` / `AWS_DEPLOY_ROLE_ARN_PROD`, plus `AWS_REGION`.
+3. **Request SES production access** (AWS Support Center → Create case → SES sending limits) for the account/region this deploys to. New SES accounts start in sandbox mode and can only send to verified recipient addresses, so real users can't receive their verification email — which is why prod room creation is currently gated (see Status). This is an account+region-level setting, independent of any stack deploy. (Each env's DKIM'd sender identity — `hanzomon.co` for prod, `dev.hanzomon.co` for dev — is provisioned automatically by that env's own CDK stack; this step only lifts the account-wide sandbox restriction.)
 
-See `.env.example` for the runtime configuration each Lambda expects.
+`docs/deploy-cookie-auth.md` covers the rollout specifics for the cookie-auth + email-verification changes. See `.env.example` for the configuration each Lambda expects when a handler is invoked locally against real AWS resources (deployed Lambdas get these wired directly by CDK).
 
 ## License
 
