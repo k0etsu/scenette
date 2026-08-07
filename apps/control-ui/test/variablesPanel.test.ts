@@ -12,6 +12,7 @@ function makeCallbacks(overrides: Partial<VariablesCallbacks> = {}): VariablesCa
     onSelect: vi.fn(),
     onAdd: vi.fn(),
     onDelete: vi.fn(),
+    onSet: vi.fn(),
     ...overrides,
   };
 }
@@ -35,15 +36,30 @@ describe("list rendering", () => {
     expect(names).toEqual(["first", "second"]);
   });
 
-  it("shows the current value for number and text variables (no inline stepper/form)", () => {
+  it("shows a -/+ stepper for number variables and a plain value for text (no inline form)", () => {
     const panel = new VariablesPanel(root, makeCallbacks());
     panel.setVariables([variable("kills", "4", "number"), variable("greeting", "hi", "text", "2026-01-02T00:00:00.000Z")]);
-    // Editing now lives in the properties card -- the list is display-only.
-    expect(root.querySelector(".variable-stepper")).toBeFalsy();
+    // Full editing lives in the properties card, but quick -/+ stays in the list.
+    expect(root.querySelectorAll(".variable-stepper")).toHaveLength(1);
     expect(root.querySelector(".variables-form")).toBeFalsy();
     const values = [...root.querySelectorAll(".variable-value")].map((v) => v.textContent);
     expect(values).toEqual(["4", "hi"]);
     expect(root.querySelector(".variable-value-text")?.textContent).toBe("hi");
+  });
+
+  it("the list -/+ buttons adjust a number variable and do not also select the row", () => {
+    const onSet = vi.fn();
+    const onSelect = vi.fn();
+    const panel = new VariablesPanel(root, makeCallbacks({ onSet, onSelect }));
+    panel.setVariables([variable("kills", "4", "number")]);
+    const [minus, plus] = [...root.querySelectorAll(".variable-stepper .sidebar-icon-button")] as HTMLElement[];
+    plus.click();
+    expect(onSet).toHaveBeenLastCalledWith("kills", "number", "5");
+    minus.click();
+    minus.click();
+    // Optimistic accumulation: 5 -> 4 -> 3 across rapid clicks.
+    expect(onSet).toHaveBeenLastCalledWith("kills", "number", "3");
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it("upsertVariable adds/updates a row without a full setVariables call", () => {

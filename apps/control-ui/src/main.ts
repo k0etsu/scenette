@@ -780,6 +780,7 @@ function enterRoom(
       sidebar.selectVariable(created);
     },
     onDelete: (key) => room.connection.send({ action: "variable:delete", roomId, key }),
+    onSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
   });
 
   const connection = new ResilientConnection({

@@ -1,13 +1,15 @@
-import { Variable } from "@scenette/protocol";
-import { ICON_EXPAND, ICON_PLUS, ICON_TRASH } from "./icons";
+import { Variable, VariableType } from "@scenette/protocol";
+import { ICON_EXPAND, ICON_MINUS, ICON_PLUS, ICON_TRASH } from "./icons";
 
 export interface VariablesCallbacks {
   // Clicking a variable selects it and focuses it in the properties card
-  // (the bottom half of the sidebar) -- editing happens there, not inline.
+  // (the bottom half of the sidebar) -- full editing happens there.
   onSelect: (variable: Variable) => void;
-  // The "+" header button -- opens a blank variable form in the properties card.
+  // The "+" header button instantly creates a new default variable.
   onAdd: () => void;
   onDelete: (key: string) => void;
+  // Quick in-list -/+ adjust for number variables (upsert of the new value).
+  onSet: (key: string, type: VariableType, value: string) => void;
 }
 
 // The variables LIST (upper sidebar). Just names + current values, selectable;
@@ -98,12 +100,57 @@ export class VariablesPanel {
       name.className = "variable-name";
       name.textContent = variable.key;
 
-      const value = document.createElement("span");
-      value.className = "variable-value" + (variable.type === "text" ? " variable-value-text" : "");
-      value.textContent = variable.value;
-
-      row.append(deleteButton, name, value);
+      row.append(deleteButton, name);
       row.addEventListener("click", () => this.callbacks.onSelect(variable));
+
+      if (variable.type === "number") {
+        // Quick -/+ adjust without opening the card. Optimistically advance the
+        // stored value so rapid clicks accumulate (rather than all computing off
+        // the same pre-round-trip value), and stop propagation so the click
+        // doesn't also select/focus the row.
+        const stepper = document.createElement("div");
+        stepper.className = "variable-stepper";
+
+        const value = document.createElement("span");
+        value.className = "variable-value";
+        value.textContent = variable.value;
+
+        const adjust = (delta: number) => {
+          const current = this.variables.get(variable.key);
+          if (!current) return;
+          const next = String((Number(current.value) || 0) + delta);
+          this.variables.set(variable.key, { ...current, value: next });
+          value.textContent = next;
+          this.callbacks.onSet(variable.key, "number", next);
+        };
+
+        const minus = document.createElement("button");
+        minus.type = "button";
+        minus.className = "sidebar-icon-button";
+        minus.innerHTML = ICON_MINUS;
+        minus.addEventListener("click", (e) => {
+          e.stopPropagation();
+          adjust(-1);
+        });
+
+        const plus = document.createElement("button");
+        plus.type = "button";
+        plus.className = "sidebar-icon-button";
+        plus.innerHTML = ICON_PLUS;
+        plus.addEventListener("click", (e) => {
+          e.stopPropagation();
+          adjust(1);
+        });
+
+        stepper.append(minus, value, plus);
+        row.appendChild(stepper);
+      } else {
+        const value = document.createElement("span");
+        value.className = "variable-value variable-value-text";
+        value.textContent = variable.value;
+        row.appendChild(value);
+      }
+
       this.list.appendChild(row);
     }
   }
