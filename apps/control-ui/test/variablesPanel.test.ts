@@ -48,19 +48,57 @@ describe("list rendering", () => {
     expect(root.querySelector(".variable-value-text")?.textContent).toBe("hi");
   });
 
-  it("the list -/+ buttons adjust a number variable and do not also select the row", () => {
-    const onSet = vi.fn();
-    const onSelect = vi.fn();
-    const panel = new VariablesPanel(root, makeCallbacks({ onSet, onSelect }));
-    panel.setVariables([variable("kills", "4", "number")]);
-    const [minus, plus] = [...root.querySelectorAll(".variable-stepper .sidebar-icon-button")] as HTMLElement[];
-    plus.click();
-    expect(onSet).toHaveBeenLastCalledWith("kills", "number", "5");
-    minus.click();
-    minus.click();
-    // Optimistic accumulation: 5 -> 4 -> 3 across rapid clicks.
-    expect(onSet).toHaveBeenLastCalledWith("kills", "number", "3");
-    expect(onSelect).not.toHaveBeenCalled();
+  it("the list -/+ buttons update instantly, debounce the send, and don't select the row", () => {
+    vi.useFakeTimers();
+    try {
+      const onSet = vi.fn();
+      const onSelect = vi.fn();
+      const panel = new VariablesPanel(root, makeCallbacks({ onSet, onSelect }));
+      panel.setVariables([variable("kills", "4", "number")]);
+      const [minus, plus] = [...root.querySelectorAll(".variable-stepper .sidebar-icon-button")] as HTMLElement[];
+      const valueEl = () => (root.querySelector(".variable-value") as HTMLElement).textContent;
+
+      // Each click moves the on-screen number immediately (optimistic).
+      plus.click();
+      plus.click();
+      plus.click();
+      expect(valueEl()).toBe("7");
+      minus.click();
+      expect(valueEl()).toBe("6");
+      // ...but the network send is coalesced, not one-per-click.
+      expect(onSet).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(200);
+      expect(onSet).toHaveBeenCalledTimes(1);
+      expect(onSet).toHaveBeenCalledWith("kills", "number", "6");
+      expect(onSelect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a stale echo mid-burst does not snap the stepped number back", () => {
+    vi.useFakeTimers();
+    try {
+      const panel = new VariablesPanel(root, makeCallbacks());
+      panel.setVariables([variable("kills", "4", "number")]);
+      const plus = root.querySelectorAll(".variable-stepper .sidebar-icon-button")[1] as HTMLElement;
+      const valueEl = () => (root.querySelector(".variable-value") as HTMLElement).textContent;
+
+      plus.click();
+      plus.click();
+      plus.click(); // optimistic -> 7
+      expect(valueEl()).toBe("7");
+
+      // A late echo for a superseded value (5) must be ignored for display.
+      panel.upsertVariable(variable("kills", "5", "number"));
+      expect(valueEl()).toBe("7");
+      // The echo that confirms our latest optimistic value (7) is accepted.
+      panel.upsertVariable(variable("kills", "7", "number"));
+      expect(valueEl()).toBe("7");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("upsertVariable adds/updates a row without a full setVariables call", () => {
