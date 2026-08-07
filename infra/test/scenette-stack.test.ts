@@ -102,6 +102,26 @@ describe("cookie-based auth", () => {
     ) as any;
     expect(accountsFn.Properties.Environment.Variables.COOKIE_DOMAIN).toBe(".hanzomon.co");
   });
+
+  // Both envs share the .hanzomon.co cookie jar, so the cookie NAME must differ
+  // per env or each login clobbers the other's token. Assert dev and prod get
+  // distinct names, and that every function reading the cookie carries it.
+  it("gives each env a distinct SESSION_COOKIE_NAME across all cookie-reading functions", () => {
+    const cookieVarFor = (tpl: typeof devTemplate) => {
+      const fns = Object.values(tpl.findResources("AWS::Lambda::Function"));
+      const names = fns
+        .map((fn: any) => fn.Properties?.Environment?.Variables?.SESSION_COOKIE_NAME)
+        .filter((v): v is string => typeof v === "string");
+      return names;
+    };
+    const devNames = cookieVarFor(devTemplate);
+    const prodNames = cookieVarFor(prodTemplate);
+
+    // accounts, upload-url, and the WS $connect handler all read the cookie.
+    expect(devNames.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(devNames)).toEqual(new Set(["scenette_session_dev"]));
+    expect(new Set(prodNames)).toEqual(new Set(["scenette_session_prod"]));
+  });
 });
 
 describe("email verification (SES)", () => {

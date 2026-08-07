@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { readSessionToken, setSessionCookie, clearSessionCookie } from "../src/cookies";
 
 describe("readSessionToken", () => {
@@ -31,5 +31,24 @@ describe("setSessionCookie / clearSessionCookie", () => {
 
   it("clears with Max-Age=0", () => {
     expect(clearSessionCookie()).toContain("Max-Age=0");
+  });
+});
+
+describe("env-scoped cookie name (dev/prod collision fix)", () => {
+  afterEach(() => {
+    vi.resetModules();
+    delete process.env.SESSION_COOKIE_NAME;
+  });
+
+  it("uses SESSION_COOKIE_NAME when set, so dev and prod cookies don't collide", async () => {
+    vi.resetModules();
+    process.env.SESSION_COOKIE_NAME = "scenette_session_dev";
+    const cookies = await import("../src/cookies");
+
+    expect(cookies.setSessionCookie("tok")).toContain("scenette_session_dev=tok");
+    // Reads its own env's name...
+    expect(cookies.readSessionToken({ cookies: ["scenette_session_dev=mine"] })).toBe("mine");
+    // ...and ignores the other env's cookie sharing the same .hanzomon.co jar.
+    expect(cookies.readSessionToken({ cookies: ["scenette_session_prod=theirs"] })).toBeUndefined();
   });
 });
