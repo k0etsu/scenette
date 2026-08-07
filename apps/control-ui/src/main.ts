@@ -725,6 +725,24 @@ function enterRoom(
     },
     onVariableSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
     onVariableDelete: (key) => room.connection.send({ action: "variable:delete", roomId, key }),
+    // Rename = create-under-the-new-key + delete-the-old (the key is identity).
+    // Skipped if the new key already exists; the card is re-selected on the new
+    // key either way so the user stays on the variable they were editing.
+    onVariableRename: (oldKey, newKey) => {
+      const existing = variablesPanel.get(oldKey);
+      if (!existing) return;
+      if (variablesPanel.get(newKey)) {
+        sidebar.selectVariable(existing); // collision -- revert to the old key
+        return;
+      }
+      const renamed = { ...existing, key: newKey };
+      room.connection.send({ action: "variable:set", roomId, key: newKey, type: existing.type, value: existing.value });
+      room.connection.send({ action: "variable:delete", roomId, key: oldKey });
+      variablesPanel.removeVariable(oldKey);
+      variablesPanel.upsertVariable(renamed);
+      variablesPanel.setSelectedKey(newKey);
+      sidebar.selectVariable(renamed);
+    },
   });
   room.sidebar = sidebar;
 
@@ -750,10 +768,16 @@ function enterRoom(
       sidebar.selectVariable(variable);
       variablesPanel.setSelectedKey(variable.key);
     },
+    // Instant-create a default variable (no form/confirm), then select it in
+    // the card for immediate editing/renaming.
     onAdd: () => {
+      const key = variablesPanel.nextNewVariableKey();
+      const created = { key, type: "number" as const, value: "0", createdAt: new Date().toISOString() };
+      room.connection.send({ action: "variable:set", roomId, key, type: "number", value: "0" });
+      variablesPanel.upsertVariable(created); // optimistic; server echo confirms
+      variablesPanel.setSelectedKey(key);
       canvas.selectAsset(undefined);
-      sidebar.startNewVariable();
-      variablesPanel.setSelectedKey(undefined);
+      sidebar.selectVariable(created);
     },
     onDelete: (key) => room.connection.send({ action: "variable:delete", roomId, key }),
   });

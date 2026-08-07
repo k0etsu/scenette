@@ -47,6 +47,9 @@ export interface SidebarCallbacks {
   // card below), so the sidebar sends variable upserts/deletes too.
   onVariableSet: (key: string, type: VariableType, value: string) => void;
   onVariableDelete: (key: string) => void;
+  // Rename is delete-old + create-new (the key is a variable's identity);
+  // main orchestrates it (collision check + re-selecting the new key).
+  onVariableRename: (oldKey: string, newKey: string) => void;
 }
 
 const TYPE_ICON: Record<AssetType, string> = {
@@ -65,11 +68,10 @@ const TYPE_ICON: Record<AssetType, string> = {
 export class Sidebar {
   private assets = new Map<string, Asset>();
   private selectedAssetId?: string;
-  // The properties card shows EITHER a selected asset, a selected variable, or
-  // the "new variable" form -- these three are mutually exclusive. Selecting
-  // any one clears the others (see setSelected / selectVariable / newVariable).
+  // The properties card shows EITHER a selected asset or a selected variable --
+  // mutually exclusive. Selecting one clears the other (see setSelected /
+  // selectVariable).
   private selectedVariable?: Variable;
-  private newVariableMode = false;
   // Advertised by the server in room:snapshot; undefined until the first
   // snapshot lands (or against an older server that doesn't send it), in
   // which case the label shows plain usage without a denominator.
@@ -194,25 +196,15 @@ export class Sidebar {
     this.selectedAssetId = assetId;
     // Selecting an asset takes over the card from any variable selection.
     this.selectedVariable = undefined;
-    this.newVariableMode = false;
     this.renderObjectsList();
     this.renderProperties();
   }
 
   // Show a variable's properties in the card (from a click in the variables
-  // list). Clears any asset selection so the two never both show.
+  // list, or right after an instant create). Clears any asset selection so the
+  // two never both show.
   selectVariable(variable: Variable): void {
     this.selectedVariable = variable;
-    this.newVariableMode = false;
-    this.selectedAssetId = undefined;
-    this.renderObjectsList();
-    this.renderProperties();
-  }
-
-  // Show a blank "new variable" form in the card (the variables list "+").
-  startNewVariable(): void {
-    this.newVariableMode = true;
-    this.selectedVariable = undefined;
     this.selectedAssetId = undefined;
     this.renderObjectsList();
     this.renderProperties();
@@ -322,10 +314,6 @@ export class Sidebar {
   }
 
   private renderProperties(): void {
-    if (this.newVariableMode) {
-      this.renderNewVariableCard();
-      return;
-    }
     if (this.selectedVariable) {
       this.renderVariableCard(this.selectedVariable);
       return;
@@ -595,7 +583,7 @@ export class Sidebar {
     const isNumber = variable.type === "number";
     this.propertiesPanel.innerHTML = `
       <div class="sidebar-header">
-        <span class="prop-name-input" title="Variable key (immutable)">${escapeHtml(key)}</span>
+        <input type="text" data-role="var-key" class="prop-name-input" title="Variable key -- rename here" value="${escapeHtml(key)}" />
         <span class="prop-name-suffix">- variable</span>
       </div>
       <div class="properties-buttons">
@@ -646,6 +634,23 @@ export class Sidebar {
 
     q<HTMLButtonElement>("var-delete").addEventListener("click", () => this.callbacks.onVariableDelete(key));
 
+    // Rename on commit (blur/Enter). A variable's key is its identity, so main
+    // does this as delete-old + create-new and re-selects the new key; an
+    // empty or unchanged key just reverts the input.
+    const keyInput = q<HTMLInputElement>("var-key");
+    const commitRename = () => {
+      const newKey = keyInput.value.trim();
+      if (!newKey || newKey === key) {
+        keyInput.value = key;
+        return;
+      }
+      this.callbacks.onVariableRename(key, newKey);
+    };
+    keyInput.addEventListener("change", commitRename);
+    keyInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") keyInput.blur();
+    });
+
     if (isNumber) {
       valueInput.addEventListener("change", () => set(valueInput.value));
       q<HTMLButtonElement>("var-minus").addEventListener("click", () => set(String(currentNumber() - 1)));
@@ -658,57 +663,6 @@ export class Sidebar {
         if (e.key === "Enter") commit();
       });
     }
-  }
-
-  // The "new variable" form (from the variables list "+"). Key is editable
-  // here only -- it's immutable once created (rename = delete + re-create).
-  private renderNewVariableCard(): void {
-    this.propertiesPanel.style.display = "flex";
-    this.propertiesPanel.innerHTML = `
-      <div class="sidebar-header"><span class="prop-name-suffix">new variable</span></div>
-      <label class="prop-label">variable key:</label>
-      <input type="text" data-role="new-var-key" placeholder="e.g. kills" />
-      <label class="prop-label">type:
-        <select data-role="new-var-type">
-          <option value="number">number</option>
-          <option value="text">text</option>
-        </select>
-      </label>
-      <label class="prop-label">value:</label>
-      <input data-role="new-var-value" value="0" />
-      <p class="variables-help">Variables let you keep common numbers or text handy to adjust quickly. Use one in a Text object by wrapping its key in braces, like <code>{variable}</code>.</p>
-      <div class="properties-buttons">
-        <button type="button" data-role="new-var-create">Create</button>
-        <button type="button" data-role="new-var-cancel">Cancel</button>
-      </div>
-    `;
-    const q = <T extends HTMLElement>(role: string) =>
-      this.propertiesPanel.querySelector<T>(`[data-role="${role}"]`)!;
-    const keyInput = q<HTMLInputElement>("new-var-key");
-    const typeSelect = q<HTMLSelectElement>("new-var-type");
-    const valueInput = q<HTMLInputElement>("new-var-value");
-    valueInput.type = "number";
-    typeSelect.addEventListener("change", () => {
-      valueInput.type = typeSelect.value === "number" ? "number" : "text";
-    });
-
-    q<HTMLButtonElement>("new-var-create").addEventListener("click", () => {
-      const key = keyInput.value.trim();
-      if (!key) {
-        keyInput.focus();
-        return;
-      }
-      this.callbacks.onVariableSet(key, typeSelect.value as VariableType, valueInput.value);
-      // Round-trips back as variable:updated and appears in the list; clear the
-      // form -- the user clicks the new row to keep editing it.
-      this.newVariableMode = false;
-      this.renderProperties();
-    });
-    q<HTMLButtonElement>("new-var-cancel").addEventListener("click", () => {
-      this.newVariableMode = false;
-      this.renderProperties();
-    });
-    keyInput.focus();
   }
 
   // Clock mode/config/start-pause-reset controls. Clock fields are ordinary
@@ -729,6 +683,11 @@ export class Sidebar {
       // populated rather than blank on the re-render below.
       if (clockMode === "countdown" && current?.clockDurationMs === undefined) {
         p.clockDurationMs = DEFAULT_CLOCK_DURATION_MS;
+      }
+      if (clockMode === "countdown-to" && current?.clockTargetMs === undefined) {
+        // Seed a target so it immediately counts down (from 5 min out) rather
+        // than sitting at 0:00 until the user picks a date/time.
+        p.clockTargetMs = Date.now() + DEFAULT_CLOCK_DURATION_MS;
       }
       if (clockMode === "clock") {
         if (current?.clockTimezone === undefined) p.clockTimezone = localTimezone();
@@ -885,8 +844,8 @@ function clockSettingsHtml(asset: Asset): string {
   const modeOptions = (
     [
       ["clock", "Clock (time of day)"],
-      ["countup", "Count up"],
-      ["countdown", "Count down"],
+      ["countup", "Stopwatch"],
+      ["countdown", "Timer"],
       ["countdown-to", "Countdown to a time"],
     ] as const
   )

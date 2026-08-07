@@ -88,6 +88,13 @@ describe("selection", () => {
     (root.querySelector('[data-role="add"]') as HTMLElement).click();
     expect(onAdd).toHaveBeenCalledTimes(1);
   });
+
+  it("nextNewVariableKey returns a non-colliding default name", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    expect(panel.nextNewVariableKey()).toBe("New Variable");
+    panel.setVariables([variable("New Variable", "0"), variable("New Variable 2", "0", "number", "2026-01-02T00:00:00.000Z")]);
+    expect(panel.nextNewVariableKey()).toBe("New Variable 3");
+  });
 });
 
 describe("delete", () => {

@@ -61,6 +61,21 @@ export class VariablesPanel {
     this.renderList();
   }
 
+  get(key: string): Variable | undefined {
+    return this.variables.get(key);
+  }
+
+  // A non-colliding default key for an instant "+"-created variable:
+  // "New Variable", then "New Variable 2", "New Variable 3", ...
+  nextNewVariableKey(): string {
+    const base = "New Variable";
+    if (!this.variables.has(base)) return base;
+    for (let n = 2; ; n++) {
+      const candidate = `${base} ${n}`;
+      if (!this.variables.has(candidate)) return candidate;
+    }
+  }
+
   private renderList(): void {
     this.list.innerHTML = "";
     const sorted = [...this.variables.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));

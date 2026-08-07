@@ -45,6 +45,9 @@ function makeCallbacks(overrides: Partial<SidebarCallbacks> = {}): SidebarCallba
     onMove: vi.fn(),
     onResize: vi.fn(),
     onCreateClick: vi.fn(),
+    onVariableSet: vi.fn(),
+    onVariableDelete: vi.fn(),
+    onVariableRename: vi.fn(),
     ...overrides,
   };
 }
