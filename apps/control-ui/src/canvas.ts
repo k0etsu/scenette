@@ -498,7 +498,13 @@ export class CanvasView {
 
   private reapplyText(): void {
     for (const entry of this.entries.values()) {
-      if (entry.asset.type === "text") {
+      // Skip a text asset that's mid inline-edit: its DOM holds the raw
+      // {variable} template the user is editing. Substituting the interpolated
+      // value in would both show the wrong thing and, on the next keystroke/
+      // blur, risk the raw template being lost. applyTransform guards this the
+      // same way -- and this fires on every variable change AND every periodic
+      // room:snapshot resync (setVariables), so it must guard too.
+      if (entry.asset.type === "text" && entry.content.contentEditable !== "true") {
         const interpolated = interpolateText(entry.asset.text ?? "", this.variables);
         if (entry.content.textContent !== interpolated) entry.content.textContent = interpolated;
       }
