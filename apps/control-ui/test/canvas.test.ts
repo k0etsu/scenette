@@ -364,6 +364,34 @@ describe("setAssets -- guarded reconciliation (regression: periodic/manual full-
   });
 });
 
+describe("text variable interpolation", () => {
+  const v = (key: string, value: string) => ({ key, type: "number" as const, value, createdAt: "t" });
+
+  it("shows the interpolated value when not editing", () => {
+    const { canvas, container } = setup();
+    canvas.setVariables({ kills: v("kills", "5") });
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "kills: {kills}", seq: 5 }));
+    const div = container.querySelector('[data-asset-type="text"]') as HTMLElement;
+    expect(div.textContent).toBe("kills: 5");
+  });
+
+  it("keeps the raw {variable} template while inline-editing, even as variables change (reapplyText guard)", () => {
+    const { canvas, container } = setup();
+    canvas.setVariables({ kills: v("kills", "5") });
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "kills: {kills}", seq: 5 }));
+    const div = container.querySelector('[data-asset-type="text"]') as HTMLElement;
+
+    // Double-click to edit -> the editor shows the raw template, not "kills: 5".
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(div.textContent).toBe("kills: {kills}");
+
+    // A variable change (or the periodic room:snapshot resync, which calls
+    // setVariables) must NOT clobber the in-edit template with the value.
+    canvas.setVariables({ kills: v("kills", "9") });
+    expect(div.textContent).toBe("kills: {kills}");
+  });
+});
+
 describe("setAssetPosition / setAssetSize / patchAsset", () => {
   it("setAssetPosition applies optimistically and calls onAssetMove with a fresh seq", () => {
     const { canvas, callbacks } = setup();

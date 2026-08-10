@@ -1,4 +1,5 @@
 import { Asset, AssetType } from "./asset";
+import { ClockFields, isClockMode, isClockTimeFormat } from "./clock";
 import { Variable, VariableType } from "./variables";
 import { isSafeColor } from "./textStyle";
 
@@ -58,7 +59,8 @@ export interface AssetAddMessage {
     muted?: boolean;
     volume?: number;
     paused?: boolean;
-  } & TextStyleFields;
+  } & TextStyleFields &
+    ClockFields;
 }
 
 // Patch-style: only changed fields are sent/applied, covering every asset
@@ -67,7 +69,7 @@ export interface AssetAddMessage {
 // control (opacity, blur, flip, lock, loop, mute, volume, pause, text edit)
 // since these are all occasional, low-frequency edits with identical
 // handling needs.
-export interface AssetPatch extends TextStyleFields {
+export interface AssetPatch extends TextStyleFields, ClockFields {
   text?: string;
   name?: string;
   hidden?: boolean;
@@ -343,6 +345,7 @@ export function parseClientMessage(raw: string): ClientMessage {
           volume: typeof asset.volume === "number" ? asset.volume : undefined,
           paused: typeof asset.paused === "boolean" ? asset.paused : undefined,
           ...parseTextStyleFields(asset),
+          ...parseClockFields(asset),
         },
       };
     }
@@ -385,7 +388,7 @@ export function parseClientMessage(raw: string): ClientMessage {
       const rawPatch = msg.patch as Record<string, unknown> | undefined;
       if (!rawPatch || typeof rawPatch !== "object") throw new Error("Missing patch");
 
-      const patch: AssetPatch = { ...parseTextStyleFields(rawPatch) };
+      const patch: AssetPatch = { ...parseTextStyleFields(rawPatch), ...parseClockFields(rawPatch) };
       if (typeof rawPatch.text === "string") patch.text = rawPatch.text;
       if (typeof rawPatch.name === "string") patch.name = rawPatch.name;
       if (typeof rawPatch.hidden === "boolean") patch.hidden = rawPatch.hidden;
@@ -483,8 +486,28 @@ function parseTextStyleFields(raw: Record<string, unknown>): TextStyleFields {
   return fields;
 }
 
+function parseClockFields(raw: Record<string, unknown>): ClockFields {
+  const fields: ClockFields = {};
+  if (isClockMode(raw.clockMode)) fields.clockMode = raw.clockMode;
+  if (typeof raw.clockRunning === "boolean") fields.clockRunning = raw.clockRunning;
+  if (typeof raw.clockAnchorMs === "number") fields.clockAnchorMs = raw.clockAnchorMs;
+  if (typeof raw.clockElapsedMs === "number") fields.clockElapsedMs = raw.clockElapsedMs;
+  if (typeof raw.clockDurationMs === "number") fields.clockDurationMs = raw.clockDurationMs;
+  if (typeof raw.clockTargetMs === "number") fields.clockTargetMs = raw.clockTargetMs;
+  if (typeof raw.clockTimezone === "string") fields.clockTimezone = raw.clockTimezone;
+  if (isClockTimeFormat(raw.clockFormat)) fields.clockFormat = raw.clockFormat;
+  return fields;
+}
+
 function isAssetType(value: unknown): value is AssetType {
-  return value === "image" || value === "gif" || value === "video" || value === "audio" || value === "text";
+  return (
+    value === "image" ||
+    value === "gif" ||
+    value === "video" ||
+    value === "audio" ||
+    value === "text" ||
+    value === "clock"
+  );
 }
 
 function isVariableType(value: unknown): value is VariableType {

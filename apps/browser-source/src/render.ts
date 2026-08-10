@@ -1,4 +1,4 @@
-import { Asset, Variable, Viewport, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
+import { Asset, Variable, Viewport, computeClockDisplay, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
 
 // Renders viewport-relative coordinates: an asset at world position (x,y)
 // is drawn at (x - viewport.x, y - viewport.y) so the OBS canvas only ever
@@ -185,7 +185,7 @@ export class Renderer {
       // animation caught up, worse the bigger a single correction was.
       // Snapping instead is correct here: there's no "motion" to smooth,
       // just an occasional correct-size update that should just apply.
-      if (asset.type === "text") {
+      if (asset.type === "text" || asset.type === "clock") {
         rendered.width = asset.width;
         rendered.height = asset.height;
       } else {
@@ -223,9 +223,15 @@ export class Renderer {
     el.style.display = asset.visible ? "block" : "none";
     el.style.opacity = String(asset.opacity);
     el.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
-    if (asset.type === "text") {
-      const interpolated = interpolateText(asset.text ?? "", this.variables);
-      if (el.textContent !== interpolated) el.textContent = interpolated;
+    if (asset.type === "text" || asset.type === "clock") {
+      // Clocks recompute their content here every frame (applyImmediateFields
+      // runs from paint() on every rAF tick), so the displayed time advances
+      // with no per-second network traffic. Text uses variable interpolation.
+      const content =
+        asset.type === "clock"
+          ? computeClockDisplay(asset, Date.now())
+          : interpolateText(asset.text ?? "", this.variables);
+      if (el.textContent !== content) el.textContent = content;
       Object.assign(el.style, textStyleToCss(resolveTextStyle(asset)));
     }
     if (asset.type === "video" || asset.type === "audio") {
@@ -274,6 +280,17 @@ export class Renderer {
         // unwrapped, auto-fit) rendering of the same asset.
         el = document.createElement("div");
         el.textContent = asset.text ?? "";
+        el.style.padding = "4px";
+        el.style.boxSizing = "border-box";
+        el.style.whiteSpace = "pre";
+        break;
+      }
+      case "clock": {
+        // Same layout as text (styling + the computed time string are applied
+        // in applyImmediateFields, which runs immediately after creation and
+        // then every frame). Must match control-ui/src/canvas.ts's clock case.
+        el = document.createElement("div");
+        el.textContent = computeClockDisplay(asset, Date.now());
         el.style.padding = "4px";
         el.style.boxSizing = "border-box";
         el.style.whiteSpace = "pre";

@@ -9,8 +9,10 @@ function variable(key: string, value: string, type: Variable["type"] = "number",
 
 function makeCallbacks(overrides: Partial<VariablesCallbacks> = {}): VariablesCallbacks {
   return {
-    onSet: vi.fn(),
+    onSelect: vi.fn(),
+    onAdd: vi.fn(),
     onDelete: vi.fn(),
+    onSet: vi.fn(),
     ...overrides,
   };
 }
@@ -24,146 +26,177 @@ beforeEach(() => {
 });
 
 describe("list rendering", () => {
-  it("renders a row per variable, sorted by createdAt", () => {
+  it("renders a row per variable in insertion order (not sorted)", () => {
     const panel = new VariablesPanel(root, makeCallbacks());
     panel.setVariables([
       variable("second", "2", "number", "2026-01-02T00:00:00.000Z"),
       variable("first", "1", "number", "2026-01-01T00:00:00.000Z"),
     ]);
-    const names = [...root.querySelectorAll(".variable-name")].map((n) => n.textContent);
-    expect(names).toEqual(["first", "second"]);
+    const names = () => [...root.querySelectorAll(".variable-name")].map((n) => n.textContent);
+    // Deliberately NOT reordered by name/createdAt -- keeps the given order.
+    expect(names()).toEqual(["second", "first"]);
   });
 
-  it("shows a numeric stepper for number-type variables", () => {
+  it("shows a -/+ stepper for number variables and a plain value for text (no inline form)", () => {
     const panel = new VariablesPanel(root, makeCallbacks());
-    panel.setVariables([variable("kills", "4", "number")]);
-    expect(root.querySelector(".variable-stepper")).toBeTruthy();
-    expect((root.querySelector(".variable-value") as HTMLElement).textContent).toBe("4");
-  });
-
-  it("shows a plain value (no stepper) for text-type variables", () => {
-    const panel = new VariablesPanel(root, makeCallbacks());
-    panel.setVariables([variable("greeting", "hi", "text")]);
-    expect(root.querySelector(".variable-stepper")).toBeFalsy();
+    panel.setVariables([variable("kills", "4", "number"), variable("greeting", "hi", "text", "2026-01-02T00:00:00.000Z")]);
+    // Full editing lives in the properties card, but quick -/+ stays in the list.
+    expect(root.querySelectorAll(".variable-stepper")).toHaveLength(1);
+    expect(root.querySelector(".variables-form")).toBeFalsy();
+    const values = [...root.querySelectorAll(".variable-value")].map((v) => v.textContent);
+    expect(values).toEqual(["4", "hi"]);
     expect(root.querySelector(".variable-value-text")?.textContent).toBe("hi");
   });
 
-  it("upsertVariable adds/updates a row without needing a full setVariables call", () => {
+  it("the list -/+ buttons update instantly, debounce the send, and don't select the row", () => {
+    vi.useFakeTimers();
+    try {
+      const onSet = vi.fn();
+      const onSelect = vi.fn();
+      const panel = new VariablesPanel(root, makeCallbacks({ onSet, onSelect }));
+      panel.setVariables([variable("kills", "4", "number")]);
+      const [minus, plus] = [...root.querySelectorAll(".variable-stepper .sidebar-icon-button")] as HTMLElement[];
+      const valueEl = () => (root.querySelector(".variable-value") as HTMLElement).textContent;
+
+      // Each click moves the on-screen number immediately (optimistic).
+      plus.click();
+      plus.click();
+      plus.click();
+      expect(valueEl()).toBe("7");
+      minus.click();
+      expect(valueEl()).toBe("6");
+      // ...but the network send is coalesced, not one-per-click.
+      expect(onSet).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(200);
+      expect(onSet).toHaveBeenCalledTimes(1);
+      expect(onSet).toHaveBeenCalledWith("kills", "number", "6");
+      expect(onSelect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a stale echo mid-burst does not snap the stepped number back", () => {
+    vi.useFakeTimers();
+    try {
+      const panel = new VariablesPanel(root, makeCallbacks());
+      panel.setVariables([variable("kills", "4", "number")]);
+      const plus = root.querySelectorAll(".variable-stepper .sidebar-icon-button")[1] as HTMLElement;
+      const valueEl = () => (root.querySelector(".variable-value") as HTMLElement).textContent;
+
+      plus.click();
+      plus.click();
+      plus.click(); // optimistic -> 7
+      expect(valueEl()).toBe("7");
+
+      // A late echo for a superseded value (5) must be ignored for display.
+      panel.upsertVariable(variable("kills", "5", "number"));
+      expect(valueEl()).toBe("7");
+      // The echo that confirms our latest optimistic value (7) is accepted.
+      panel.upsertVariable(variable("kills", "7", "number"));
+      expect(valueEl()).toBe("7");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("upsertVariable adds/updates a row without a full setVariables call", () => {
     const panel = new VariablesPanel(root, makeCallbacks());
     panel.setVariables([variable("kills", "4")]);
     panel.upsertVariable(variable("kills", "5"));
     expect((root.querySelector(".variable-value") as HTMLElement).textContent).toBe("5");
   });
 
-  it("removeVariable removes the row", () => {
+  it("removeVariable drops the row", () => {
     const panel = new VariablesPanel(root, makeCallbacks());
     panel.setVariables([variable("kills", "4")]);
     panel.removeVariable("kills");
-    expect(root.querySelectorAll(".variable-row")).toHaveLength(0);
+    expect(root.querySelector(".variable-row")).toBeFalsy();
   });
 });
 
-describe("number variable stepper", () => {
-  it("increments by 1 and sends the update via onSet", () => {
-    const onSet = vi.fn();
-    const panel = new VariablesPanel(root, makeCallbacks({ onSet }));
-    panel.setVariables([variable("kills", "4")]);
-    const plus = [...root.querySelectorAll(".variable-stepper button")][1] as HTMLElement;
-    plus.click();
-    expect(onSet).toHaveBeenCalledWith("kills", "number", "5");
-  });
+describe("stable ordering (linked-list behavior)", () => {
+  const names = () => [...document.querySelectorAll(".variable-name")].map((n) => n.textContent);
 
-  it("decrements by 1", () => {
-    const onSet = vi.fn();
-    const panel = new VariablesPanel(root, makeCallbacks({ onSet }));
-    panel.setVariables([variable("kills", "4")]);
-    const minus = [...root.querySelectorAll(".variable-stepper button")][0] as HTMLElement;
-    minus.click();
-    expect(onSet).toHaveBeenCalledWith("kills", "number", "3");
-  });
-
-  it("treats a non-numeric stored value as 0 before incrementing", () => {
-    const onSet = vi.fn();
-    const panel = new VariablesPanel(root, makeCallbacks({ onSet }));
-    panel.setVariables([variable("kills", "not-a-number")]);
-    const plus = [...root.querySelectorAll(".variable-stepper button")][1] as HTMLElement;
-    plus.click();
-    expect(onSet).toHaveBeenCalledWith("kills", "number", "1");
-  });
-});
-
-describe("create/edit form", () => {
-  it("opens with defaults when adding a new variable", () => {
-    new VariablesPanel(root, makeCallbacks());
-    (root.querySelector('[data-role="add"]') as HTMLElement).click();
-    const keyInput = root.querySelector('[data-role="key"]') as HTMLInputElement;
-    expect(keyInput.disabled).toBe(false);
-    expect(keyInput.value).toBe("");
-  });
-
-  it("creating a variable sends onSet with the entered key/type/value", () => {
-    const onSet = vi.fn();
-    new VariablesPanel(root, makeCallbacks({ onSet }));
-    (root.querySelector('[data-role="add"]') as HTMLElement).click();
-
-    (root.querySelector('[data-role="key"]') as HTMLInputElement).value = "newvar";
-    (root.querySelector('[data-role="value"]') as HTMLInputElement).value = "42";
-    (root.querySelector('[data-role="type"]') as HTMLSelectElement).value = "number";
-    (root.querySelector('[data-role="save"]') as HTMLElement).click();
-
-    expect(onSet).toHaveBeenCalledWith("newvar", "number", "42");
-  });
-
-  it("does not call onSet when saving with an empty key", () => {
-    const onSet = vi.fn();
-    new VariablesPanel(root, makeCallbacks({ onSet }));
-    (root.querySelector('[data-role="add"]') as HTMLElement).click();
-    (root.querySelector('[data-role="save"]') as HTMLElement).click();
-    expect(onSet).not.toHaveBeenCalled();
-  });
-
-  it("editing an existing variable disables the key field and keeps its key fixed", () => {
-    const onSet = vi.fn();
-    const panel = new VariablesPanel(root, makeCallbacks({ onSet }));
-    panel.setVariables([variable("kills", "4")]);
-    (root.querySelector(".variable-name") as HTMLElement).click();
-
-    const keyInput = root.querySelector('[data-role="key"]') as HTMLInputElement;
-    expect(keyInput.disabled).toBe(true);
-    expect(keyInput.value).toBe("kills");
-
-    (root.querySelector('[data-role="value"]') as HTMLInputElement).value = "9";
-    (root.querySelector('[data-role="save"]') as HTMLElement).click();
-    expect(onSet).toHaveBeenCalledWith("kills", "number", "9");
-  });
-
-  it("cancel closes the form without calling onSet", () => {
-    const onSet = vi.fn();
-    new VariablesPanel(root, makeCallbacks({ onSet }));
-    (root.querySelector('[data-role="add"]') as HTMLElement).click();
-    (root.querySelector('[data-role="cancel"]') as HTMLElement).click();
-    expect(onSet).not.toHaveBeenCalled();
-    expect((root.querySelector(".variables-form") as HTMLElement).style.display).toBe("none");
-  });
-
-  it("removing the variable currently being edited closes the form", () => {
+  it("upsert keeps an existing key in place; a new key appends at the bottom", () => {
     const panel = new VariablesPanel(root, makeCallbacks());
-    panel.setVariables([variable("kills", "4")]);
-    (root.querySelector(".variable-name") as HTMLElement).click();
-    expect((root.querySelector(".variables-form") as HTMLElement).style.display).toBe("block");
+    panel.setVariables([variable("a", "1"), variable("b", "2"), variable("c", "3")]);
+    panel.upsertVariable(variable("b", "99")); // edit in the middle
+    expect(names()).toEqual(["a", "b", "c"]);
+    panel.upsertVariable(variable("d", "0")); // new
+    expect(names()).toEqual(["a", "b", "c", "d"]);
+  });
 
-    panel.removeVariable("kills");
-    expect((root.querySelector(".variables-form") as HTMLElement).style.display).toBe("none");
+  it("removing a middle row leaves a gap; the next new variable appends at the bottom", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    panel.setVariables([variable("a", "1"), variable("b", "2"), variable("c", "3")]);
+    panel.removeVariable("b");
+    expect(names()).toEqual(["a", "c"]);
+    panel.upsertVariable(variable("new", "0"));
+    expect(names()).toEqual(["a", "c", "new"]);
+  });
+
+  it("renameKey swaps the key in place, not moving the row to the bottom", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    panel.setVariables([variable("a", "1"), variable("b", "2"), variable("c", "3")]);
+    panel.renameKey("b", "beta", variable("beta", "2"));
+    expect(names()).toEqual(["a", "beta", "c"]);
+  });
+
+  it("a snapshot reconcile preserves existing order and appends new keys", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    panel.setVariables([variable("a", "1"), variable("b", "2")]);
+    // Server sends the same set in a different order, plus a new key.
+    panel.setVariables([variable("b", "2"), variable("z", "9"), variable("a", "1")]);
+    expect(names()).toEqual(["a", "b", "z"]);
   });
 });
 
-describe("expand/collapse", () => {
-  it("toggles the panel-collapsed class", () => {
-    new VariablesPanel(root, makeCallbacks());
-    const expandButton = root.querySelector('[data-role="expand"]') as HTMLElement;
-    expandButton.click();
-    expect(root.classList.contains("panel-collapsed")).toBe(true);
-    expandButton.click();
-    expect(root.classList.contains("panel-collapsed")).toBe(false);
+describe("selection", () => {
+  it("clicking a row selects the variable (does not expand anything in place)", () => {
+    const onSelect = vi.fn();
+    const panel = new VariablesPanel(root, makeCallbacks({ onSelect }));
+    panel.setVariables([variable("kills", "4")]);
+    (root.querySelector(".variable-row") as HTMLElement).click();
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ key: "kills", value: "4" }));
+    // No inline form/expansion is rendered in the panel.
+    expect(root.querySelector(".variables-form")).toBeFalsy();
+    expect(root.querySelector("input")).toBeFalsy();
+  });
+
+  it("setSelectedKey highlights the matching row", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    panel.setVariables([variable("a", "1"), variable("b", "2", "number", "2026-01-02T00:00:00.000Z")]);
+    panel.setSelectedKey("b");
+    const rows = [...root.querySelectorAll(".variable-row")];
+    expect(rows[0].classList.contains("selected")).toBe(false);
+    expect(rows[1].classList.contains("selected")).toBe(true);
+  });
+
+  it("the '+' header button requests a new variable via onAdd", () => {
+    const onAdd = vi.fn();
+    const panel = new VariablesPanel(root, makeCallbacks({ onAdd }));
+    (root.querySelector('[data-role="add"]') as HTMLElement).click();
+    expect(onAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it("nextNewVariableKey returns a non-colliding default name", () => {
+    const panel = new VariablesPanel(root, makeCallbacks());
+    expect(panel.nextNewVariableKey()).toBe("New Variable");
+    panel.setVariables([variable("New Variable", "0"), variable("New Variable 2", "0", "number", "2026-01-02T00:00:00.000Z")]);
+    expect(panel.nextNewVariableKey()).toBe("New Variable 3");
+  });
+});
+
+describe("delete", () => {
+  it("the row delete button calls onDelete and does not also select the row", () => {
+    const onDelete = vi.fn();
+    const onSelect = vi.fn();
+    const panel = new VariablesPanel(root, makeCallbacks({ onDelete, onSelect }));
+    panel.setVariables([variable("kills", "4")]);
+    (root.querySelector(".variable-row .sidebar-icon-button") as HTMLElement).click();
+    expect(onDelete).toHaveBeenCalledWith("kills");
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });

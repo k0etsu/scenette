@@ -1,5 +1,11 @@
-import { Asset, AssetPatch, Variable, Viewport, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
+import { Asset, AssetPatch, Variable, Viewport, computeClockDisplay, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
 import { ICON_AUDIO_LARGE } from "./icons";
+
+// How often clock assets re-render their computed time in the editor preview.
+// 250ms comfortably keeps a seconds display current without the cost of a
+// full requestAnimationFrame loop (browser-source uses rAF since it's a
+// dedicated always-visible overlay; the editor doesn't need that cadence).
+const CLOCK_TICK_INTERVAL_MS = 250;
 
 interface Entry {
   el: HTMLElement;
@@ -199,6 +205,8 @@ export class CanvasView {
   // session land in the same millisecond (the server's check is a strict
   // `<`, so a tied value would otherwise be wrongly rejected too).
   private lastSeqValue = 0;
+  // Drives the per-clock-asset time re-render (see tickClocks); cleared in dispose().
+  private clockTimer?: ReturnType<typeof setInterval>;
   // Public: the sidebar's properties-panel edits (numeric X/Y/W/H fields,
   // toggles, etc.) aren't part of a mouse gesture but still need to go
   // through the same seq-guarded path as a drag for consistent stale/
@@ -356,6 +364,33 @@ export class CanvasView {
     this.applyWorldTransform(true);
     this.bindContainerEvents();
     this.bindKeyboard();
+
+    this.clockTimer = setInterval(() => this.tickClocks(), CLOCK_TICK_INTERVAL_MS);
+  }
+
+  // Advances every clock asset's displayed time. The content element shrink-
+  // wraps its text (no fixed width, like a text asset), so updating textContent
+  // is enough to keep it visually sized; re-measuring only matters for the
+  // selection handles, so that's done just for the currently-selected clock.
+  // Purely local -- never sends a patch (a ticking clock costs no network
+  // traffic; only its config is ever synced).
+  private tickClocks(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.asset.type !== "clock") continue;
+      const display = computeClockDisplay(entry.asset, Date.now());
+      if (entry.content.textContent !== display) entry.content.textContent = display;
+    }
+    if (this.selectedAssetId) {
+      const entry = this.entries.get(this.selectedAssetId);
+      if (entry?.asset.type === "clock") {
+        const w = Math.max(MIN_ASSET_SIZE, entry.content.offsetWidth);
+        const h = Math.max(MIN_ASSET_SIZE, entry.content.offsetHeight);
+        if (Math.abs(w - entry.asset.width) >= 1 || Math.abs(h - entry.asset.height) >= 1) {
+          entry.asset = { ...entry.asset, width: w, height: h };
+          this.positionHandles();
+        }
+      }
+    }
   }
 
   setViewport(viewport: Viewport): void {
@@ -463,7 +498,13 @@ export class CanvasView {
 
   private reapplyText(): void {
     for (const entry of this.entries.values()) {
-      if (entry.asset.type === "text") {
+      // Skip a text asset that's mid inline-edit: its DOM holds the raw
+      // {variable} template the user is editing. Substituting the interpolated
+      // value in would both show the wrong thing and, on the next keystroke/
+      // blur, risk the raw template being lost. applyTransform guards this the
+      // same way -- and this fires on every variable change AND every periodic
+      // room:snapshot resync (setVariables), so it must guard too.
+      if (entry.asset.type === "text" && entry.content.contentEditable !== "true") {
         const interpolated = interpolateText(entry.asset.text ?? "", this.variables);
         if (entry.content.textContent !== interpolated) entry.content.textContent = interpolated;
       }
@@ -700,7 +741,8 @@ export class CanvasView {
     // gate with no cross-message ordering guarantee can't be made safe by
     // choosing an order -- only combining them into one atomic write fixes
     // it for real, which is what this does.
-    const sizePatch = entry.asset.type === "text" ? this.measureTextAutoFit(assetId) : undefined;
+    const sizePatch =
+      entry.asset.type === "text" || entry.asset.type === "clock" ? this.measureTextAutoFit(assetId) : undefined;
 
     if ("text" in patch) {
       this.sendTextPatchThrottled(assetId);
@@ -823,7 +865,7 @@ export class CanvasView {
   // fixes that -- see AssetPatch's own doc comment for the full history.
   private measureTextAutoFit(assetId: string): { width: number; height: number } | undefined {
     const entry = this.entries.get(assetId);
-    if (!entry || entry.asset.type !== "text") return undefined;
+    if (!entry || (entry.asset.type !== "text" && entry.asset.type !== "clock")) return undefined;
     const { content, asset } = entry;
     const width = content.offsetWidth;
     const height = content.offsetHeight;
@@ -858,10 +900,10 @@ export class CanvasView {
     const { el, content } = entry;
     el.style.left = `${asset.x}px`;
     el.style.top = `${asset.y}px`;
-    // Text assets shrink-wrap to their own content instead (see
+    // Text and clock assets shrink-wrap to their own content instead (see
     // createElement/autoSizeText) -- forcing a width/height here would
     // fight with that, either clipping long text or leaving dead space.
-    if (asset.type !== "text") {
+    if (asset.type !== "text" && asset.type !== "clock") {
       el.style.width = `${asset.width}px`;
       el.style.height = `${asset.height}px`;
     }
@@ -873,19 +915,24 @@ export class CanvasView {
     // the selection outline, and a CSS filter blurs everything painted for
     // the element it's on, so applying it to `el` blurred the outline too.
     content.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
-    if (asset.type === "text") {
-      // While actively being edited (see beginInlineTextEdit), the DOM's
-      // own textContent -- the raw template the user is mid-typing -- is
-      // authoritative; overwriting it with the *interpolated* display here
-      // would both show the wrong thing (substituted values instead of the
-      // {variable} placeholder being edited) and reset the caret to the
-      // start on every keystroke.
-      if (content.contentEditable !== "true") {
+    if (asset.type === "text" || asset.type === "clock") {
+      if (asset.type === "clock") {
+        // The live time; advanced continuously by tickClocks, but also set
+        // here so a style/config edit repaints immediately.
+        const display = computeClockDisplay(asset, Date.now());
+        if (content.textContent !== display) content.textContent = display;
+      } else if (content.contentEditable !== "true") {
+        // While actively being edited (see beginInlineTextEdit), the DOM's
+        // own textContent -- the raw template the user is mid-typing -- is
+        // authoritative; overwriting it with the *interpolated* display here
+        // would both show the wrong thing (substituted values instead of the
+        // {variable} placeholder being edited) and reset the caret to the
+        // start on every keystroke.
         const interpolated = interpolateText(asset.text ?? "", this.variables);
         if (content.textContent !== interpolated) content.textContent = interpolated;
       }
       // Applied identically in browser-source's render.ts (via the same
-      // shared resolveTextStyle/textStyleToCss helpers) so a text asset
+      // shared resolveTextStyle/textStyleToCss helpers) so a text/clock asset
       // looks the same in the editor preview as it does to viewers.
       Object.assign(content.style, textStyleToCss(resolveTextStyle(asset)));
     }
@@ -959,11 +1006,21 @@ export class CanvasView {
         content.style.whiteSpace = "pre";
         break;
       }
+      case "clock": {
+        // Same shrink-wrap layout as text; the computed time string + styling
+        // are (re)applied in applyTransform and advanced by tickClocks.
+        content = document.createElement("div");
+        content.textContent = computeClockDisplay(asset, Date.now());
+        content.style.padding = "4px";
+        content.style.boxSizing = "border-box";
+        content.style.whiteSpace = "pre";
+        break;
+      }
     }
     content.dataset.assetType = asset.type;
-    // Text assets are sized by their own content, not stretched to fill
-    // `el` -- see the "text" case above.
-    if (asset.type !== "text") {
+    // Text and clock assets are sized by their own content, not stretched to
+    // fill `el` -- see the "text"/"clock" cases above.
+    if (asset.type !== "text" && asset.type !== "clock") {
       content.style.width = "100%";
       content.style.height = "100%";
     }
@@ -1165,6 +1222,7 @@ export class CanvasView {
   // (switching rooms) starts from a clean slate rather than stacking a
   // second `world` div underneath/alongside the old one.
   dispose(): void {
+    if (this.clockTimer) clearInterval(this.clockTimer);
     window.removeEventListener("mousemove", this.handleWindowMouseMove);
     window.removeEventListener("mouseup", this.handleWindowMouseUp);
     window.removeEventListener("keydown", this.handleWindowKeyDown);
@@ -1367,10 +1425,10 @@ export class CanvasView {
   // matching a typical canvas editor's resize-handle behavior.
   private positionHandles(): void {
     const entry = this.selectedEntry();
-    // Text assets size themselves to fit their own content (see
-    // autoSizeText) rather than being manually resized, so they never get
-    // corner handles regardless of selection/lock state.
-    if (!entry || entry.asset.locked || entry.asset.type === "text") {
+    // Text and clock assets size themselves to fit their own content (see
+    // autoSizeText/tickClocks) rather than being manually resized, so they
+    // never get corner handles regardless of selection/lock state.
+    if (!entry || entry.asset.locked || entry.asset.type === "text" || entry.asset.type === "clock") {
       for (const corner of CORNERS) this.handles[corner].style.display = "none";
     } else {
       const { x, y, width, height, rotation } = entry.asset;

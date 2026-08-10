@@ -364,20 +364,34 @@
         color: #999;
         font-size: 12px;
       }
+      .variable-row {
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      .variable-row:hover {
+        background: #2a2c33;
+      }
+      .variable-row.selected {
+        background: #2f3b4d;
+      }
       .variable-name {
         flex: 1;
-        cursor: pointer;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-      }
-      .variable-name:hover {
-        text-decoration: underline;
       }
       .variable-stepper {
         display: flex;
         align-items: center;
         gap: 4px;
+      }
+      .variable-set-row {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .variable-set-row input {
+        flex: 1;
       }
       .variable-value {
         min-width: 24px;
@@ -1026,6 +1040,7 @@
         <div class="context-menu-header">Create</div>
         <button id="context-menu-text" type="button">Text</button>
         <button id="context-menu-media" type="button">Media</button>
+        <button id="context-menu-clock" type="button">Clock</button>
       </div>
       <div id="access-modal"></div>
       <div id="stream-settings-modal"></div>
