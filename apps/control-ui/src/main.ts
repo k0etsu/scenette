@@ -252,7 +252,17 @@ async function main(): Promise<void> {
           window.location.href = window.location.pathname;
         });
       },
-      onSettings: () => settingsModal.open(httpApiUrl, session!.email),
+      onSettings: () =>
+        settingsModal.open(httpApiUrl, session!.email, () => {
+          // The dashboard was rendered from the session fetched at login --
+          // refetch so a newly-verified email's room shows up without
+          // requiring a manual reload (personalRoomId/emailVerified only
+          // change server-side here, never client-side).
+          void checkSession(httpApiUrl).then((fresh) => {
+            if (fresh) session = fresh;
+            void showDashboardView();
+          });
+        }),
     });
     // Show the dashboard shell immediately, then fill it in -- otherwise the
     // room view just blanks out for the duration of the listRooms fetch,
