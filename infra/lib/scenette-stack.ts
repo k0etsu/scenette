@@ -451,6 +451,12 @@ export class ScenetteStack extends cdk.Stack {
         SESSION_COOKIE_NAME: sessionCookieName,
         // control-ui origin -- the emailed verify page redirects here on success.
         APP_URL: `https://${controlUiDomain}`,
+        // Temporary: SES prod access is still pending, so sandbox mode blocks
+        // verification emails to unverified recipients. Toggle on with
+        // `cdk deploy --context skipEmailVerification=true` to grant rooms
+        // without the mailed link; drop the context flag once SES prod
+        // access is approved.
+        SKIP_EMAIL_VERIFICATION: String(this.node.tryGetContext("skipEmailVerification") === "true"),
       },
     });
     accountsTable.grantReadWriteData(accountsFn);
