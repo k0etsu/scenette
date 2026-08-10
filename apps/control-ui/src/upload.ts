@@ -56,6 +56,35 @@ export async function uploadFile(httpApiUrl: string, roomId: string, file: File)
   return { assetId, s3Key, type, width, height };
 }
 
+// For a URL pasted onto the canvas (e.g. a browser's "Copy image" flattens
+// an animated gif to a static png before the page ever sees it -- see
+// main.ts's paste handler) -- the server fetches sourceUrl itself and
+// uploads the original bytes, so the client never needs CORS access to the
+// third-party host. Width/height still have to be measured client-side,
+// against the asset's own now-hosted URL rather than the (possibly gone by
+// the time anyone looks) original.
+export async function uploadFromUrl(
+  httpApiUrl: string,
+  roomId: string,
+  sourceUrl: string,
+  assetsDomain: string
+): Promise<UploadResult> {
+  const res = await fetch(`${httpApiUrl}/assets/upload-from-url`, {
+    credentials: "include",
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ roomId, url: sourceUrl }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error ?? `Failed to fetch pasted URL: ${res.status}`);
+  }
+  const { s3Key, assetId, type } = data as { s3Key: string; assetId: string; type: AssetType };
+
+  const { width, height } = await detectDimensionsFromUrl(`https://${assetsDomain}/${s3Key}`, type);
+  return { assetId, s3Key, type, width, height };
+}
+
 // Best-effort — if the browser can't decode the file fast enough (or at
 // all, e.g. a corrupt upload) this falls back to a reasonable default
 // rather than blocking asset placement indefinitely.
@@ -64,18 +93,27 @@ async function detectDimensions(file: File, type: AssetType): Promise<{ width: n
 
   const objectUrl = URL.createObjectURL(file);
   try {
-    let natural: { width: number; height: number };
-    if (type === "image" || type === "gif") {
-      natural = await withTimeout(loadImageDimensions(objectUrl), FALLBACK_MEDIA_SIZE);
-    } else if (type === "video") {
-      natural = await withTimeout(loadVideoDimensions(objectUrl), FALLBACK_MEDIA_SIZE);
-    } else {
-      natural = FALLBACK_MEDIA_SIZE;
-    }
-    return clampToMaxDimension(natural.width, natural.height);
+    return await detectDimensionsFromUrl(objectUrl, type);
   } finally {
     URL.revokeObjectURL(objectUrl);
   }
+}
+
+// Same best-effort measurement as detectDimensions, but against a URL that's
+// already reachable (an object URL, or -- for uploadFromUrl -- the asset's
+// own hosted CloudFront URL) rather than a local File.
+async function detectDimensionsFromUrl(url: string, type: AssetType): Promise<{ width: number; height: number }> {
+  if (type === "audio") return DEFAULT_AUDIO_SIZE;
+
+  let natural: { width: number; height: number };
+  if (type === "image" || type === "gif") {
+    natural = await withTimeout(loadImageDimensions(url), FALLBACK_MEDIA_SIZE);
+  } else if (type === "video") {
+    natural = await withTimeout(loadVideoDimensions(url), FALLBACK_MEDIA_SIZE);
+  } else {
+    natural = FALLBACK_MEDIA_SIZE;
+  }
+  return clampToMaxDimension(natural.width, natural.height);
 }
 
 function loadImageDimensions(url: string): Promise<{ width: number; height: number }> {

@@ -13,7 +13,7 @@ import { Sidebar } from "./sidebar";
 import { SoundPanel } from "./sound";
 import { ConnectedUsersPanel } from "./connectedUsers";
 import { VariablesPanel } from "./variablesPanel";
-import { uploadFile } from "./upload";
+import { uploadFile, uploadFromUrl, UploadResult } from "./upload";
 import { UploadIndicator } from "./uploadIndicator";
 import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
@@ -160,6 +160,23 @@ document.addEventListener("mousedown", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") contextMenu!.style.display = "none";
 });
+
+// A plain-text paste with no accompanying file item -- used to catch a
+// pasted image URL (e.g. copied via a browser's "Copy image address", or
+// the URL text a "Copy image" sometimes leaves alongside its flattened png).
+// Deliberately narrow: only a single bare http(s) URL and nothing else, so
+// pasting an arbitrary sentence or multi-line text never gets mistaken for
+// an upload attempt.
+function extractMediaUrl(clipboardData: DataTransfer | null | undefined): string | undefined {
+  const text = (clipboardData?.getData("text/uri-list") || clipboardData?.getData("text/plain"))?.trim();
+  if (!text || /\s/.test(text)) return undefined;
+  try {
+    const url = new URL(text);
+    return url.protocol === "http:" || url.protocol === "https:" ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 async function main(): Promise<void> {
   const { wsUrl, httpApiUrl, assetsDomain, browserSourceUrl } = await loadConfig();
@@ -384,46 +401,71 @@ async function main(): Promise<void> {
   // persists across room switches, so created exactly once.
   const uploadIndicator = new UploadIndicator(uploadIndicatorEl!);
 
-  async function handleUpload(file: File): Promise<void> {
+  // Shared by both upload paths below (a real file, or bytes fetched
+  // server-side from a pasted URL) -- once an UploadResult exists, placing
+  // it on the canvas is identical either way.
+  function placeUploadedAsset(result: UploadResult): void {
     if (!current) return;
     const { roomId, canvas, connection } = current;
+    const viewport = canvas.getViewport();
+    // createPosition (an explicit right-click "add media" here) wins when
+    // set; otherwise this was triggered from the toolbar button or a
+    // clipboard paste, neither of which has a click of its own to read a
+    // position from -- fall back to wherever the mouse was last actually
+    // over the canvas rather than always dropping the asset dead center.
+    const pos = current.createPosition ??
+      canvas.getCursorWorldPosition() ?? {
+        x: viewport.x + viewport.width / 2 - result.width / 2,
+        y: viewport.y + viewport.height / 2 - result.height / 2,
+      };
+    current.createPosition = undefined;
+
+    connection.send({
+      action: "asset:add",
+      roomId,
+      asset: {
+        assetId: result.assetId,
+        type: result.type,
+        x: pos.x,
+        y: pos.y,
+        width: result.width,
+        height: result.height,
+        s3Key: result.s3Key,
+        // Starts paused rather than autoplaying immediately on upload --
+        // a streamer placing a video/audio clip needs a moment to
+        // position/size it before it's actually live for viewers, and
+        // autoplaying it into an empty room (or over background audio)
+        // the instant it lands was surprising. No-op for every other
+        // asset type, which ignores `paused` entirely (no play/pause UI
+        // is ever shown for them).
+        paused: result.type === "video" || result.type === "audio" ? true : undefined,
+      },
+    });
+  }
+
+  async function handleUpload(file: File): Promise<void> {
+    if (!current) return;
+    const { roomId } = current;
     const indicator = uploadIndicator.begin(file);
     try {
-      const result = await uploadFile(httpApiUrl, roomId, file);
-      const viewport = canvas.getViewport();
-      // createPosition (an explicit right-click "add media" here) wins when
-      // set; otherwise this was triggered from the toolbar button or a
-      // clipboard paste, neither of which has a click of its own to read a
-      // position from -- fall back to wherever the mouse was last actually
-      // over the canvas rather than always dropping the asset dead center.
-      const pos = current.createPosition ??
-        canvas.getCursorWorldPosition() ?? {
-          x: viewport.x + viewport.width / 2 - result.width / 2,
-          y: viewport.y + viewport.height / 2 - result.height / 2,
-        };
-      current.createPosition = undefined;
+      placeUploadedAsset(await uploadFile(httpApiUrl, roomId, file));
+      indicator.succeed();
+    } catch (err) {
+      indicator.fail(err instanceof Error ? err.message : String(err));
+    }
+  }
 
-      connection.send({
-        action: "asset:add",
-        roomId,
-        asset: {
-          assetId: result.assetId,
-          type: result.type,
-          x: pos.x,
-          y: pos.y,
-          width: result.width,
-          height: result.height,
-          s3Key: result.s3Key,
-          // Starts paused rather than autoplaying immediately on upload --
-          // a streamer placing a video/audio clip needs a moment to
-          // position/size it before it's actually live for viewers, and
-          // autoplaying it into an empty room (or over background audio)
-          // the instant it lands was surprising. No-op for every other
-          // asset type, which ignores `paused` entirely (no play/pause UI
-          // is ever shown for them).
-          paused: result.type === "video" || result.type === "audio" ? true : undefined,
-        },
-      });
+  // The paste-a-URL path: a browser's "Copy image" flattens an animated gif
+  // to a static png before the page ever sees it (that's the OS/browser
+  // clipboard's own conversion, not something a page can opt out of), so a
+  // pasted URL with no accompanying file is fetched by the server instead,
+  // preserving the original bytes.
+  async function handleUploadFromUrl(sourceUrl: string): Promise<void> {
+    if (!current) return;
+    const { roomId } = current;
+    const indicator = uploadIndicator.beginFromUrl(sourceUrl);
+    try {
+      placeUploadedAsset(await uploadFromUrl(httpApiUrl, roomId, sourceUrl, assetsDomain));
       indicator.succeed();
     } catch (err) {
       indicator.fail(err instanceof Error ? err.message : String(err));
@@ -440,7 +482,12 @@ async function main(): Promise<void> {
     const file = Array.from(event.clipboardData?.items ?? [])
       .find((item) => item.kind === "file")
       ?.getAsFile();
-    if (file) void handleUpload(file);
+    if (file) {
+      void handleUpload(file);
+      return;
+    }
+    const pastedUrl = extractMediaUrl(event.clipboardData);
+    if (pastedUrl) void handleUploadFromUrl(pastedUrl);
   });
 
   contextMenuMediaButton!.addEventListener("click", () => {
