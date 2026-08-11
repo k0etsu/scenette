@@ -1,19 +1,33 @@
-import { ServerMessage } from "@scenette/protocol";
+import { ServerMessage, isSeqGuardedMessage } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { Renderer } from "./render";
 
 const root = document.getElementById("viewport-root");
 if (!root) throw new Error("Missing #viewport-root element");
 
-// Self-heals any delta message that lost its seq race and got silently
-// dropped server-side (see roomState.ts's per-asset conditional write) -- a
-// periodic full-state re-fetch guarantees convergence within one interval
+// Self-heals a delta message that lost its seq race and got silently
+// dropped server-side (see roomState.ts's conditional writes, and
+// isSeqGuardedMessage's own doc comment for exactly which broadcast types
+// that can happen to) -- a full-state re-fetch guarantees convergence
 // regardless of whether any specific asset:move/resize/update ever arrives.
-// Browser-source has no local optimistic state of its own (see Renderer),
-// so reusing the exact room:snapshot path here is safe with no additional
-// guarding, and cheap enough at this app's scale (one Lambda invocation +
-// one small DynamoDB query per tick, no room broadcast) to run this often.
-const SNAPSHOT_POLL_INTERVAL_MS = 1000;
+//
+// Deliberately activity-gated rather than a constant-interval poll: a drop
+// can only happen when something is actually racing, so an idle room (OBS
+// left open with nobody editing -- the common case) has zero chance of one
+// and gets zero polls. Every incoming seq-guarded broadcast (re)arms this
+// settle timer; it fires once activity actually goes quiet, catching
+// anything that raced during the burst. A prior fixed-interval design (every
+// 1s, forever, regardless of activity) alone accounted for ~92% of this
+// account's Lambda invocations in a single month against a single
+// perpetually-open browser source -- see the incident that prompted this.
+const RESYNC_SETTLE_MS = 3000;
+// Sparse fallback for the case a drop is followed by total silence (no
+// further seq-guarded broadcast ever arrives to re-arm the settle timer) --
+// infrequent enough to be nearly free, just insurance against that specific
+// edge case. Reconnect gaps are already fully covered separately (onOpen
+// always re-requests a snapshot immediately, first connect or reconnect
+// alike), so this isn't covering that.
+const RESYNC_FALLBACK_INTERVAL_MS = 3 * 60 * 1000;
 
 async function main(): Promise<void> {
   const params = new URLSearchParams(window.location.search);
@@ -46,7 +60,19 @@ async function main(): Promise<void> {
   }
 
   const renderer = new Renderer(root!, assetsDomain);
-  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  let fallbackTimer: ReturnType<typeof setInterval> | undefined;
+
+  // (Re-)arms the catch-up snapshot request -- called on every seq-guarded
+  // broadcast (see isSeqGuardedMessage), so it only ever actually fires
+  // RESYNC_SETTLE_MS after activity goes quiet, not on a fixed cadence.
+  function armSettleTimer(): void {
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      settleTimer = undefined;
+      connection.send({ action: "room:snapshot:request", roomId });
+    }, RESYNC_SETTLE_MS);
+  }
 
   const connection = new ResilientConnection({
     wsUrl,
@@ -57,18 +83,19 @@ async function main(): Promise<void> {
       // re-request the current state rather than assume anything survived.
       connection.send({ action: "room:snapshot:request", roomId });
 
-      // (Re-)armed here rather than started once outside onOpen -- onOpen
-      // already fires on every reconnect (proactive swap or drop/retry), so
-      // arming from inside it guarantees no two overlapping intervals can
-      // ever run across a reconnect, and the first poll after a fresh
-      // connection always waits a full interval rather than piling up right
-      // behind the immediate request just above.
-      if (pollTimer) clearInterval(pollTimer);
-      pollTimer = setInterval(() => {
+      // Timers (re-)armed here rather than started once outside onOpen --
+      // onOpen already fires on every reconnect (proactive swap or
+      // drop/retry), so arming from inside it guarantees no two overlapping
+      // timers can ever run across a reconnect.
+      if (settleTimer) clearTimeout(settleTimer);
+      settleTimer = undefined;
+      if (fallbackTimer) clearInterval(fallbackTimer);
+      fallbackTimer = setInterval(() => {
         connection.send({ action: "room:snapshot:request", roomId });
-      }, SNAPSHOT_POLL_INTERVAL_MS);
+      }, RESYNC_FALLBACK_INTERVAL_MS);
     },
     onMessage: (message: ServerMessage) => {
+      if (isSeqGuardedMessage(message.type)) armSettleTimer();
       switch (message.type) {
         case "room:snapshot":
           renderer.setViewport({ roomId, ...message.viewport });

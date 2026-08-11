@@ -7,6 +7,7 @@ import {
   computeClockDisplay,
   localTimezone,
   extractYoutubeVideoId,
+  isSeqGuardedMessage,
 } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { CanvasView, MIN_ASSET_SIZE } from "./canvas";
@@ -98,14 +99,26 @@ if (
 // Everything that lives for exactly one room at a time -- torn down and
 // rebuilt on every room switch (Dashboard button, picking a different room,
 // browser back/forward). Kept in one mutable holder rather than scattered
-// Deliberately more conservative than browser-source's own poll (see that
-// app's main.ts) -- cost here scales with concurrent collaborator tabs per
-// room, not just one OBS source, and (unlike browser-source) a poll landing
-// mid-edit carries real correctness risk without the guards in canvas.ts's
-// setAssets. This is a slower defense-in-depth safety net for a
-// *collaborator's* drift, not the primary (already near-real-time) sync
-// path for this browser's own edits.
-const SNAPSHOT_POLL_INTERVAL_MS = 5000;
+// Self-heals a delta that lost its seq race and got silently dropped
+// server-side (see isSeqGuardedMessage's own doc comment for exactly which
+// broadcast types that applies to) -- see canvas.ts's setAssets for the
+// guards that keep an incoming snapshot from clobbering an in-progress local
+// edit, so a poll landing mid-drag/mid-edit is already safe regardless of
+// what triggers it.
+//
+// Activity-gated (armed by isSeqGuardedMessage broadcasts, see enterRoom's
+// armResyncSettleTimer) rather than a constant interval -- a drop can only
+// happen when something is actually racing, so an idle room gets zero polls.
+// A prior fixed-interval design (every 5s, forever, regardless of activity)
+// contributed meaningfully to a free-tier Lambda usage incident even at this
+// looser interval than browser-source's own (which was the dominant cause at
+// a much tighter 1s) -- see that app's main.ts for the fuller writeup.
+const RESYNC_SETTLE_MS = 3000;
+// Sparse fallback for a drop followed by total silence (no further
+// seq-guarded broadcast ever arrives to re-arm the settle timer) -- infrequent
+// enough to be nearly free. Reconnect gaps are already fully covered
+// separately (onOpen always re-requests a snapshot immediately).
+const RESYNC_FALLBACK_INTERVAL_MS = 3 * 60 * 1000;
 
 // How often to re-check the session while logged in. Each check slides the
 // session TTL and re-issues the cookie server-side (keeping a long-open tab's
@@ -135,12 +148,12 @@ interface RoomSession {
   // land -- world coords from a right-click, or undefined to default to
   // the viewport center.
   createPosition?: { x: number; y: number };
-  // Periodic room:snapshot:request poll (see the connection's onOpen below)
-  // -- self-heals any delta that lost its seq race against another message
-  // and got silently dropped server-side. Cleared in teardownCurrentRoom()
-  // so switching rooms doesn't leave a timer still polling a room this
-  // connection has left.
-  pollTimer?: ReturnType<typeof setInterval>;
+  // Activity-gated resync timers (see the connection's onOpen below and
+  // RESYNC_SETTLE_MS's own doc comment) -- both cleared in
+  // teardownCurrentRoom() so switching rooms doesn't leave either still
+  // polling a room this connection has left.
+  settleTimer?: ReturnType<typeof setTimeout>;
+  fallbackTimer?: ReturnType<typeof setInterval>;
   // Set true once the first room:snapshot of this session has been fed to the
   // stream-preview panel via enterRoom() (a one-time reset of local-only view
   // toggles -- embed/interactive/opacity). Later snapshots go through the
@@ -260,7 +273,8 @@ async function main(): Promise<void> {
 
   function teardownCurrentRoom(): void {
     if (!current) return;
-    if (current.pollTimer) clearInterval(current.pollTimer);
+    if (current.settleTimer) clearTimeout(current.settleTimer);
+    if (current.fallbackTimer) clearInterval(current.fallbackTimer);
     current.connection.stop();
     current.canvas.dispose();
     current.sidebar.dispose();
@@ -914,6 +928,17 @@ function enterRoom(
     onSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
   });
 
+  // (Re-)arms the catch-up snapshot request -- called on every seq-guarded
+  // broadcast (see isSeqGuardedMessage), so it only ever actually fires
+  // RESYNC_SETTLE_MS after activity goes quiet, not on a fixed cadence.
+  function armResyncSettleTimer(): void {
+    if (room.settleTimer) clearTimeout(room.settleTimer);
+    room.settleTimer = setTimeout(() => {
+      room.settleTimer = undefined;
+      connection.send({ action: "room:snapshot:request", roomId });
+    }, RESYNC_SETTLE_MS);
+  }
+
   const connection = new ResilientConnection({
     wsUrl,
     roomId,
@@ -922,20 +947,19 @@ function enterRoom(
     onOpen: () => {
       connection.send({ action: "room:snapshot:request", roomId });
 
-      // (Re-)armed here rather than started once outside onOpen -- onOpen
-      // already fires on every reconnect (proactive swap or drop/retry), so
-      // arming from inside it guarantees no two overlapping intervals can
-      // ever run across a reconnect. Self-heals any delta that lost its seq
-      // race against another message and got silently dropped server-side
-      // (see roomState.ts's per-asset conditional write) -- see
-      // canvas.ts's setAssets for the guards that keep this from clobbering
-      // an in-progress local edit.
-      if (room.pollTimer) clearInterval(room.pollTimer);
-      room.pollTimer = setInterval(() => {
+      // Timers (re-)armed here rather than started once outside onOpen --
+      // onOpen already fires on every reconnect (proactive swap or
+      // drop/retry), so arming from inside it guarantees no two overlapping
+      // timers can ever run across a reconnect.
+      if (room.settleTimer) clearTimeout(room.settleTimer);
+      room.settleTimer = undefined;
+      if (room.fallbackTimer) clearInterval(room.fallbackTimer);
+      room.fallbackTimer = setInterval(() => {
         connection.send({ action: "room:snapshot:request", roomId });
-      }, SNAPSHOT_POLL_INTERVAL_MS);
+      }, RESYNC_FALLBACK_INTERVAL_MS);
     },
     onMessage: (message: ServerMessage) => {
+      if (isSeqGuardedMessage(message.type)) armResyncSettleTimer();
       switch (message.type) {
         case "room:snapshot":
           canvas.setViewport({ roomId, ...message.viewport });

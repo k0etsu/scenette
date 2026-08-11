@@ -303,6 +303,29 @@ export type ServerMessage =
   | { type: "presence:left"; username: string; connectedAt: string }
   | { type: "error"; message: string };
 
+// The subset of broadcast types whose corresponding server-side write can be
+// silently dropped by a losing seq race -- see roomState.ts's conditional
+// writes (moveAsset/resizeAsset/updateAsset/setGlobalVolume/
+// setStreamPreviewSettings all `if (result === "stale") break;` with no
+// broadcast at all when they lose). asset:added/asset:deleted/variable:*
+// deliberately excluded: those are plain unconditional writes (a fresh
+// randomUUID for add, a delete-by-key with no staleness check) with no race
+// to silently lose. Shared here so control-ui's and browser-source's
+// resync-poll logic (see each app's main.ts) agree on exactly which incoming
+// broadcasts indicate "activity that could plausibly need a catch-up
+// snapshot", rather than each maintaining its own list that could drift.
+const SEQ_GUARDED_MESSAGE_TYPES: ReadonlySet<ServerMessage["type"]> = new Set([
+  "asset:moved",
+  "asset:resized",
+  "asset:updated",
+  "room:globalVolumeChanged",
+  "room:streamPreviewSettingsChanged",
+] satisfies ServerMessage["type"][]);
+
+export function isSeqGuardedMessage(type: ServerMessage["type"]): boolean {
+  return SEQ_GUARDED_MESSAGE_TYPES.has(type);
+}
+
 // Untrusted input arrives as raw JSON off the wire — validate the shape
 // before trusting any field, per this project's system-boundary rule.
 export function parseClientMessage(raw: string): ClientMessage {

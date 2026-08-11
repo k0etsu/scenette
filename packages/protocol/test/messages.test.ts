@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseClientMessage, isValidYoutubeVideoId, extractYoutubeVideoId } from "../src/messages";
+import { parseClientMessage, isValidYoutubeVideoId, extractYoutubeVideoId, isSeqGuardedMessage } from "../src/messages";
 
 function send(body: unknown): ReturnType<typeof parseClientMessage> {
   return parseClientMessage(JSON.stringify(body));
@@ -578,5 +578,29 @@ describe("extractYoutubeVideoId", () => {
     ["a malformed video id", `https://www.youtube.com/watch?v=short`],
   ])("returns undefined for %s", (_label, url) => {
     expect(extractYoutubeVideoId(url)).toBeUndefined();
+  });
+});
+
+describe("isSeqGuardedMessage", () => {
+  it.each(["asset:moved", "asset:resized", "asset:updated", "room:globalVolumeChanged", "room:streamPreviewSettingsChanged"])(
+    "returns true for %s -- a losing seq race silently drops it with no broadcast",
+    (type) => {
+      expect(isSeqGuardedMessage(type as never)).toBe(true);
+    }
+  );
+
+  it.each([
+    "asset:added",
+    "asset:deleted",
+    "asset:stopped",
+    "asset:seeked",
+    "variable:updated",
+    "variable:deleted",
+    "presence:joined",
+    "presence:left",
+    "error",
+    "room:snapshot",
+  ])("returns false for %s -- an unconditional write, or already its own no-drop broadcast, with no race to lose", (type) => {
+    expect(isSeqGuardedMessage(type as never)).toBe(false);
   });
 });
