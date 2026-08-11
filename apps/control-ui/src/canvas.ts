@@ -1007,13 +1007,22 @@ export class CanvasView {
     content.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
     // See YOUTUBE_NATIVE_WIDTH's doc comment -- content stays a fixed
     // 1280x720 (its real pixel size, for YouTube's benefit) and is instead
-    // CSS-scaled to visually fit the asset's actual box. Non-uniform scale
-    // (not a single shared factor like streamPreview.ts's room-wide embed)
-    // since an individual asset can be resized to any aspect ratio, same as
-    // a plain <video>'s content already stretching non-uniformly to fill
-    // its box today.
+    // CSS-scaled to visually fit the asset's actual box. The box itself
+    // resizes completely freely, same as every other asset type -- only a
+    // *uniform* scale is applied (the smaller of the two axis ratios,
+    // exactly what CSS object-fit: contain does, which is what
+    // #canvas-container's own img/video rule already uses), then the
+    // scaled-down 1280x720 content is centered within the box. This is
+    // deliberately NOT the same as image/video, whose content stretches
+    // non-uniformly via width/height: 100% -- an iframe's actual internal
+    // layout doesn't reflow to an arbitrary box shape the way a raster
+    // image or a native <video> element's pixels do, so a non-uniform
+    // scale here would visibly distort YouTube's own UI chrome.
     if (asset.type === "youtube") {
-      content.style.transform = `scale(${asset.width / YOUTUBE_NATIVE_WIDTH}, ${asset.height / YOUTUBE_NATIVE_HEIGHT})`;
+      const scale = Math.min(asset.width / YOUTUBE_NATIVE_WIDTH, asset.height / YOUTUBE_NATIVE_HEIGHT);
+      const offsetX = (asset.width - YOUTUBE_NATIVE_WIDTH * scale) / 2;
+      const offsetY = (asset.height - YOUTUBE_NATIVE_HEIGHT * scale) / 2;
+      content.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
     }
     if (asset.type === "text" || asset.type === "clock") {
       if (asset.type === "clock") {
@@ -1513,31 +1522,8 @@ export class CanvasView {
     const anchorX = corner === "ne" || corner === "se" ? asset.x : asset.x + asset.width;
     const anchorY = corner === "sw" || corner === "se" ? asset.y : asset.y + asset.height;
 
-    let rawWidth = corner === "ne" || corner === "se" ? asset.width + dx : asset.width - dx;
-    let rawHeight = corner === "sw" || corner === "se" ? asset.height + dy : asset.height - dy;
-
-    // youtube stays locked to its native 16:9 -- an arbitrarily-stretched
-    // embed would just show letterboxing/cropping inside the actual
-    // rendered iframe, unlike video/image which genuinely stretch their
-    // visual content to fill any box shape. Driven by whichever axis moved
-    // more (proportionally) so a diagonal drag still feels natural
-    // regardless of which direction the user leans on.
-    if (asset.type === "youtube") {
-      rawWidth = Math.max(1, rawWidth);
-      rawHeight = Math.max(1, rawHeight);
-      const aspectRatio = YOUTUBE_NATIVE_WIDTH / YOUTUBE_NATIVE_HEIGHT;
-      if (Math.abs(dx) >= Math.abs(dy) * aspectRatio) {
-        rawHeight = rawWidth / aspectRatio;
-      } else {
-        rawWidth = rawHeight * aspectRatio;
-      }
-      // Scale both dimensions together (not independently) once either dips
-      // below the minimum, so the floor never distorts the locked ratio.
-      const scaleNeeded = Math.max(MIN_ASSET_SIZE / rawWidth, MIN_ASSET_SIZE / rawHeight, 1);
-      rawWidth *= scaleNeeded;
-      rawHeight *= scaleNeeded;
-    }
-
+    const rawWidth = corner === "ne" || corner === "se" ? asset.width + dx : asset.width - dx;
+    const rawHeight = corner === "sw" || corner === "se" ? asset.height + dy : asset.height - dy;
     const width = Math.max(MIN_ASSET_SIZE, rawWidth);
     const height = Math.max(MIN_ASSET_SIZE, rawHeight);
 

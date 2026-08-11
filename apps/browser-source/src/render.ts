@@ -312,12 +312,17 @@ export class Renderer {
     if (asset.type === "youtube") {
       // Scaled from `rendered`, not `asset`, so the embed grows/shrinks in
       // lockstep with the same drag/resize smoothing every other asset type
-      // gets (see tick()) -- see YOUTUBE_NATIVE_WIDTH's doc comment for why
-      // the wrapper itself stays a fixed native size.
+      // gets (see tick()). Uniform scale (object-fit: contain's own
+      // behavior -- see createElement's `el.style.objectFit = "contain"`
+      // for image/video, matching control-ui's canvas.ts) -- the box
+      // itself can be any shape, but a non-uniform
+      // scale would visibly distort YouTube's iframe UI chrome, unlike a
+      // raster image/native video's pixels which stretch cleanly.
       if (entry.ytWrapper) {
-        const scaleX = entry.rendered.width / YOUTUBE_NATIVE_WIDTH;
-        const scaleY = entry.rendered.height / YOUTUBE_NATIVE_HEIGHT;
-        entry.ytWrapper.style.transform = `scale(${scaleX}, ${scaleY})`;
+        const scale = Math.min(entry.rendered.width / YOUTUBE_NATIVE_WIDTH, entry.rendered.height / YOUTUBE_NATIVE_HEIGHT);
+        const offsetX = (entry.rendered.width - YOUTUBE_NATIVE_WIDTH * scale) / 2;
+        const offsetY = (entry.rendered.height - YOUTUBE_NATIVE_HEIGHT * scale) / 2;
+        entry.ytWrapper.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
       }
       // Same ended-suppression concern as native video/audio above -- the
       // controller's onEnded callback (see createElement) sets the same

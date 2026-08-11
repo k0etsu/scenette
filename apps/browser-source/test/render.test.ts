@@ -389,10 +389,14 @@ describe("youtube asset", () => {
     expect(wrapper.style.height).toBe("720px");
   });
 
-  it("CSS-scales the wrapper non-uniformly to fit the rendered (interpolated) box -- snaps immediately on first appearance, nothing to interpolate from yet", () => {
+  it("letterboxes (uniform scale, contain-style) rather than stretching non-uniformly -- snaps immediately on first appearance, nothing to interpolate from yet", () => {
     const renderer = new Renderer(root, "assets.example.com");
+    // Box isn't 16:9 -- height (180) is the binding constraint for a
+    // 640-wide box, matching CSS object-fit: contain.
     renderer.upsert(makeAsset({ type: "youtube", width: 640, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
-    expect(ytWrapper().style.transform).toBe("scale(0.5, 0.25)"); // 640/1280, 180/720
+    const scale = 180 / 720; // 0.25
+    const offsetX = (640 - 1280 * scale) / 2; // 160
+    expect(ytWrapper().style.transform).toBe(`translate(${offsetX}px, 0px) scale(${scale})`);
   });
 
   it("stop() does not throw for a youtube asset (player not necessarily ready yet)", () => {

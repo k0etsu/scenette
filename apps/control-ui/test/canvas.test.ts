@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Asset } from "@scenette/protocol";
-import { CanvasView, CanvasCallbacks, MIN_ASSET_SIZE } from "../src/canvas";
+import { CanvasView, CanvasCallbacks } from "../src/canvas";
 
 function makeAsset(overrides: Partial<Asset> = {}): Asset {
   return {
@@ -947,67 +947,52 @@ describe("youtube asset", () => {
     expect(ytWrapper().style.pointerEvents).toBe("none");
   });
 
-  it("keeps the locked 16:9 aspect ratio when corner-dragging to resize, even on a mixed diagonal drag", () => {
+  it("resizes freely via corner-drag, exactly like every other asset type -- the box shape is never constrained", () => {
     const { canvas, container } = setup();
     canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", x: 0, y: 0, width: 320, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
     canvas.selectAsset("yt1");
     const handle = container.querySelector('[data-role="resize-handle"][data-corner="se"]') as HTMLElement;
 
     handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-    // dx dominates -- height must be derived from the locked ratio, not dy.
     window.dispatchEvent(new MouseEvent("mousemove", { movementX: 160, movementY: 5 }));
     window.dispatchEvent(new MouseEvent("mouseup"));
 
     const asset = canvas.get("yt1")!;
     expect(asset.width).toBeCloseTo(480, 1);
-    expect(asset.height).toBeCloseTo(270, 1);
-    expect(asset.width / asset.height).toBeCloseTo(16 / 9, 5);
+    expect(asset.height).toBeCloseTo(185, 1); // dx and dy applied independently, same as video/image
   });
 
-  it("never lets the locked ratio distort at the minimum asset size", () => {
-    const { canvas, container } = setup();
-    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", x: 0, y: 0, width: 320, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
-    canvas.selectAsset("yt1");
-    const handle = container.querySelector('[data-role="resize-handle"][data-corner="se"]') as HTMLElement;
-
-    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-    window.dispatchEvent(new MouseEvent("mousemove", { movementX: -310, movementY: -170 }));
-    window.dispatchEvent(new MouseEvent("mouseup"));
-
-    const asset = canvas.get("yt1")!;
-    expect(asset.width).toBeGreaterThanOrEqual(MIN_ASSET_SIZE);
-    expect(asset.height).toBeGreaterThanOrEqual(MIN_ASSET_SIZE);
-    expect(asset.width / asset.height).toBeCloseTo(16 / 9, 5);
-  });
-
-  it("does not lock the aspect ratio for a plain video asset", () => {
-    const { canvas, container } = setup();
-    canvas.upsert(makeAsset({ assetId: "v1", type: "video", x: 0, y: 0, width: 320, height: 180 }));
-    canvas.selectAsset("v1");
-    const handle = container.querySelector('[data-role="resize-handle"][data-corner="se"]') as HTMLElement;
-
-    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
-    window.dispatchEvent(new MouseEvent("mousemove", { movementX: 160, movementY: 5 }));
-    window.dispatchEvent(new MouseEvent("mouseup"));
-
-    const asset = canvas.get("v1")!;
-    expect(asset.width).toBeCloseTo(480, 1);
-    expect(asset.height).toBeCloseTo(185, 1); // unlocked -- dy applied independently
-  });
-
-  it("CSS-scales the wrapper non-uniformly to fit the asset's actual box, rather than resizing it directly", () => {
+  it("letterboxes (uniform scale, contain-style) rather than stretching non-uniformly when the box isn't 16:9", () => {
     const { canvas } = setup();
+    // A box twice as wide as the native ratio would call for at that
+    // height -- 180px tall wants a 320px-wide 16:9 box, so height is the
+    // binding (smaller) constraint, exactly like CSS object-fit: contain.
     canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 640, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
-    expect(ytWrapper().style.transform).toBe("scale(0.5, 0.25)"); // 640/1280, 180/720
+    const wrapper = ytWrapper();
+    const scale = 180 / 720; // 0.25 -- the binding axis
+    const offsetX = (640 - 1280 * scale) / 2; // 160
+    expect(wrapper.style.transform).toBe(`translate(${offsetX}px, 0px) scale(${scale})`);
   });
 
-  it("recomputes the scale when the asset is resized", () => {
+  it("centers the letterboxed content within the box on both axes", () => {
+    const { canvas } = setup();
+    // width is the binding constraint here (320 -> exactly matches a
+    // 180-tall 16:9 box already, but shrink height further to force
+    // vertical centering with offsetY > 0 while offsetX stays 0).
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 320, height: 360, youtubeVideoId: "dQw4w9WgXcQ" }));
+    const wrapper = ytWrapper();
+    const scale = 320 / 1280; // 0.25 -- width is binding
+    const offsetY = (360 - 720 * scale) / 2; // 90
+    expect(wrapper.style.transform).toBe(`translate(0px, ${offsetY}px) scale(${scale})`);
+  });
+
+  it("recomputes the letterboxed scale when the asset is resized", () => {
     const { canvas } = setup();
     canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 1280, height: 720, youtubeVideoId: "dQw4w9WgXcQ" }));
-    expect(ytWrapper().style.transform).toBe("scale(1, 1)");
+    expect(ytWrapper().style.transform).toBe("translate(0px, 0px) scale(1)");
 
     canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 256, height: 144, youtubeVideoId: "dQw4w9WgXcQ" }));
-    expect(ytWrapper().style.transform).toBe("scale(0.2, 0.2)");
+    expect(ytWrapper().style.transform).toBe("translate(0px, 0px) scale(0.2)");
   });
 
   it("stopAsset patches paused: true and does not throw even though the player isn't necessarily ready yet", () => {
