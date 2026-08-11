@@ -1,4 +1,21 @@
-import { Asset, Variable, Viewport, computeClockDisplay, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
+import {
+  Asset,
+  Variable,
+  Viewport,
+  computeClockDisplay,
+  interpolateText,
+  resolveTextStyle,
+  textStyleToCss,
+  createYoutubePlayerController,
+  YoutubePlayerController,
+} from "@scenette/protocol";
+
+// Same fixed-native-size + CSS-scale technique as control-ui's canvas.ts --
+// see its own YOUTUBE_NATIVE_WIDTH doc comment for the full rationale
+// (keeping the player's real pixel size constant so YouTube's auto-quality
+// heuristic isn't misled by a small on-screen display size).
+const YOUTUBE_NATIVE_WIDTH = 1280;
+const YOUTUBE_NATIVE_HEIGHT = 720;
 
 // Renders viewport-relative coordinates: an asset at world position (x,y)
 // is drawn at (x - viewport.x, y - viewport.y) so the OBS canvas only ever
@@ -8,6 +25,21 @@ interface Entry {
   el: HTMLElement;
   asset: Asset; // latest known true state (the interpolation target)
   rendered: { x: number; y: number; width: number; height: number }; // what's actually on screen right now
+  // Set by the "ended" listener (see createElement) when a non-looping
+  // video/audio naturally finishes -- this connection is read-only (no
+  // session, blocked from asset:update server-side, see
+  // services/websocket-handlers/src/message.ts), so unlike control-ui it
+  // can never send the corrected `paused: true` itself. Suppresses
+  // syncMediaState's play-branch locally until the server's own paused/loop
+  // state actually catches up (via some other connection's patch) or loop
+  // gets turned on, preventing the browser's native "play() on an ended
+  // element restarts it from 0" behavior from looping the asset forever.
+  endedWhileNotLooping?: boolean;
+  // youtube assets only -- the fixed-1280x720 wrapper (a child of `el`,
+  // CSS-scaled to fit the asset's rendered/interpolated box) and the live
+  // player controller. See canvas.ts's identical technique.
+  ytWrapper?: HTMLElement;
+  ytController?: YoutubePlayerController;
 }
 
 // Position/size updates arrive discretely (throttled to ~25/sec on the
@@ -75,6 +107,13 @@ export class Renderer {
         // Only ever touches .volume -- see applyVolume for why this must
         // NOT go through the full syncMediaState (loop/play/pause/mute).
         applyVolume(entry.el as HTMLMediaElement, this.effectiveVolume(entry.asset));
+      } else if (entry.ytController) {
+        // No equivalent volume-only fast path needed here -- the
+        // controller's own sync() already only touches what actually
+        // differs (see youtubePlayer.ts), so it doesn't have the native
+        // syncMediaState play()-during-buffering race this volume-only
+        // path exists to avoid for video/audio.
+        entry.ytController.sync(entry.asset, this.effectiveVolume(entry.asset));
       }
     }
   }
@@ -118,6 +157,7 @@ export class Renderer {
     for (const [assetId, entry] of this.entries) {
       if (!seen.has(assetId)) {
         entry.el.remove();
+        entry.ytController?.destroy();
         this.entries.delete(assetId);
       }
     }
@@ -129,8 +169,15 @@ export class Renderer {
       // Type shouldn't change on an existing asset, but rebuild defensively rather
       // than leave a mismatched element (e.g. an <img> meant to be a <video>).
       entry?.el.remove();
-      const el = this.createElement(asset);
-      entry = { el, asset, rendered: { x: asset.x, y: asset.y, width: asset.width, height: asset.height } };
+      entry?.ytController?.destroy();
+      const { el, ytWrapper, ytController } = this.createElement(asset);
+      entry = {
+        el,
+        ytWrapper,
+        ytController,
+        asset,
+        rendered: { x: asset.x, y: asset.y, width: asset.width, height: asset.height },
+      };
       this.entries.set(asset.assetId, entry);
       this.root.appendChild(el);
       this.paint(entry); // first appearance snaps immediately, nothing to interpolate from
@@ -144,6 +191,7 @@ export class Renderer {
     const entry = this.entries.get(assetId);
     if (entry) {
       entry.el.remove();
+      entry.ytController?.destroy();
       this.entries.delete(assetId);
     }
   }
@@ -152,13 +200,18 @@ export class Renderer {
   // comment for why this is a pure ephemeral broadcast rather than a
   // persisted field: playback position isn't part of Asset at all, so
   // there's nothing for the accompanying asset:updated (paused: true) to
-  // carry here. Both video and audio have a real element here (unlike
-  // control-ui's own canvas preview, which never plays audio locally --
-  // see canvas.ts's own stopAsset), so both actually get reset.
+  // carry here. Both video and audio have a real element here, so both
+  // actually get reset.
   stop(assetId: string): void {
     const entry = this.entries.get(assetId);
-    if (!entry || (entry.asset.type !== "video" && entry.asset.type !== "audio")) return;
-    (entry.el as HTMLMediaElement).currentTime = 0;
+    if (!entry) return;
+    if (entry.asset.type === "video" || entry.asset.type === "audio") {
+      (entry.el as HTMLMediaElement).currentTime = 0;
+      entry.endedWhileNotLooping = false;
+    } else if (entry.asset.type === "youtube") {
+      entry.ytController?.seekToStart();
+      entry.endedWhileNotLooping = false;
+    }
   }
 
   private tick(): void {
@@ -235,12 +288,40 @@ export class Renderer {
       Object.assign(el.style, textStyleToCss(resolveTextStyle(asset)));
     }
     if (asset.type === "video" || asset.type === "audio") {
+      // See Entry.endedWhileNotLooping's doc comment -- once a non-looping
+      // asset has locally ended, skip re-syncing (which would otherwise
+      // call .play() again and browser-native-restart it from 0) until the
+      // server's own state actually says paused or loop, at which point
+      // this stops being relevant and normal syncing resumes.
+      if (entry.endedWhileNotLooping && !asset.paused && !asset.loop) return;
+      entry.endedWhileNotLooping = false;
       syncMediaState(el as HTMLMediaElement, asset, this.effectiveVolume(asset));
+    }
+    if (asset.type === "youtube") {
+      // Scaled from `rendered`, not `asset`, so the embed grows/shrinks in
+      // lockstep with the same drag/resize smoothing every other asset type
+      // gets (see tick()) -- see YOUTUBE_NATIVE_WIDTH's doc comment for why
+      // the wrapper itself stays a fixed native size.
+      if (entry.ytWrapper) {
+        const scaleX = entry.rendered.width / YOUTUBE_NATIVE_WIDTH;
+        const scaleY = entry.rendered.height / YOUTUBE_NATIVE_HEIGHT;
+        entry.ytWrapper.style.transform = `scale(${scaleX}, ${scaleY})`;
+      }
+      // Same ended-suppression concern as native video/audio above -- the
+      // controller's onEnded callback (see createElement) sets the same
+      // flag.
+      if (entry.endedWhileNotLooping && !asset.paused && !asset.loop) return;
+      entry.endedWhileNotLooping = false;
+      entry.ytController?.sync(asset, this.effectiveVolume(asset));
     }
   }
 
-  private createElement(asset: Asset): HTMLElement {
+  private createElement(
+    asset: Asset
+  ): { el: HTMLElement; ytWrapper?: HTMLElement; ytController?: YoutubePlayerController } {
     let el: HTMLElement;
+    let ytWrapper: HTMLElement | undefined;
+    let ytController: YoutubePlayerController | undefined;
     switch (asset.type) {
       case "image":
       case "gif": {
@@ -296,11 +377,47 @@ export class Renderer {
         el.style.whiteSpace = "pre";
         break;
       }
+      case "youtube": {
+        // See YOUTUBE_NATIVE_WIDTH's doc comment -- `el` is a plain
+        // positioned/sized box (paint() drives its geometry the same as
+        // every other asset type); `ytWrapper` nested inside it stays a
+        // fixed native size and is the only thing ever CSS-scaled.
+        el = document.createElement("div");
+        ytWrapper = document.createElement("div");
+        ytWrapper.style.position = "absolute";
+        ytWrapper.style.top = "0";
+        ytWrapper.style.left = "0";
+        ytWrapper.style.width = `${YOUTUBE_NATIVE_WIDTH}px`;
+        ytWrapper.style.height = `${YOUTUBE_NATIVE_HEIGHT}px`;
+        ytWrapper.style.transformOrigin = "0 0";
+        const mount = document.createElement("div");
+        mount.style.width = "100%";
+        mount.style.height = "100%";
+        ytWrapper.appendChild(mount);
+        el.appendChild(ytWrapper);
+        ytController = createYoutubePlayerController(mount, asset.youtubeVideoId ?? "", {
+          // Same rationale as the native "ended" listener below.
+          onEnded: () => {
+            const entry = this.entries.get(asset.assetId);
+            if (entry && !entry.asset.loop) entry.endedWhileNotLooping = true;
+          },
+        });
+        break;
+      }
     }
     el.dataset.assetType = asset.type;
     el.style.position = "absolute";
     el.style.objectFit = "contain";
-    return el;
+    if (asset.type === "video" || asset.type === "audio") {
+      // See Entry.endedWhileNotLooping's doc comment for why this is a
+      // local-only suppression flag rather than a server patch (this
+      // connection is read-only).
+      el.addEventListener("ended", () => {
+        const entry = this.entries.get(asset.assetId);
+        if (entry && !entry.asset.loop) entry.endedWhileNotLooping = true;
+      });
+    }
+    return { el, ytWrapper, ytController };
   }
 
   // Media lives in the assets bucket/distribution, a completely separate

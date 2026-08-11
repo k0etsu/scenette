@@ -1,4 +1,15 @@
-import { Asset, AssetPatch, Variable, Viewport, computeClockDisplay, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
+import {
+  Asset,
+  AssetPatch,
+  Variable,
+  Viewport,
+  computeClockDisplay,
+  interpolateText,
+  resolveTextStyle,
+  textStyleToCss,
+  createYoutubePlayerController,
+  YoutubePlayerController,
+} from "@scenette/protocol";
 import { ICON_AUDIO_LARGE } from "./icons";
 
 // How often clock assets re-render their computed time in the editor preview.
@@ -6,6 +17,19 @@ import { ICON_AUDIO_LARGE } from "./icons";
 // full requestAnimationFrame loop (browser-source uses rAF since it's a
 // dedicated always-visible overlay; the editor doesn't need that cadence).
 const CLOCK_TICK_INTERVAL_MS = 250;
+
+// A youtube asset's embed is held at this fixed native pixel size and only
+// ever CSS-scaled (never resized directly) to fit the asset's actual box --
+// same fixed-native-size + transform:scale() technique streamPreview.ts
+// already uses for the room-wide stream embed, and for the same reason:
+// keeping the iframe's own real pixel dimensions constant means YouTube's
+// auto-quality heuristic (which partly follows the player's actual size,
+// not its visual CSS size) isn't misled into serving a low-resolution
+// stream just because the asset happens to be displayed small on the
+// canvas. 1280x720 (720p) rather than streamPreview.ts's 1920x1080 --
+// this is a single embedded asset, not the whole stream frame.
+const YOUTUBE_NATIVE_WIDTH = 1280;
+const YOUTUBE_NATIVE_HEIGHT = 720;
 
 interface Entry {
   el: HTMLElement;
@@ -16,6 +40,17 @@ interface Entry {
   // the selection indicator right along with the asset, making it useless
   // for judging exactly how blurred the asset itself looks.
   content: HTMLElement;
+  // The actual playable element for video/audio -- for video this is the
+  // same element as `content`; for audio, `content` stays the visible icon
+  // placeholder and `media` is a separate, invisible <audio> element that
+  // drives real local playback (so a mod editing the room can hear what's
+  // playing, matching video). Undefined for every other asset type.
+  media?: HTMLMediaElement;
+  // youtube assets only -- the live YouTube IFrame Player controller (see
+  // packages/protocol/src/youtubePlayer.ts), playing in the editor for the
+  // same reason audio now does: a mod needs to know what's actually
+  // playing, not just see a placeholder.
+  ytController?: YoutubePlayerController;
   asset: Asset;
 }
 
@@ -457,11 +492,11 @@ export class CanvasView {
     return this.lastMouseWorld;
   }
 
-  // Deliberately touches only video elements' .volume, not a full
+  // Deliberately touches only video/audio elements' .volume, not a full
   // applyTransform() over every entry -- the sound panel's sliders fire
   // live on every drag tick, and re-running position/blur/etc for every
-  // non-video asset on each tick would be pure waste. Also deliberately
-  // uses applyVolume (not the full syncMediaState) for the same reason
+  // other asset on each tick would be pure waste. Also deliberately uses
+  // applyVolume (not the full syncMediaState) for the same reason
   // syncGlobalVolume does in browser-source's render.ts: routing a
   // volume-only change through the play/pause branch meant a volume drag
   // could re-issue .play() dozens of times a second on a video that was
@@ -473,8 +508,8 @@ export class CanvasView {
     this.globalVolume = globalVolume;
     this.localVolume = localVolume;
     for (const entry of this.entries.values()) {
-      if (entry.asset.type === "video") {
-        applyVolume(entry.content as HTMLVideoElement, this.effectiveVolume(entry.asset));
+      if (entry.media) {
+        applyVolume(entry.media, this.effectiveVolume(entry.asset));
       }
     }
   }
@@ -520,21 +555,17 @@ export class CanvasView {
   }
 
   // Pauses (synced to every client/browser-source, same as the ordinary
-  // pause button) and resets the actual local <video> element back to the
-  // start of its timeline -- and, via onAssetStop, tells every other
+  // pause button) and resets the actual local <video>/<audio> element back
+  // to the start of its timeline -- and, via onAssetStop, tells every other
   // connected client/browser-source to reset their own local playback
   // position too (see AssetStopMessage's protocol doc comment for why
   // that's a separate broadcast rather than part of the paused patch).
-  // Audio has no real media element here to reset locally (see
-  // applyTransform's own note -- actual audio only ever plays for viewers
-  // via browser-source, never in this editor's own preview), so there's
-  // nothing to seek for that type on this side; the pause half still
-  // applies, and browser-source's own copy still resets via the broadcast.
   stopAsset(assetId: string): void {
     const entry = this.entries.get(assetId);
     if (!entry) return;
     this.patchAsset(assetId, { paused: true });
-    if (entry.asset.type === "video") (entry.content as HTMLVideoElement).currentTime = 0;
+    if (entry.media) entry.media.currentTime = 0;
+    entry.ytController?.seekToStart();
     this.callbacks.onAssetStop(assetId);
   }
 
@@ -589,6 +620,7 @@ export class CanvasView {
     for (const [assetId, entry] of this.entries) {
       if (!seen.has(assetId)) {
         entry.el.remove();
+        entry.ytController?.destroy();
         this.entries.delete(assetId);
       }
     }
@@ -597,8 +629,8 @@ export class CanvasView {
   upsert(asset: Asset): void {
     let entry = this.entries.get(asset.assetId);
     if (!entry) {
-      const { el, content } = this.createElement(asset);
-      entry = { el, content, asset };
+      const { el, content, media, ytController } = this.createElement(asset);
+      entry = { el, content, media, ytController, asset };
       this.entries.set(asset.assetId, entry);
       this.world.appendChild(el);
     }
@@ -663,7 +695,8 @@ export class CanvasView {
   // as a "stop" it thinks is current).
   applyRemoteStop(assetId: string): void {
     const entry = this.entries.get(assetId);
-    if (entry?.asset.type === "video") (entry.content as HTMLVideoElement).currentTime = 0;
+    if (entry?.media) entry.media.currentTime = 0;
+    entry?.ytController?.seekToStart();
   }
 
   // Programmatic counterparts to mouse drag/resize, for the sidebar's
@@ -714,9 +747,9 @@ export class CanvasView {
     // twice more to force a retry. Volume never affects any other rendered
     // aspect, so applyVolume alone is exactly enough here, same as
     // setVolumeMultipliers already does for the sound panel's sliders.
-    const isVolumeOnlyVideoPatch = entry.asset.type === "video" && Object.keys(patch).length === 1 && "volume" in patch;
-    if (isVolumeOnlyVideoPatch) {
-      applyVolume(entry.content as HTMLVideoElement, this.effectiveVolume(entry.asset));
+    const isVolumeOnlyMediaPatch = Boolean(entry.media) && Object.keys(patch).length === 1 && "volume" in patch;
+    if (isVolumeOnlyMediaPatch) {
+      applyVolume(entry.media!, this.effectiveVolume(entry.asset));
     } else {
       this.applyTransform(entry, entry.asset);
     }
@@ -887,6 +920,7 @@ export class CanvasView {
     const entry = this.entries.get(assetId);
     if (entry) {
       entry.el.remove();
+      entry.ytController?.destroy();
       this.entries.delete(assetId);
     }
     if (this.selectedAssetId === assetId) {
@@ -915,6 +949,16 @@ export class CanvasView {
     // the selection outline, and a CSS filter blurs everything painted for
     // the element it's on, so applying it to `el` blurred the outline too.
     content.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
+    // See YOUTUBE_NATIVE_WIDTH's doc comment -- content stays a fixed
+    // 1280x720 (its real pixel size, for YouTube's benefit) and is instead
+    // CSS-scaled to visually fit the asset's actual box. Non-uniform scale
+    // (not a single shared factor like streamPreview.ts's room-wide embed)
+    // since an individual asset can be resized to any aspect ratio, same as
+    // a plain <video>'s content already stretching non-uniformly to fill
+    // its box today.
+    if (asset.type === "youtube") {
+      content.style.transform = `scale(${asset.width / YOUTUBE_NATIVE_WIDTH}, ${asset.height / YOUTUBE_NATIVE_HEIGHT})`;
+    }
     if (asset.type === "text" || asset.type === "clock") {
       if (asset.type === "clock") {
         // The live time; advanced continuously by tickClocks, but also set
@@ -936,13 +980,14 @@ export class CanvasView {
       // looks the same in the editor preview as it does to viewers.
       Object.assign(content.style, textStyleToCss(resolveTextStyle(asset)));
     }
-    // The editor's own preview never actually played video -- only
-    // browser-source synced .loop/.muted/.volume/.play()/.pause() from the
-    // asset's playback fields. Audio has no real media element here (the
-    // canvas shows a placeholder icon; actual audio only plays for viewers
-    // via browser-source), so only video needs this.
-    if (asset.type === "video") {
-      syncMediaState(content as HTMLVideoElement, asset, this.effectiveVolume(asset));
+    // Real local playback for video and (see Entry.media's doc comment)
+    // audio, so a mod editing the room can see/hear what's actually
+    // playing rather than relying solely on browser-source's own copy.
+    if (entry.media) {
+      syncMediaState(entry.media, asset, this.effectiveVolume(asset));
+    }
+    if (entry.ytController) {
+      entry.ytController.sync(asset, this.effectiveVolume(asset));
     }
     // The canvas always shows every asset regardless of the true `visible`
     // flag (viewport-intersection + hidden) -- unlike browser-source, the
@@ -953,8 +998,12 @@ export class CanvasView {
     el.style.opacity = String(asset.hidden ? asset.opacity * 0.4 : asset.opacity);
   }
 
-  private createElement(asset: Asset): { el: HTMLElement; content: HTMLElement } {
+  private createElement(
+    asset: Asset
+  ): { el: HTMLElement; content: HTMLElement; media?: HTMLMediaElement; ytController?: YoutubePlayerController } {
     let content: HTMLElement;
+    let media: HTMLMediaElement | undefined;
+    let ytController: YoutubePlayerController | undefined;
     switch (asset.type) {
       case "image":
       case "gif": {
@@ -974,15 +1023,24 @@ export class CanvasView {
         // looks exactly like our own drag breaking after one tick.
         video.draggable = false;
         content = video;
+        media = video;
         break;
       }
       case "audio": {
-        const audio = document.createElement("div");
-        audio.style.display = "flex";
-        audio.style.alignItems = "center";
-        audio.style.justifyContent = "center";
-        audio.innerHTML = ICON_AUDIO_LARGE;
-        content = audio;
+        // The icon stays the visible content (so an audio asset is still
+        // identifiable at a glance) -- a real, invisible <audio> element
+        // alongside it is what actually plays (see Entry.media's doc
+        // comment).
+        const icon = document.createElement("div");
+        icon.style.display = "flex";
+        icon.style.alignItems = "center";
+        icon.style.justifyContent = "center";
+        icon.innerHTML = ICON_AUDIO_LARGE;
+        content = icon;
+        const audio = document.createElement("audio");
+        if (asset.s3Key) audio.src = this.mediaUrl(asset.s3Key);
+        audio.style.display = "none";
+        media = audio;
         break;
       }
       case "text": {
@@ -1016,11 +1074,35 @@ export class CanvasView {
         content.style.whiteSpace = "pre";
         break;
       }
+      case "youtube": {
+        // See YOUTUBE_NATIVE_WIDTH's doc comment -- fixed native size, CSS-
+        // scaled in applyTransform rather than stretched to fill `el` the
+        // normal way (hence excluded from the generic 100% block below).
+        const wrapper = document.createElement("div");
+        wrapper.style.width = `${YOUTUBE_NATIVE_WIDTH}px`;
+        wrapper.style.height = `${YOUTUBE_NATIVE_HEIGHT}px`;
+        wrapper.style.transformOrigin = "0 0";
+        content = wrapper;
+        const mount = document.createElement("div");
+        mount.style.width = "100%";
+        mount.style.height = "100%";
+        wrapper.appendChild(mount);
+        ytController = createYoutubePlayerController(mount, asset.youtubeVideoId ?? "", {
+          // Same rationale as the native "ended" listener below -- see its
+          // comment for the full mechanism.
+          onEnded: () => {
+            const entry = this.entries.get(asset.assetId);
+            if (entry && !entry.asset.loop) this.patchAsset(asset.assetId, { paused: true });
+          },
+        });
+        break;
+      }
     }
     content.dataset.assetType = asset.type;
     // Text and clock assets are sized by their own content, not stretched to
-    // fill `el` -- see the "text"/"clock" cases above.
-    if (asset.type !== "text" && asset.type !== "clock") {
+    // fill `el` -- see the "text"/"clock" cases above. youtube stays fixed
+    // native size -- see the "youtube" case above.
+    if (asset.type !== "text" && asset.type !== "clock" && asset.type !== "youtube") {
       content.style.width = "100%";
       content.style.height = "100%";
     }
@@ -1034,7 +1116,23 @@ export class CanvasView {
     if (asset.type === "text") {
       content.addEventListener("dblclick", (event) => this.beginInlineTextEdit(event, asset.assetId, content));
     }
-    return { el, content };
+    if (media && media !== content) el.appendChild(media);
+    if (media) {
+      // Nothing anywhere marks asset.paused true when a non-looping
+      // video/audio naturally reaches its end -- without this, the next
+      // syncMediaState call still sees "should be playing" and calls
+      // .play() again, which browsers auto-restart from currentTime 0 on
+      // an ended element, reading as an unwanted loop regardless of the
+      // actual loop setting. Sending the real paused patch here (rather
+      // than just setting a local flag) is what actually fixes it for
+      // every connected client/browser-source, not just this one -- see
+      // the plan's diagnosis for the full mechanism.
+      media.addEventListener("ended", () => {
+        const entry = this.entries.get(asset.assetId);
+        if (entry && !entry.asset.loop) this.patchAsset(asset.assetId, { paused: true });
+      });
+    }
+    return { el, content, media, ytController };
   }
 
   // Double-click-to-edit: makes the text element itself the editing
@@ -1474,7 +1572,8 @@ export class CanvasView {
   // so it can never drift out of sync with the sidebar, which reads from
   // this exact same Entry.
   private updateMediaControls(entry: Entry | undefined): void {
-    if (!entry || (entry.asset.type !== "video" && entry.asset.type !== "audio")) {
+    const hasPlayback = entry?.asset.type === "video" || entry?.asset.type === "audio" || entry?.asset.type === "youtube";
+    if (!entry || !hasPlayback) {
       this.mediaControls.style.display = "none";
       return;
     }
@@ -1538,7 +1637,7 @@ export class CanvasView {
 
 // See setVolumeMultipliers -- volume-only updates must never touch
 // loop/play/pause/mute, only used from there.
-function applyVolume(media: HTMLVideoElement, effectiveVolume: number): void {
+function applyVolume(media: HTMLMediaElement, effectiveVolume: number): void {
   if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
 }
 
@@ -1546,7 +1645,7 @@ function applyVolume(media: HTMLVideoElement, effectiveVolume: number): void {
 // state -- re-assigning .loop/.volume unconditionally is harmless, but
 // calling .play()/.pause() when already in that state can cause an
 // audible/visible stutter on some browsers.
-function syncMediaState(media: HTMLVideoElement, asset: Asset, effectiveVolume: number): void {
+function syncMediaState(media: HTMLMediaElement, asset: Asset, effectiveVolume: number): void {
   if (media.loop !== asset.loop) media.loop = asset.loop;
   applyVolume(media, effectiveVolume);
   if (asset.paused && !media.paused) {

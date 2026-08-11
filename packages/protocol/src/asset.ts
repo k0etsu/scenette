@@ -1,6 +1,6 @@
 import { ClockFields } from "./clock";
 
-export type AssetType = "image" | "gif" | "video" | "audio" | "text" | "clock";
+export type AssetType = "image" | "gif" | "video" | "audio" | "text" | "clock" | "youtube";
 
 // Clock-type assets additionally carry the ClockFields (mode/target/timezone/
 // etc., all optional) -- they're ignored for every other type, exactly like
@@ -48,6 +48,11 @@ export interface Asset extends ClockFields {
   // Media assets reference their S3 object; text assets carry inline content instead.
   s3Key?: string;
   text?: string;
+  // youtube assets only: the parsed 11-character YouTube video ID (not a
+  // raw URL) -- set once at creation (see extractYoutubeVideoId), never
+  // patched in place. Deterministically rebuilds the embed URL client-side
+  // rather than trusting a stored URL that could point anywhere.
+  youtubeVideoId?: string;
   // User-assigned label shown in the objects list/properties header, purely
   // for finding the asset in a busy room -- distinct from `text` (a text
   // asset's own rendered content). Falls back to a derived label (filename,

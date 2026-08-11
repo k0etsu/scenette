@@ -743,6 +743,15 @@
         align-items: center;
         justify-content: center;
       }
+      #youtube-url-modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        background: rgba(0, 0, 0, 0.5);
+        align-items: center;
+        justify-content: center;
+      }
       .settings-input {
         display: block;
         width: 100%;
@@ -1041,7 +1050,9 @@
         <button id="context-menu-text" type="button">Text</button>
         <button id="context-menu-media" type="button">Media</button>
         <button id="context-menu-clock" type="button">Clock</button>
+        <button id="context-menu-youtube" type="button">YouTube</button>
       </div>
+      <div id="youtube-url-modal"></div>
       <div id="access-modal"></div>
       <div id="stream-settings-modal"></div>
     </div>

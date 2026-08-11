@@ -246,6 +246,30 @@ describe("message handler -- asset:add server-verifies fileSize", () => {
   });
 });
 
+describe("message handler -- asset:add carries youtubeVideoId through, no S3 involvement", () => {
+  it("stores and broadcasts youtubeVideoId, and skips HeadObject entirely (no s3Key)", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(PutCommand).resolves({});
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(
+      event({
+        action: "asset:add",
+        roomId: "r1",
+        asset: { assetId: "yt1", type: "youtube", x: 0, y: 0, width: 480, height: 270, youtubeVideoId: "dQw4w9WgXcQ" },
+      }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(s3Mock.commandCalls(HeadObjectCommand)).toHaveLength(0);
+    const putCall = ddbMock.commandCalls(PutCommand)[0];
+    expect(putCall.args[0].input.Item?.youtubeVideoId).toBe("dQw4w9WgXcQ");
+    expect(putCall.args[0].input.Item?.fileSize).toBeUndefined();
+  });
+});
+
 describe("message handler -- asset:stop", () => {
   it("broadcasts asset:stopped with no DB write at all -- playback position is never persisted", async () => {
     ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });

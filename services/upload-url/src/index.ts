@@ -199,7 +199,9 @@ async function resolveSafeUrl(rawUrl: string): Promise<URL> {
 function inferAsset(contentType: string, url: URL): { type: "image" | "gif" | "video" | "audio"; contentType: string } | undefined {
   const normalized = contentType.split(";")[0]!.trim().toLowerCase();
   const mapped = CONTENT_TYPE_MAP[normalized];
-  if (mapped && mapped !== "text" && mapped !== "clock") return { type: mapped, contentType: normalized };
+  if (mapped && mapped !== "text" && mapped !== "clock" && mapped !== "youtube") {
+    return { type: mapped, contentType: normalized };
+  }
   const ext = url.pathname.slice(url.pathname.lastIndexOf(".")).toLowerCase();
   const fallbackType = EXTENSION_TO_TYPE[ext];
   if (!fallbackType) return undefined;

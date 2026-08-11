@@ -411,6 +411,16 @@ describe("Playback section (video/audio)", () => {
     expect(propertiesPanel.querySelector('[data-role="stop"]')).not.toBeNull();
   });
 
+  it("is shown for youtube assets too, with the same loop/play/pause/stop/volume controls", () => {
+    const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks());
+    sidebar.setAssets([makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" })]);
+    sidebar.setSelected("a1");
+    expect(propertiesPanel.querySelector('[data-role="play-pause"]')).not.toBeNull();
+    expect(propertiesPanel.querySelector('[data-role="stop"]')).not.toBeNull();
+    expect(propertiesPanel.querySelector('[data-role="loop"]')).not.toBeNull();
+    expect(propertiesPanel.querySelector('[data-role="volume"]')).not.toBeNull();
+  });
+
   it("the stop button delegates to onStop (the actual pause+seek-to-0 happens in the canvas, not here)", () => {
     const onStop = vi.fn();
     const sidebar = new Sidebar(objectsPanel, propertiesPanel, makeCallbacks({ onStop }));

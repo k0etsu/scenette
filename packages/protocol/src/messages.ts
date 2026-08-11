@@ -45,6 +45,7 @@ export interface AssetAddMessage {
     zIndex?: number;
     s3Key?: string;
     text?: string;
+    youtubeVideoId?: string;
     name?: string;
     // Optional so a plain new upload/text-add can omit them (server
     // defaults apply) while a client-side "duplicate" can carry over the
@@ -319,6 +320,9 @@ export function parseClientMessage(raw: string): ClientMessage {
       for (const key of ["x", "y", "width", "height"] as const) {
         if (typeof asset[key] !== "number") throw new Error(`Missing/invalid asset.${key}`);
       }
+      if (asset.type === "youtube" && !isValidYoutubeVideoId(asset.youtubeVideoId)) {
+        throw new Error("Missing/invalid asset.youtubeVideoId");
+      }
       return {
         action: "asset:add",
         roomId: msg.roomId,
@@ -333,6 +337,7 @@ export function parseClientMessage(raw: string): ClientMessage {
           zIndex: typeof asset.zIndex === "number" ? asset.zIndex : undefined,
           s3Key: typeof asset.s3Key === "string" ? asset.s3Key : undefined,
           text: typeof asset.text === "string" ? asset.text : undefined,
+          youtubeVideoId: isValidYoutubeVideoId(asset.youtubeVideoId) ? asset.youtubeVideoId : undefined,
           name: typeof asset.name === "string" ? asset.name : undefined,
           opacity: typeof asset.opacity === "number" ? asset.opacity : undefined,
           blur: typeof asset.blur === "number" ? asset.blur : undefined,
@@ -506,10 +511,46 @@ function isAssetType(value: unknown): value is AssetType {
     value === "video" ||
     value === "audio" ||
     value === "text" ||
-    value === "clock"
+    value === "clock" ||
+    value === "youtube"
   );
 }
 
 function isVariableType(value: unknown): value is VariableType {
   return value === "number" || value === "text";
+}
+
+// The shape of a YouTube video ID -- always exactly 11 characters from this
+// set, regardless of which URL format it was extracted from.
+export function isValidYoutubeVideoId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-zA-Z0-9_-]{11}$/.test(value);
+}
+
+// Parses the video ID out of every common YouTube URL shape (watch, share
+// link, shorts, and the embed URL itself), with or without "www.". Returns
+// undefined for anything else, including a bare video ID with no URL at all
+// -- callers that already have a bare ID don't need this. Shared between
+// control-ui's paste/context-menu entry points and the server's asset:add
+// validation so both agree on exactly what counts as "a YouTube URL".
+export function extractYoutubeVideoId(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  const host = parsed.hostname.replace(/^www\./, "");
+  let candidate: string | undefined;
+  if (host === "youtu.be") {
+    candidate = parsed.pathname.slice(1);
+  } else if (host === "youtube.com" || host === "m.youtube.com") {
+    if (parsed.pathname === "/watch") {
+      candidate = parsed.searchParams.get("v") ?? undefined;
+    } else if (parsed.pathname.startsWith("/shorts/")) {
+      candidate = parsed.pathname.slice("/shorts/".length);
+    } else if (parsed.pathname.startsWith("/embed/")) {
+      candidate = parsed.pathname.slice("/embed/".length);
+    }
+  }
+  return candidate && isValidYoutubeVideoId(candidate) ? candidate : undefined;
 }

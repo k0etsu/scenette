@@ -6,6 +6,7 @@ import {
   ClockFields,
   computeClockDisplay,
   localTimezone,
+  extractYoutubeVideoId,
 } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { CanvasView, MIN_ASSET_SIZE } from "./canvas";
@@ -18,6 +19,7 @@ import { UploadIndicator } from "./uploadIndicator";
 import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
 import { SettingsModal } from "./settingsModal";
+import { YoutubeUrlModal } from "./youtubeUrlModal";
 import { RoomPicker } from "./roomPicker";
 import { StreamPreviewPanel } from "./streamPreview";
 import { measureTextBoxSize } from "./textMeasure";
@@ -76,6 +78,8 @@ const contextMenu = document.getElementById("context-menu");
 const contextMenuTextButton = document.getElementById("context-menu-text");
 const contextMenuMediaButton = document.getElementById("context-menu-media");
 const contextMenuClockButton = document.getElementById("context-menu-clock");
+const contextMenuYoutubeButton = document.getElementById("context-menu-youtube");
+const youtubeUrlModalEl = document.getElementById("youtube-url-modal");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !loginHint ||
@@ -85,7 +89,8 @@ if (
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !uploadIndicatorEl || !manageAccessButton || !accessModalEl || !settingsModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
-  !contextMenuTextButton || !contextMenuMediaButton || !contextMenuClockButton
+  !contextMenuTextButton || !contextMenuMediaButton || !contextMenuClockButton ||
+  !contextMenuYoutubeButton || !youtubeUrlModalEl
 ) {
   throw new Error("Missing required DOM elements");
 }
@@ -388,6 +393,42 @@ async function main(): Promise<void> {
     });
   }
 
+  // No upload, no server round-trip for the video itself -- same shape as
+  // createTextAsset/createClockAsset above, not placeUploadedAsset's
+  // UploadResult-based path. There's no natural size to measure the way an
+  // uploaded file has (nothing is fetched here), so this defaults to a
+  // fixed 16:9 box matching the embed's own native 1280x720 ratio (see
+  // canvas.ts's YOUTUBE_NATIVE_WIDTH).
+  function createYoutubeAsset(videoId: string): void {
+    if (!current) return;
+    const width = 480;
+    const height = 270;
+    const viewport = current.canvas.getViewport();
+    const pos = current.createPosition ??
+      current.canvas.getCursorWorldPosition() ?? {
+        x: viewport.x + viewport.width / 2 - width / 2,
+        y: viewport.y + viewport.height / 2 - height / 2,
+      };
+    current.createPosition = undefined;
+
+    current.connection.send({
+      action: "asset:add",
+      roomId: current.roomId,
+      asset: {
+        assetId: crypto.randomUUID(),
+        type: "youtube",
+        x: pos.x,
+        y: pos.y,
+        width,
+        height,
+        youtubeVideoId: videoId,
+        // Matches the existing upload convention (see placeUploadedAsset) --
+        // starts paused rather than autoplaying immediately into the room.
+        paused: true,
+      },
+    });
+  }
+
   contextMenuTextButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     createTextAsset();
@@ -487,12 +528,27 @@ async function main(): Promise<void> {
       return;
     }
     const pastedUrl = extractMediaUrl(event.clipboardData);
-    if (pastedUrl) void handleUploadFromUrl(pastedUrl);
+    if (!pastedUrl) return;
+    // Checked before the generic upload-from-url path -- a YouTube page
+    // isn't a downloadable media file, so fetching it server-side the way
+    // an image/gif URL is would just fail.
+    const videoId = extractYoutubeVideoId(pastedUrl);
+    if (videoId) {
+      createYoutubeAsset(videoId);
+    } else {
+      void handleUploadFromUrl(pastedUrl);
+    }
   });
 
   contextMenuMediaButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     triggerMediaUpload();
+  });
+
+  const youtubeUrlModal = new YoutubeUrlModal(youtubeUrlModalEl!);
+  contextMenuYoutubeButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    youtubeUrlModal.open((videoId) => createYoutubeAsset(videoId));
   });
 
   contextMenuClockButton!.addEventListener("click", () => {
@@ -987,6 +1043,7 @@ function enterRoom(
       zIndex: source.zIndex,
       s3Key: source.s3Key,
       text: source.text,
+      youtubeVideoId: source.youtubeVideoId,
       name: source.name,
       opacity: source.opacity,
       blur: source.blur,

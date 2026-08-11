@@ -59,6 +59,8 @@ const TYPE_ICON: Record<AssetType, string> = {
   video: ICON_VIDEO,
   audio: ICON_AUDIO,
   clock: ICON_CLOCK,
+  // No dedicated icon yet -- reuses video's, same as gif reuses image's.
+  youtube: ICON_VIDEO,
 };
 
 // Objects list + properties panel — lets a streamer/mod adjust an existing
@@ -392,7 +394,7 @@ export class Sidebar {
       </div>
       ${asset.type === "text" ? textSettingsHtml(asset) : ""}
       ${asset.type === "clock" ? clockSettingsHtml(asset) : ""}
-      ${asset.type === "video" || asset.type === "audio" ? `
+      ${asset.type === "video" || asset.type === "audio" || asset.type === "youtube" ? `
         <div class="sidebar-header"><span>Playback</span></div>
         <div class="properties-buttons">
           <button type="button" data-role="play-pause" class="sidebar-icon-button playback-button">${asset.paused ? ICON_PLAY : ICON_PAUSE}</button>
@@ -554,7 +556,7 @@ export class Sidebar {
       if (current) patch({ flipY: !current.flipY });
     });
 
-    if (asset.type === "video" || asset.type === "audio") {
+    if (asset.type === "video" || asset.type === "audio" || asset.type === "youtube") {
       el<HTMLButtonElement>("play-pause").addEventListener("click", () => {
         const current = this.assets.get(assetId);
         if (current) patch({ paused: !current.paused });
@@ -1008,6 +1010,7 @@ function displayName(asset: Asset): string {
     return text.length > 24 ? text.slice(0, 24) + "…" : text || "(empty text)";
   }
   if (asset.type === "clock") return "Clock";
+  if (asset.type === "youtube") return "YouTube video";
   if (asset.s3Key) {
     const fileName = asset.s3Key.split("/").pop() ?? asset.s3Key;
     return fileName;

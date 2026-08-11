@@ -127,6 +127,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           paused: message.asset.paused ?? false,
           s3Key: message.asset.s3Key,
           text: message.asset.text,
+          youtubeVideoId: message.asset.youtubeVideoId,
           name: message.asset.name,
           fontFamily: message.asset.fontFamily,
           fontSize: message.asset.fontSize,

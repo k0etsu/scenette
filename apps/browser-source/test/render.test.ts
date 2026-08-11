@@ -224,6 +224,141 @@ describe("global volume (regression: playback going unresponsive during a volume
   });
 });
 
+// Regression coverage for the loop bug: this connection is read-only (no
+// session, blocked from asset:update server-side), so unlike control-ui it
+// can never patch the server's stale asset.paused itself when a video/audio
+// naturally ends -- it has to suppress the resulting auto-restart locally
+// instead (see Entry.endedWhileNotLooping's doc comment in render.ts).
+describe("media 'ended' event (loop-bug regression)", () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  });
+
+  it("stops re-issuing .play() after a non-looping video ends, even though asset.paused still (incorrectly) says false", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "video", paused: false, loop: false });
+    renderer.upsert(asset);
+    const video = root.querySelector("video") as HTMLVideoElement;
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+
+    video.dispatchEvent(new Event("ended"));
+    // A subsequent resync (e.g. the periodic room:snapshot poll) re-delivers
+    // the same stale asset -- this must not call .play() again.
+    renderer.upsert({ ...asset });
+
+    expect(playSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not suppress when the asset is set to loop", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "video", paused: false, loop: true });
+    renderer.upsert(asset);
+    const video = root.querySelector("video") as HTMLVideoElement;
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+
+    video.dispatchEvent(new Event("ended"));
+    renderer.upsert({ ...asset });
+
+    expect(playSpy).toHaveBeenCalled();
+  });
+
+  it("stops suppressing once the server's own state catches up with paused: true", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "video", paused: false, loop: false });
+    renderer.upsert(asset);
+    const video = root.querySelector("video") as HTMLVideoElement;
+    video.dispatchEvent(new Event("ended"));
+
+    // The corrected patch arrives (from some other, non-read-only
+    // connection) -- paused: true, so this render just applies the pause,
+    // no suppression needed or left behind.
+    renderer.upsert({ ...asset, paused: true, seq: 2 });
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+
+    // A later explicit resume (someone clicks Play again) must work normally.
+    renderer.upsert({ ...asset, paused: false, seq: 3 });
+
+    expect(playSpy).toHaveBeenCalled();
+  });
+
+  it("stop() clears the suppression so a later resume plays normally", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "video", paused: false, loop: false });
+    renderer.upsert(asset);
+    const video = root.querySelector("video") as HTMLVideoElement;
+    video.dispatchEvent(new Event("ended"));
+
+    renderer.stop("a1");
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+    renderer.upsert({ ...asset, seq: 2 });
+
+    expect(playSpy).toHaveBeenCalled();
+  });
+
+  it("also suppresses for a non-looping audio asset", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "audio", paused: false, loop: false });
+    renderer.upsert(asset);
+    const audio = root.querySelector("audio") as HTMLAudioElement;
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+
+    audio.dispatchEvent(new Event("ended"));
+    renderer.upsert({ ...asset });
+
+    expect(playSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("youtube asset", () => {
+  function ytWrapper(): HTMLElement {
+    return root.querySelector('[data-asset-type="youtube"]')!.firstElementChild as HTMLElement;
+  }
+
+  it("renders a fixed 1280x720 wrapper nested inside the positioned outer element, regardless of the asset's own box size", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", width: 320, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    const wrapper = ytWrapper();
+    expect(wrapper.style.width).toBe("1280px");
+    expect(wrapper.style.height).toBe("720px");
+  });
+
+  it("CSS-scales the wrapper non-uniformly to fit the rendered (interpolated) box -- snaps immediately on first appearance, nothing to interpolate from yet", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", width: 640, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(ytWrapper().style.transform).toBe("scale(0.5, 0.25)"); // 640/1280, 180/720
+  });
+
+  it("stop() does not throw for a youtube asset (player not necessarily ready yet)", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => renderer.stop("a1")).not.toThrow();
+  });
+
+  it("remove() destroys the youtube player controller without throwing", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => renderer.remove("a1")).not.toThrow();
+    expect(root.children).toHaveLength(0);
+  });
+
+  it("setAssets removing a youtube asset destroys its controller without throwing", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.setAssets([makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" })]);
+    expect(() => renderer.setAssets([])).not.toThrow();
+  });
+
+  it("setGlobalVolume does not throw for a youtube asset", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => renderer.setGlobalVolume(0.5, 1)).not.toThrow();
+  });
+});
+
 describe("text asset layout", () => {
   it("uses white-space: pre with no word-break/overflow-hiding, matching control-ui's canvas.ts exactly", () => {
     // Regression: this app's text styling drifted out of sync with
