@@ -246,6 +246,30 @@ describe("message handler -- asset:add server-verifies fileSize", () => {
   });
 });
 
+describe("message handler -- asset:add carries youtubeVideoId through, no S3 involvement", () => {
+  it("stores and broadcasts youtubeVideoId, and skips HeadObject entirely (no s3Key)", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(PutCommand).resolves({});
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(
+      event({
+        action: "asset:add",
+        roomId: "r1",
+        asset: { assetId: "yt1", type: "youtube", x: 0, y: 0, width: 480, height: 270, youtubeVideoId: "dQw4w9WgXcQ" },
+      }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(s3Mock.commandCalls(HeadObjectCommand)).toHaveLength(0);
+    const putCall = ddbMock.commandCalls(PutCommand)[0];
+    expect(putCall.args[0].input.Item?.youtubeVideoId).toBe("dQw4w9WgXcQ");
+    expect(putCall.args[0].input.Item?.fileSize).toBeUndefined();
+  });
+});
+
 describe("message handler -- asset:stop", () => {
   it("broadcasts asset:stopped with no DB write at all -- playback position is never persisted", async () => {
     ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
@@ -265,6 +289,44 @@ describe("message handler -- asset:stop", () => {
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+  });
+});
+
+describe("message handler -- asset:seek", () => {
+  it("broadcasts asset:seeked with no DB write at all -- playback position is never persisted", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(QueryCommand).resolves({ Items: [{ connectionId: "c2", roomId: "r1" }] });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(
+      event({ action: "asset:seek", roomId: "r1", assetId: "v1", positionSeconds: 42.5 }),
+      {} as any,
+      undefined as any
+    );
+
+    const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
+    const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
+    expect(payload).toEqual({ type: "asset:seeked", assetId: "v1", positionSeconds: 42.5 });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+  });
+
+  it("rejects a seek from an anonymous (read-only) connection, same as asset:stop", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow() });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    const res: any = await handler(
+      event({ action: "asset:seek", roomId: "r1", assetId: "v1", positionSeconds: 5 }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(res.statusCode).toBe(200);
+    const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
+    const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
+    expect(payload).toEqual({ type: "error", message: "This connection is read-only" });
   });
 });
 

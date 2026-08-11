@@ -43,6 +43,7 @@ function makeCallbacks(overrides: Partial<CanvasCallbacks> = {}): CanvasCallback
     onAssetPatch: vi.fn(),
     onAssetDelete: vi.fn(),
     onAssetStop: vi.fn(),
+    onAssetSeek: vi.fn(),
     onContextMenu: vi.fn(),
     onSelectionChange: vi.fn(),
     ...overrides,
@@ -361,6 +362,34 @@ describe("setAssets -- guarded reconciliation (regression: periodic/manual full-
     canvas.setAssets([]);
 
     expect(canvas.get("a1")).toBeUndefined();
+  });
+});
+
+describe("text variable interpolation", () => {
+  const v = (key: string, value: string) => ({ key, type: "number" as const, value, createdAt: "t" });
+
+  it("shows the interpolated value when not editing", () => {
+    const { canvas, container } = setup();
+    canvas.setVariables({ kills: v("kills", "5") });
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "kills: {kills}", seq: 5 }));
+    const div = container.querySelector('[data-asset-type="text"]') as HTMLElement;
+    expect(div.textContent).toBe("kills: 5");
+  });
+
+  it("keeps the raw {variable} template while inline-editing, even as variables change (reapplyText guard)", () => {
+    const { canvas, container } = setup();
+    canvas.setVariables({ kills: v("kills", "5") });
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text", text: "kills: {kills}", seq: 5 }));
+    const div = container.querySelector('[data-asset-type="text"]') as HTMLElement;
+
+    // Double-click to edit -> the editor shows the raw template, not "kills: 5".
+    div.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(div.textContent).toBe("kills: {kills}");
+
+    // A variable change (or the periodic room:snapshot resync, which calls
+    // setVariables) must NOT clobber the in-edit template with the value.
+    canvas.setVariables({ kills: v("kills", "9") });
+    expect(div.textContent).toBe("kills: {kills}");
   });
 });
 
@@ -819,6 +848,14 @@ describe("volume multipliers", () => {
     canvas.setVolumeMultipliers(0.9, 1);
     expect(playSpy).not.toHaveBeenCalled();
   });
+
+  it("applies the same multipliers to an audio asset's real (hidden) <audio> element", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "au1", type: "audio", volume: 0.8 }));
+    canvas.setVolumeMultipliers(0.5, 0.5);
+    const audio = document.querySelector('audio') as HTMLAudioElement;
+    expect(audio.volume).toBeCloseTo(0.2, 5); // 0.8 * 0.5 * 0.5
+  });
 });
 
 describe("patchAsset -- volume-only video patches bypass syncMediaState (regression)", () => {
@@ -867,12 +904,114 @@ describe("patchAsset -- volume-only video patches bypass syncMediaState (regress
     expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
   });
 
-  it("a volume-only patch on a non-video asset is unaffected (no media element to fast-path around)", () => {
+  it("a volume-only patch on an audio asset also takes the fast path, against the real <audio> element", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "au1", type: "audio", paused: false, volume: 0.5 }));
+    vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+
     canvas.patchAsset("au1", { volume: 0.9 });
+
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+    const audio = document.querySelector("audio") as HTMLAudioElement;
+    expect(audio.volume).toBeCloseTo(0.9, 5);
     expect(canvas.get("au1")?.volume).toBe(0.9);
     expect(callbacks.onAssetPatch).toHaveBeenCalledWith("au1", { volume: 0.9 }, expect.any(Number));
+  });
+
+  it("a volume-only patch on a non-media asset is unaffected (no media element to fast-path around)", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "im1", type: "image", volume: 0.5 }));
+    canvas.patchAsset("im1", { volume: 0.9 });
+    expect(canvas.get("im1")?.volume).toBe(0.9);
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("im1", { volume: 0.9 }, expect.any(Number));
+  });
+});
+
+describe("youtube asset", () => {
+  function ytWrapper(): HTMLElement {
+    return document.querySelector('[data-asset-type="youtube"]') as HTMLElement;
+  }
+
+  it("renders a fixed 1280x720 wrapper regardless of the asset's own box size, with a mount child filling it", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 320, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    const wrapper = ytWrapper();
+    expect(wrapper.style.width).toBe("1280px");
+    expect(wrapper.style.height).toBe("720px");
+    expect(wrapper.children).toHaveLength(1); // the mount div the YT player attaches into
+  });
+
+  it("disables pointer events on the wrapper -- regression: the YT iframe is a separate browsing context, so mouse events over it never bubble up to el's own mousedown listener, making the asset unclickable/undraggable", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(ytWrapper().style.pointerEvents).toBe("none");
+  });
+
+  it("resizes freely via corner-drag, exactly like every other asset type -- the box shape is never constrained", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", x: 0, y: 0, width: 320, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    canvas.selectAsset("yt1");
+    const handle = container.querySelector('[data-role="resize-handle"][data-corner="se"]') as HTMLElement;
+
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    window.dispatchEvent(new MouseEvent("mousemove", { movementX: 160, movementY: 5 }));
+    window.dispatchEvent(new MouseEvent("mouseup"));
+
+    const asset = canvas.get("yt1")!;
+    expect(asset.width).toBeCloseTo(480, 1);
+    expect(asset.height).toBeCloseTo(185, 1); // dx and dy applied independently, same as video/image
+  });
+
+  it("letterboxes (uniform scale, contain-style) rather than stretching non-uniformly when the box isn't 16:9", () => {
+    const { canvas } = setup();
+    // A box twice as wide as the native ratio would call for at that
+    // height -- 180px tall wants a 320px-wide 16:9 box, so height is the
+    // binding (smaller) constraint, exactly like CSS object-fit: contain.
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 640, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    const wrapper = ytWrapper();
+    const scale = 180 / 720; // 0.25 -- the binding axis
+    const offsetX = (640 - 1280 * scale) / 2; // 160
+    expect(wrapper.style.transform).toBe(`translate(${offsetX}px, 0px) scale(${scale})`);
+  });
+
+  it("centers the letterboxed content within the box on both axes", () => {
+    const { canvas } = setup();
+    // width is the binding constraint here (320 -> exactly matches a
+    // 180-tall 16:9 box already, but shrink height further to force
+    // vertical centering with offsetY > 0 while offsetX stays 0).
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 320, height: 360, youtubeVideoId: "dQw4w9WgXcQ" }));
+    const wrapper = ytWrapper();
+    const scale = 320 / 1280; // 0.25 -- width is binding
+    const offsetY = (360 - 720 * scale) / 2; // 90
+    expect(wrapper.style.transform).toBe(`translate(0px, ${offsetY}px) scale(${scale})`);
+  });
+
+  it("recomputes the letterboxed scale when the asset is resized", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 1280, height: 720, youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(ytWrapper().style.transform).toBe("translate(0px, 0px) scale(1)");
+
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 256, height: 144, youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(ytWrapper().style.transform).toBe("translate(0px, 0px) scale(0.2)");
+  });
+
+  it("stopAsset patches paused: true and does not throw even though the player isn't necessarily ready yet", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", paused: false, youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => canvas.stopAsset("yt1")).not.toThrow();
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("yt1", { paused: true }, expect.any(Number));
+  });
+
+  it("applyRemoteStop does not throw for a youtube asset", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => canvas.applyRemoteStop("yt1")).not.toThrow();
+  });
+
+  it("remove() destroys the youtube player controller without throwing", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => canvas.remove("yt1")).not.toThrow();
   });
 });
 
@@ -900,6 +1039,8 @@ describe("media-controls widget", () => {
       muted: root.querySelector('[data-role="mc-muted"]') as HTMLInputElement,
       volume: root.querySelector('[data-role="mc-volume"]') as HTMLInputElement,
       volumeLabel: root.querySelector('[data-role="mc-volume-label"]') as HTMLElement,
+      seek: root.querySelector('[data-role="mc-seek"]') as HTMLInputElement,
+      seekLabel: root.querySelector('[data-role="mc-seek-label"]') as HTMLElement,
     };
   }
 
@@ -929,6 +1070,13 @@ describe("media-controls widget", () => {
     canvas.upsert(makeAsset({ assetId: "i1", type: "image" }));
     canvas.selectAsset("i1");
     expect(widget(container).root.style.display).toBe("none");
+  });
+
+  it("shows for a selected youtube asset too", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    canvas.selectAsset("yt1");
+    expect(widget(container).root.style.display).toBe("block");
   });
 
   it("shows and reflects state for a selected video asset, and stays in sync with the sidebar's own patchAsset calls", () => {
@@ -1007,6 +1155,125 @@ describe("media-controls widget", () => {
   });
 });
 
+describe("media-controls widget -- seek slider", () => {
+  let now = 0;
+
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.useFakeTimers();
+    // Starts well past the throttle window (not 0) -- lastSeekSentAt also
+    // defaults to 0, and a mocked `now` of exactly 0 would make the very
+    // first send look like it's still within the window of a send that
+    // "already happened" at time 0, which is just a test-mock artifact
+    // (real performance.now() is never 0 by the time a user can click
+    // anything), not a real throttle-logic bug.
+    now = 1000;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function widget(container: HTMLElement) {
+    const root = container.parentElement!.querySelector('[data-role="media-controls"]') as HTMLElement;
+    return {
+      seek: root.querySelector('[data-role="mc-seek"]') as HTMLInputElement,
+      seekLabel: root.querySelector('[data-role="mc-seek-label"]') as HTMLElement,
+    };
+  }
+
+  it("reflects the selected video's current position/duration as soon as it's selected", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { value: 100, writable: true, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 25, writable: true, configurable: true });
+
+    canvas.selectAsset("v1");
+
+    const w = widget(container);
+    expect(w.seek.value).toBe("25");
+    expect(w.seekLabel.textContent).toBe("0:25 / 1:40");
+  });
+
+  it("dragging the slider seeks the local video immediately and sends a throttled asset:seek", () => {
+    const { canvas, container, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { value: 100, writable: true, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true, configurable: true });
+    canvas.selectAsset("v1");
+    const w = widget(container);
+
+    w.seek.value = "50";
+    w.seek.dispatchEvent(new Event("input"));
+
+    expect(video.currentTime).toBe(50);
+    expect(callbacks.onAssetSeek).toHaveBeenCalledWith("v1", 50);
+  });
+
+  it("throttles repeated input events, but the final 'change' on release always sends", () => {
+    const { canvas, container, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { value: 100, writable: true, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true, configurable: true });
+    canvas.selectAsset("v1");
+    const w = widget(container);
+
+    w.seek.value = "10";
+    w.seek.dispatchEvent(new Event("input"));
+    expect(callbacks.onAssetSeek).toHaveBeenCalledTimes(1);
+
+    // Still inside the throttle window -- local scrub applies, but no
+    // second network send yet.
+    now += 10;
+    w.seek.value = "12";
+    w.seek.dispatchEvent(new Event("input"));
+    expect(video.currentTime).toBe(12);
+    expect(callbacks.onAssetSeek).toHaveBeenCalledTimes(1);
+
+    // Release: "change" always force-sends the exact drop position,
+    // regardless of the throttle window.
+    w.seek.value = "15";
+    w.seek.dispatchEvent(new Event("change"));
+    expect(callbacks.onAssetSeek).toHaveBeenLastCalledWith("v1", 15);
+    expect(callbacks.onAssetSeek).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let the periodic position poll clobber the slider mid-drag", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { value: 100, writable: true, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true, configurable: true });
+    canvas.selectAsset("v1");
+    const w = widget(container);
+
+    w.seek.value = "40";
+    w.seek.dispatchEvent(new Event("input")); // starts the drag
+
+    // The video's real currentTime is now 40 (from the drag itself), but a
+    // background poll tick must not overwrite the slider the user is still
+    // actively holding, even though it would compute the same value here --
+    // the point is the guard, not this specific number.
+    vi.advanceTimersByTime(1000);
+
+    expect(w.seek.value).toBe("40");
+  });
+
+  it("falls back to 0 when duration hasn't loaded yet (no NaN)", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    canvas.selectAsset("v1"); // jsdom's fresh <video> has duration NaN by default
+
+    const w = widget(container);
+    expect(w.seek.value).toBe("0");
+    expect(w.seekLabel.textContent).toBe("0:00 / 0:00");
+  });
+});
+
 describe("stopAsset", () => {
   // See "media-controls widget"'s beforeEach for why this is needed.
   beforeEach(() => {
@@ -1028,11 +1295,16 @@ describe("stopAsset", () => {
     expect(callbacks.onAssetStop).toHaveBeenCalledWith("v1");
   });
 
-  it("pauses an audio asset without erroring (no real media element to seek), and still broadcasts the stop", () => {
+  it("pauses and resets currentTime to 0 for an audio asset's real (hidden) <audio> element", () => {
     const { canvas, callbacks } = setup();
     canvas.upsert(makeAsset({ assetId: "au1", type: "audio", paused: false }));
+    const audio = document.querySelector("audio") as HTMLAudioElement;
+    Object.defineProperty(audio, "currentTime", { value: 10, writable: true });
+
     canvas.stopAsset("au1");
+
     expect(callbacks.onAssetPatch).toHaveBeenCalledWith("au1", { paused: true }, expect.any(Number));
+    expect(audio.currentTime).toBe(0);
     expect(callbacks.onAssetStop).toHaveBeenCalledWith("au1");
   });
 
@@ -1061,10 +1333,80 @@ describe("applyRemoteStop", () => {
     expect(() => canvas.applyRemoteStop("missing")).not.toThrow();
   });
 
-  it("does nothing for a non-video asset (e.g. audio, with no real element to seek here)", () => {
+  it("resets an audio asset's real (hidden) <audio> element too", () => {
     const { canvas } = setup();
     canvas.upsert(makeAsset({ assetId: "au1", type: "audio" }));
-    expect(() => canvas.applyRemoteStop("au1")).not.toThrow();
+    const audio = document.querySelector("audio") as HTMLAudioElement;
+    Object.defineProperty(audio, "currentTime", { value: 30, writable: true });
+
+    canvas.applyRemoteStop("au1");
+
+    expect(audio.currentTime).toBe(0);
+  });
+
+  it("does nothing for a text asset (no media element)", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "t1", type: "text" }));
+    expect(() => canvas.applyRemoteStop("t1")).not.toThrow();
+  });
+});
+
+// Regression coverage for the loop bug: nothing previously marked
+// asset.paused true when a non-looping video/audio naturally ended, so the
+// next syncMediaState call saw "should still be playing" and called
+// .play() again -- which browsers auto-restart from currentTime 0 on an
+// already-ended element, reading as an unwanted loop regardless of the
+// actual loop setting.
+describe("media 'ended' event", () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("patches paused: true when a non-looping video ends", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", paused: false, loop: false }));
+    vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+    const video = document.querySelector("video") as HTMLVideoElement;
+
+    video.dispatchEvent(new Event("ended"));
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("v1", { paused: true }, expect.any(Number));
+    expect(canvas.get("v1")?.paused).toBe(true);
+  });
+
+  it("patches paused: true when a non-looping audio asset's real element ends", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "au1", type: "audio", paused: false, loop: false }));
+    const audio = document.querySelector("audio") as HTMLAudioElement;
+
+    audio.dispatchEvent(new Event("ended"));
+
+    expect(callbacks.onAssetPatch).toHaveBeenCalledWith("au1", { paused: true }, expect.any(Number));
+    expect(canvas.get("au1")?.paused).toBe(true);
+  });
+
+  it("does not patch when the asset is set to loop -- native looping handles it, and 'ended' never even fires for a real looping element", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", paused: false, loop: true }));
+    vi.mocked(HTMLMediaElement.prototype.play).mockClear();
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+    const video = document.querySelector("video") as HTMLVideoElement;
+
+    video.dispatchEvent(new Event("ended"));
+
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
+  });
+
+  it("does nothing if the asset was removed before 'ended' fires", () => {
+    const { canvas, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", paused: false, loop: false }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    canvas.remove("v1");
+    vi.mocked(callbacks.onAssetPatch).mockClear();
+
+    expect(() => video.dispatchEvent(new Event("ended"))).not.toThrow();
+    expect(callbacks.onAssetPatch).not.toHaveBeenCalled();
   });
 });
 

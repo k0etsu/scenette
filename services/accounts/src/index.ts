@@ -68,6 +68,19 @@ async function requireSession(
 // into the app (and auto-redirect on success). Set by CDK.
 const APP_URL = process.env.APP_URL;
 
+// Temporary: SES prod access is still pending (initial request was
+// rejected), so verification emails can't reach unverified recipients out of
+// sandbox. While set, email verification is skipped and the room is granted
+// immediately instead of waiting on a mailed link. Remove once SES prod
+// access is approved.
+const SKIP_EMAIL_VERIFICATION = process.env.SKIP_EMAIL_VERIFICATION === "true";
+
+async function verifyEmailImmediately(username: string): Promise<string> {
+  const roomId = await markEmailVerified(username, randomUUID());
+  await putMembership({ accountId: username, roomId, role: "owner" });
+  return roomId;
+}
+
 // A minimal, self-contained, dark-themed confirmation page for the emailed
 // verify link (opened directly in a browser, not the SPA). Only static,
 // non-user-controlled text is interpolated -- no XSS surface. On success it
@@ -157,15 +170,23 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       // only when an email is verified (see GET /auth/verify). Registration
       // logs straight in so an unverified user can still act as a mod on
       // rooms they're invited to. If an email was supplied now, kick off
-      // verification immediately.
+      // verification immediately (or grant the room outright while
+      // SKIP_EMAIL_VERIFICATION is set -- see its definition above).
+      let emailVerified = false;
+      let personalRoomId: string | undefined;
       if (email) {
-        await startEmailVerification(username, email as string, apiBaseUrl(event));
+        if (SKIP_EMAIL_VERIFICATION) {
+          personalRoomId = await verifyEmailImmediately(username);
+          emailVerified = true;
+        } else {
+          await startEmailVerification(username, email as string, apiBaseUrl(event));
+        }
       }
 
       const sessionToken = await createSession(username);
       return json(
         201,
-        { username, email: email || undefined, emailVerified: false, personalRoomId: undefined },
+        { username, email: email || undefined, emailVerified, personalRoomId },
         [setSessionCookie(sessionToken)]
       );
     }
@@ -280,9 +301,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       await updateAccountEmail(username, (email as string | undefined) || undefined);
       // Setting a (non-empty) email starts verification -- the address is
       // unverified until the mailed link is clicked, which is what unlocks
-      // the account's own room.
+      // the account's own room. (Or granted immediately -- see
+      // SKIP_EMAIL_VERIFICATION above.)
       if (email) {
-        await startEmailVerification(username, email as string, apiBaseUrl(event));
+        if (SKIP_EMAIL_VERIFICATION) {
+          await verifyEmailImmediately(username);
+        } else {
+          await startEmailVerification(username, email as string, apiBaseUrl(event));
+        }
       }
       return json(200, { ok: true });
     }
@@ -330,6 +356,12 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
       const account = await getAccount(username);
       if (account?.email && !account.emailVerified) {
+        // Same temporary bypass as registration/change-email -- grant the
+        // room outright instead of mailing a link that can't be delivered.
+        if (SKIP_EMAIL_VERIFICATION) {
+          await verifyEmailImmediately(username);
+          return json(200, { ok: true });
+        }
         const verification = await createVerification(username, account.email);
         try {
           await sendVerificationEmail(account.email, username, verification.token, apiBaseUrl(event));

@@ -1,5 +1,35 @@
-import { Asset, AssetPatch, Variable, Viewport, interpolateText, resolveTextStyle, textStyleToCss } from "@scenette/protocol";
+import {
+  Asset,
+  AssetPatch,
+  Variable,
+  Viewport,
+  computeClockDisplay,
+  interpolateText,
+  resolveTextStyle,
+  textStyleToCss,
+  createYoutubePlayerController,
+  YoutubePlayerController,
+} from "@scenette/protocol";
 import { ICON_AUDIO_LARGE } from "./icons";
+
+// How often clock assets re-render their computed time in the editor preview.
+// 250ms comfortably keeps a seconds display current without the cost of a
+// full requestAnimationFrame loop (browser-source uses rAF since it's a
+// dedicated always-visible overlay; the editor doesn't need that cadence).
+const CLOCK_TICK_INTERVAL_MS = 250;
+
+// A youtube asset's embed is held at this fixed native pixel size and only
+// ever CSS-scaled (never resized directly) to fit the asset's actual box --
+// same fixed-native-size + transform:scale() technique streamPreview.ts
+// already uses for the room-wide stream embed, and for the same reason:
+// keeping the iframe's own real pixel dimensions constant means YouTube's
+// auto-quality heuristic (which partly follows the player's actual size,
+// not its visual CSS size) isn't misled into serving a low-resolution
+// stream just because the asset happens to be displayed small on the
+// canvas. 1280x720 (720p) rather than streamPreview.ts's 1920x1080 --
+// this is a single embedded asset, not the whole stream frame.
+const YOUTUBE_NATIVE_WIDTH = 1280;
+const YOUTUBE_NATIVE_HEIGHT = 720;
 
 interface Entry {
   el: HTMLElement;
@@ -10,6 +40,17 @@ interface Entry {
   // the selection indicator right along with the asset, making it useless
   // for judging exactly how blurred the asset itself looks.
   content: HTMLElement;
+  // The actual playable element for video/audio -- for video this is the
+  // same element as `content`; for audio, `content` stays the visible icon
+  // placeholder and `media` is a separate, invisible <audio> element that
+  // drives real local playback (so a mod editing the room can hear what's
+  // playing, matching video). Undefined for every other asset type.
+  media?: HTMLMediaElement;
+  // youtube assets only -- the live YouTube IFrame Player controller (see
+  // packages/protocol/src/youtubePlayer.ts), playing in the editor for the
+  // same reason audio now does: a mod needs to know what's actually
+  // playing, not just see a placeholder.
+  ytController?: YoutubePlayerController;
   asset: Asset;
 }
 
@@ -43,6 +84,19 @@ const MOVE_SEND_THROTTLE_MS = 40;
 // keystroke is naturally much less frequent than a mousemove tick, so this
 // mainly matters for fast typists/paste bursts rather than every edit.
 const TEXT_SEND_THROTTLE_MS = 100;
+
+// Caps how often a seek-slider drag broadcasts over the network -- same
+// "instant locally, throttled over the wire" split as move/resize. A little
+// looser than MOVE_SEND_THROTTLE_MS since a scrub position doesn't need to
+// feel as tight as a drag, and the final position is always sent
+// unthrottled on release (see the slider's "change" handler) regardless of
+// this cap.
+const SEEK_SEND_THROTTLE_MS = 150;
+
+// How often the media-controls widget's seek slider re-reads the selected
+// asset's live playback position -- see mediaControlsSeekTimer's own doc
+// comment for why this has to be polled rather than event-driven.
+const SEEK_POSITION_POLL_INTERVAL_MS = 250;
 
 // Builds an AssetPatch carrying every currently-patchable field's live
 // value from `asset`, rather than just whichever field(s) a particular
@@ -100,6 +154,11 @@ export interface CanvasCallbacks {
   // See AssetStopMessage's protocol doc comment for why this is a
   // separate, unpersisted broadcast rather than part of AssetPatch.
   onAssetStop: (assetId: string) => void;
+  // Fires from the media-controls widget's seek slider -- same "ephemeral,
+  // never persisted" shape as onAssetStop above (see AssetSeekMessage's
+  // protocol doc comment), so every other connected client/browser-source
+  // jumps to the same position too.
+  onAssetSeek: (assetId: string, positionSeconds: number) => void;
   // worldX/worldY: where a created asset should be placed. screenX/screenY:
   // viewport-relative coordinates for positioning the context menu itself.
   onContextMenu: (worldX: number, worldY: number, screenX: number, screenY: number) => void;
@@ -138,6 +197,19 @@ export class CanvasView {
   private readonly mediaControlsMutedCheckbox: HTMLInputElement;
   private readonly mediaControlsVolumeSlider: HTMLInputElement;
   private readonly mediaControlsVolumeLabel: HTMLElement;
+  private readonly mediaControlsSeekSlider: HTMLInputElement;
+  private readonly mediaControlsSeekLabel: HTMLElement;
+  // True for the duration of a seek-slider drag -- the periodic position
+  // refresh (see mediaControlsSeekTimer) must not fight the user's own
+  // in-progress drag, same "don't clobber active input" concern as text
+  // inline-editing/contentEditable elsewhere in this file.
+  private mediaControlsSeekDragging = false;
+  // Refreshes the seek slider's position/duration display while the
+  // selected asset plays -- unlike loop/paused/muted/volume (persisted
+  // Asset fields, updated only when they actually change), playback
+  // position is live DOM/player state with no change event to hook, so it
+  // has to be polled. Cleared in dispose().
+  private mediaControlsSeekTimer?: ReturnType<typeof setInterval>;
   private viewport: Viewport = { roomId: "", x: 0, y: 0, width: 1920, height: 1080 };
 
   private pan = { x: 0, y: 0 };
@@ -154,6 +226,7 @@ export class CanvasView {
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
   private lastMoveSentAt = 0;
+  private lastSeekSentAt = 0;
   // Set for the duration of an active inline text edit (beginInlineTextEdit
   // -> stopEditing), so a periodic/manual full-state resync (see setAssets)
   // never reverts mid-edit content between keystrokes -- mirrors `dragging`
@@ -199,6 +272,8 @@ export class CanvasView {
   // session land in the same millisecond (the server's check is a strict
   // `<`, so a tied value would otherwise be wrongly rejected too).
   private lastSeqValue = 0;
+  // Drives the per-clock-asset time re-render (see tickClocks); cleared in dispose().
+  private clockTimer?: ReturnType<typeof setInterval>;
   // Public: the sidebar's properties-panel edits (numeric X/Y/W/H fields,
   // toggles, etc.) aren't part of a mouse gesture but still need to go
   // through the same seq-guarded path as a drag for consistent stale/
@@ -295,6 +370,10 @@ export class CanvasView {
         <button type="button" data-role="mc-stop" class="sidebar-flip-button">stop</button>
       </div>
       <div class="media-controls-row">
+        <span data-role="mc-seek-label"></span>
+        <input type="range" data-role="mc-seek" min="0" max="100" step="0.1" />
+      </div>
+      <div class="media-controls-row">
         <label class="prop-checkbox"><input type="checkbox" data-role="mc-muted" /> mute</label>
         <span data-role="mc-volume-label"></span>
         <input type="range" data-role="mc-volume" min="0" max="100" />
@@ -310,6 +389,8 @@ export class CanvasView {
     this.mediaControlsMutedCheckbox = mc("mc-muted");
     this.mediaControlsVolumeSlider = mc("mc-volume");
     this.mediaControlsVolumeLabel = mc("mc-volume-label");
+    this.mediaControlsSeekSlider = mc("mc-seek");
+    this.mediaControlsSeekLabel = mc("mc-seek-label");
 
     // Every handler reads the selected asset fresh from `this.entries` at
     // click/input time rather than closing over anything captured when the
@@ -341,6 +422,21 @@ export class CanvasView {
       const entry = this.selectedEntry();
       if (entry) this.patchAsset(entry.asset.assetId, { volume: Number(this.mediaControlsVolumeSlider.value) / 100 });
     });
+    // "input" fires continuously while dragging (throttled network send,
+    // instant local scrub); "change" fires once on release, forcing an
+    // unthrottled final send so the exact drop position always reaches
+    // everyone even if it landed inside the throttle window.
+    this.mediaControlsSeekSlider.addEventListener("input", () => {
+      const entry = this.selectedEntry();
+      if (!entry) return;
+      this.mediaControlsSeekDragging = true;
+      this.seekAsset(entry.asset.assetId, this.seekSliderToSeconds(entry));
+    });
+    this.mediaControlsSeekSlider.addEventListener("change", () => {
+      const entry = this.selectedEntry();
+      this.mediaControlsSeekDragging = false;
+      if (entry) this.seekAsset(entry.asset.assetId, this.seekSliderToSeconds(entry), true);
+    });
 
     // Suppressed here: this fires at the default pan:0/zoom:1 transform,
     // before the deferred first centerOnViewport() pass (see setViewport()
@@ -356,6 +452,36 @@ export class CanvasView {
     this.applyWorldTransform(true);
     this.bindContainerEvents();
     this.bindKeyboard();
+
+    this.clockTimer = setInterval(() => this.tickClocks(), CLOCK_TICK_INTERVAL_MS);
+    this.mediaControlsSeekTimer = setInterval(() => {
+      if (!this.mediaControlsSeekDragging) this.updateSeekSlider();
+    }, SEEK_POSITION_POLL_INTERVAL_MS);
+  }
+
+  // Advances every clock asset's displayed time. The content element shrink-
+  // wraps its text (no fixed width, like a text asset), so updating textContent
+  // is enough to keep it visually sized; re-measuring only matters for the
+  // selection handles, so that's done just for the currently-selected clock.
+  // Purely local -- never sends a patch (a ticking clock costs no network
+  // traffic; only its config is ever synced).
+  private tickClocks(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.asset.type !== "clock") continue;
+      const display = computeClockDisplay(entry.asset, Date.now());
+      if (entry.content.textContent !== display) entry.content.textContent = display;
+    }
+    if (this.selectedAssetId) {
+      const entry = this.entries.get(this.selectedAssetId);
+      if (entry?.asset.type === "clock") {
+        const w = Math.max(MIN_ASSET_SIZE, entry.content.offsetWidth);
+        const h = Math.max(MIN_ASSET_SIZE, entry.content.offsetHeight);
+        if (Math.abs(w - entry.asset.width) >= 1 || Math.abs(h - entry.asset.height) >= 1) {
+          entry.asset = { ...entry.asset, width: w, height: h };
+          this.positionHandles();
+        }
+      }
+    }
   }
 
   setViewport(viewport: Viewport): void {
@@ -422,11 +548,11 @@ export class CanvasView {
     return this.lastMouseWorld;
   }
 
-  // Deliberately touches only video elements' .volume, not a full
+  // Deliberately touches only video/audio elements' .volume, not a full
   // applyTransform() over every entry -- the sound panel's sliders fire
   // live on every drag tick, and re-running position/blur/etc for every
-  // non-video asset on each tick would be pure waste. Also deliberately
-  // uses applyVolume (not the full syncMediaState) for the same reason
+  // other asset on each tick would be pure waste. Also deliberately uses
+  // applyVolume (not the full syncMediaState) for the same reason
   // syncGlobalVolume does in browser-source's render.ts: routing a
   // volume-only change through the play/pause branch meant a volume drag
   // could re-issue .play() dozens of times a second on a video that was
@@ -438,8 +564,8 @@ export class CanvasView {
     this.globalVolume = globalVolume;
     this.localVolume = localVolume;
     for (const entry of this.entries.values()) {
-      if (entry.asset.type === "video") {
-        applyVolume(entry.content as HTMLVideoElement, this.effectiveVolume(entry.asset));
+      if (entry.media) {
+        applyVolume(entry.media, this.effectiveVolume(entry.asset));
       }
     }
   }
@@ -463,7 +589,13 @@ export class CanvasView {
 
   private reapplyText(): void {
     for (const entry of this.entries.values()) {
-      if (entry.asset.type === "text") {
+      // Skip a text asset that's mid inline-edit: its DOM holds the raw
+      // {variable} template the user is editing. Substituting the interpolated
+      // value in would both show the wrong thing and, on the next keystroke/
+      // blur, risk the raw template being lost. applyTransform guards this the
+      // same way -- and this fires on every variable change AND every periodic
+      // room:snapshot resync (setVariables), so it must guard too.
+      if (entry.asset.type === "text" && entry.content.contentEditable !== "true") {
         const interpolated = interpolateText(entry.asset.text ?? "", this.variables);
         if (entry.content.textContent !== interpolated) entry.content.textContent = interpolated;
       }
@@ -479,21 +611,17 @@ export class CanvasView {
   }
 
   // Pauses (synced to every client/browser-source, same as the ordinary
-  // pause button) and resets the actual local <video> element back to the
-  // start of its timeline -- and, via onAssetStop, tells every other
+  // pause button) and resets the actual local <video>/<audio> element back
+  // to the start of its timeline -- and, via onAssetStop, tells every other
   // connected client/browser-source to reset their own local playback
   // position too (see AssetStopMessage's protocol doc comment for why
   // that's a separate broadcast rather than part of the paused patch).
-  // Audio has no real media element here to reset locally (see
-  // applyTransform's own note -- actual audio only ever plays for viewers
-  // via browser-source, never in this editor's own preview), so there's
-  // nothing to seek for that type on this side; the pause half still
-  // applies, and browser-source's own copy still resets via the broadcast.
   stopAsset(assetId: string): void {
     const entry = this.entries.get(assetId);
     if (!entry) return;
     this.patchAsset(assetId, { paused: true });
-    if (entry.asset.type === "video") (entry.content as HTMLVideoElement).currentTime = 0;
+    if (entry.media) entry.media.currentTime = 0;
+    entry.ytController?.seekToStart();
     this.callbacks.onAssetStop(assetId);
   }
 
@@ -548,6 +676,7 @@ export class CanvasView {
     for (const [assetId, entry] of this.entries) {
       if (!seen.has(assetId)) {
         entry.el.remove();
+        entry.ytController?.destroy();
         this.entries.delete(assetId);
       }
     }
@@ -556,8 +685,8 @@ export class CanvasView {
   upsert(asset: Asset): void {
     let entry = this.entries.get(asset.assetId);
     if (!entry) {
-      const { el, content } = this.createElement(asset);
-      entry = { el, content, asset };
+      const { el, content, media, ytController } = this.createElement(asset);
+      entry = { el, content, media, ytController, asset };
       this.entries.set(asset.assetId, entry);
       this.world.appendChild(el);
     }
@@ -622,7 +751,8 @@ export class CanvasView {
   // as a "stop" it thinks is current).
   applyRemoteStop(assetId: string): void {
     const entry = this.entries.get(assetId);
-    if (entry?.asset.type === "video") (entry.content as HTMLVideoElement).currentTime = 0;
+    if (entry?.media) entry.media.currentTime = 0;
+    entry?.ytController?.seekToStart();
   }
 
   // Programmatic counterparts to mouse drag/resize, for the sidebar's
@@ -673,9 +803,9 @@ export class CanvasView {
     // twice more to force a retry. Volume never affects any other rendered
     // aspect, so applyVolume alone is exactly enough here, same as
     // setVolumeMultipliers already does for the sound panel's sliders.
-    const isVolumeOnlyVideoPatch = entry.asset.type === "video" && Object.keys(patch).length === 1 && "volume" in patch;
-    if (isVolumeOnlyVideoPatch) {
-      applyVolume(entry.content as HTMLVideoElement, this.effectiveVolume(entry.asset));
+    const isVolumeOnlyMediaPatch = Boolean(entry.media) && Object.keys(patch).length === 1 && "volume" in patch;
+    if (isVolumeOnlyMediaPatch) {
+      applyVolume(entry.media!, this.effectiveVolume(entry.asset));
     } else {
       this.applyTransform(entry, entry.asset);
     }
@@ -700,7 +830,8 @@ export class CanvasView {
     // gate with no cross-message ordering guarantee can't be made safe by
     // choosing an order -- only combining them into one atomic write fixes
     // it for real, which is what this does.
-    const sizePatch = entry.asset.type === "text" ? this.measureTextAutoFit(assetId) : undefined;
+    const sizePatch =
+      entry.asset.type === "text" || entry.asset.type === "clock" ? this.measureTextAutoFit(assetId) : undefined;
 
     if ("text" in patch) {
       this.sendTextPatchThrottled(assetId);
@@ -823,7 +954,7 @@ export class CanvasView {
   // fixes that -- see AssetPatch's own doc comment for the full history.
   private measureTextAutoFit(assetId: string): { width: number; height: number } | undefined {
     const entry = this.entries.get(assetId);
-    if (!entry || entry.asset.type !== "text") return undefined;
+    if (!entry || (entry.asset.type !== "text" && entry.asset.type !== "clock")) return undefined;
     const { content, asset } = entry;
     const width = content.offsetWidth;
     const height = content.offsetHeight;
@@ -845,6 +976,7 @@ export class CanvasView {
     const entry = this.entries.get(assetId);
     if (entry) {
       entry.el.remove();
+      entry.ytController?.destroy();
       this.entries.delete(assetId);
     }
     if (this.selectedAssetId === assetId) {
@@ -858,10 +990,10 @@ export class CanvasView {
     const { el, content } = entry;
     el.style.left = `${asset.x}px`;
     el.style.top = `${asset.y}px`;
-    // Text assets shrink-wrap to their own content instead (see
+    // Text and clock assets shrink-wrap to their own content instead (see
     // createElement/autoSizeText) -- forcing a width/height here would
     // fight with that, either clipping long text or leaving dead space.
-    if (asset.type !== "text") {
+    if (asset.type !== "text" && asset.type !== "clock") {
       el.style.width = `${asset.width}px`;
       el.style.height = `${asset.height}px`;
     }
@@ -873,29 +1005,54 @@ export class CanvasView {
     // the selection outline, and a CSS filter blurs everything painted for
     // the element it's on, so applying it to `el` blurred the outline too.
     content.style.filter = asset.blur > 0 ? `blur(${asset.blur}px)` : "";
-    if (asset.type === "text") {
-      // While actively being edited (see beginInlineTextEdit), the DOM's
-      // own textContent -- the raw template the user is mid-typing -- is
-      // authoritative; overwriting it with the *interpolated* display here
-      // would both show the wrong thing (substituted values instead of the
-      // {variable} placeholder being edited) and reset the caret to the
-      // start on every keystroke.
-      if (content.contentEditable !== "true") {
+    // See YOUTUBE_NATIVE_WIDTH's doc comment -- content stays a fixed
+    // 1280x720 (its real pixel size, for YouTube's benefit) and is instead
+    // CSS-scaled to visually fit the asset's actual box. The box itself
+    // resizes completely freely, same as every other asset type -- only a
+    // *uniform* scale is applied (the smaller of the two axis ratios,
+    // exactly what CSS object-fit: contain does, which is what
+    // #canvas-container's own img/video rule already uses), then the
+    // scaled-down 1280x720 content is centered within the box. This is
+    // deliberately NOT the same as image/video, whose content stretches
+    // non-uniformly via width/height: 100% -- an iframe's actual internal
+    // layout doesn't reflow to an arbitrary box shape the way a raster
+    // image or a native <video> element's pixels do, so a non-uniform
+    // scale here would visibly distort YouTube's own UI chrome.
+    if (asset.type === "youtube") {
+      const scale = Math.min(asset.width / YOUTUBE_NATIVE_WIDTH, asset.height / YOUTUBE_NATIVE_HEIGHT);
+      const offsetX = (asset.width - YOUTUBE_NATIVE_WIDTH * scale) / 2;
+      const offsetY = (asset.height - YOUTUBE_NATIVE_HEIGHT * scale) / 2;
+      content.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    }
+    if (asset.type === "text" || asset.type === "clock") {
+      if (asset.type === "clock") {
+        // The live time; advanced continuously by tickClocks, but also set
+        // here so a style/config edit repaints immediately.
+        const display = computeClockDisplay(asset, Date.now());
+        if (content.textContent !== display) content.textContent = display;
+      } else if (content.contentEditable !== "true") {
+        // While actively being edited (see beginInlineTextEdit), the DOM's
+        // own textContent -- the raw template the user is mid-typing -- is
+        // authoritative; overwriting it with the *interpolated* display here
+        // would both show the wrong thing (substituted values instead of the
+        // {variable} placeholder being edited) and reset the caret to the
+        // start on every keystroke.
         const interpolated = interpolateText(asset.text ?? "", this.variables);
         if (content.textContent !== interpolated) content.textContent = interpolated;
       }
       // Applied identically in browser-source's render.ts (via the same
-      // shared resolveTextStyle/textStyleToCss helpers) so a text asset
+      // shared resolveTextStyle/textStyleToCss helpers) so a text/clock asset
       // looks the same in the editor preview as it does to viewers.
       Object.assign(content.style, textStyleToCss(resolveTextStyle(asset)));
     }
-    // The editor's own preview never actually played video -- only
-    // browser-source synced .loop/.muted/.volume/.play()/.pause() from the
-    // asset's playback fields. Audio has no real media element here (the
-    // canvas shows a placeholder icon; actual audio only plays for viewers
-    // via browser-source), so only video needs this.
-    if (asset.type === "video") {
-      syncMediaState(content as HTMLVideoElement, asset, this.effectiveVolume(asset));
+    // Real local playback for video and (see Entry.media's doc comment)
+    // audio, so a mod editing the room can see/hear what's actually
+    // playing rather than relying solely on browser-source's own copy.
+    if (entry.media) {
+      syncMediaState(entry.media, asset, this.effectiveVolume(asset));
+    }
+    if (entry.ytController) {
+      entry.ytController.sync(asset, this.effectiveVolume(asset));
     }
     // The canvas always shows every asset regardless of the true `visible`
     // flag (viewport-intersection + hidden) -- unlike browser-source, the
@@ -906,8 +1063,12 @@ export class CanvasView {
     el.style.opacity = String(asset.hidden ? asset.opacity * 0.4 : asset.opacity);
   }
 
-  private createElement(asset: Asset): { el: HTMLElement; content: HTMLElement } {
+  private createElement(
+    asset: Asset
+  ): { el: HTMLElement; content: HTMLElement; media?: HTMLMediaElement; ytController?: YoutubePlayerController } {
     let content: HTMLElement;
+    let media: HTMLMediaElement | undefined;
+    let ytController: YoutubePlayerController | undefined;
     switch (asset.type) {
       case "image":
       case "gif": {
@@ -927,15 +1088,24 @@ export class CanvasView {
         // looks exactly like our own drag breaking after one tick.
         video.draggable = false;
         content = video;
+        media = video;
         break;
       }
       case "audio": {
-        const audio = document.createElement("div");
-        audio.style.display = "flex";
-        audio.style.alignItems = "center";
-        audio.style.justifyContent = "center";
-        audio.innerHTML = ICON_AUDIO_LARGE;
-        content = audio;
+        // The icon stays the visible content (so an audio asset is still
+        // identifiable at a glance) -- a real, invisible <audio> element
+        // alongside it is what actually plays (see Entry.media's doc
+        // comment).
+        const icon = document.createElement("div");
+        icon.style.display = "flex";
+        icon.style.alignItems = "center";
+        icon.style.justifyContent = "center";
+        icon.innerHTML = ICON_AUDIO_LARGE;
+        content = icon;
+        const audio = document.createElement("audio");
+        if (asset.s3Key) audio.src = this.mediaUrl(asset.s3Key);
+        audio.style.display = "none";
+        media = audio;
         break;
       }
       case "text": {
@@ -959,11 +1129,54 @@ export class CanvasView {
         content.style.whiteSpace = "pre";
         break;
       }
+      case "clock": {
+        // Same shrink-wrap layout as text; the computed time string + styling
+        // are (re)applied in applyTransform and advanced by tickClocks.
+        content = document.createElement("div");
+        content.textContent = computeClockDisplay(asset, Date.now());
+        content.style.padding = "4px";
+        content.style.boxSizing = "border-box";
+        content.style.whiteSpace = "pre";
+        break;
+      }
+      case "youtube": {
+        // See YOUTUBE_NATIVE_WIDTH's doc comment -- fixed native size, CSS-
+        // scaled in applyTransform rather than stretched to fill `el` the
+        // normal way (hence excluded from the generic 100% block below).
+        const wrapper = document.createElement("div");
+        wrapper.style.width = `${YOUTUBE_NATIVE_WIDTH}px`;
+        wrapper.style.height = `${YOUTUBE_NATIVE_HEIGHT}px`;
+        wrapper.style.transformOrigin = "0 0";
+        // The YT iframe is a separate browsing context -- mouse events over
+        // it never bubble up to `el`'s own mousedown listener below, which
+        // is what drives select/drag/resize, so without this the asset was
+        // simply unclickable/undraggable anywhere the iframe covers (i.e.
+        // everywhere). Safe to disable entirely: controls: 0 (see
+        // createYoutubePlayerController below) already means there's no
+        // YouTube UI in there to click on directly -- playback is driven
+        // from the sidebar/media-controls widget instead.
+        wrapper.style.pointerEvents = "none";
+        content = wrapper;
+        const mount = document.createElement("div");
+        mount.style.width = "100%";
+        mount.style.height = "100%";
+        wrapper.appendChild(mount);
+        ytController = createYoutubePlayerController(mount, asset.youtubeVideoId ?? "", {
+          // Same rationale as the native "ended" listener below -- see its
+          // comment for the full mechanism.
+          onEnded: () => {
+            const entry = this.entries.get(asset.assetId);
+            if (entry && !entry.asset.loop) this.patchAsset(asset.assetId, { paused: true });
+          },
+        });
+        break;
+      }
     }
     content.dataset.assetType = asset.type;
-    // Text assets are sized by their own content, not stretched to fill
-    // `el` -- see the "text" case above.
-    if (asset.type !== "text") {
+    // Text and clock assets are sized by their own content, not stretched to
+    // fill `el` -- see the "text"/"clock" cases above. youtube stays fixed
+    // native size -- see the "youtube" case above.
+    if (asset.type !== "text" && asset.type !== "clock" && asset.type !== "youtube") {
       content.style.width = "100%";
       content.style.height = "100%";
     }
@@ -977,7 +1190,23 @@ export class CanvasView {
     if (asset.type === "text") {
       content.addEventListener("dblclick", (event) => this.beginInlineTextEdit(event, asset.assetId, content));
     }
-    return { el, content };
+    if (media && media !== content) el.appendChild(media);
+    if (media) {
+      // Nothing anywhere marks asset.paused true when a non-looping
+      // video/audio naturally reaches its end -- without this, the next
+      // syncMediaState call still sees "should be playing" and calls
+      // .play() again, which browsers auto-restart from currentTime 0 on
+      // an ended element, reading as an unwanted loop regardless of the
+      // actual loop setting. Sending the real paused patch here (rather
+      // than just setting a local flag) is what actually fixes it for
+      // every connected client/browser-source, not just this one -- see
+      // the plan's diagnosis for the full mechanism.
+      media.addEventListener("ended", () => {
+        const entry = this.entries.get(asset.assetId);
+        if (entry && !entry.asset.loop) this.patchAsset(asset.assetId, { paused: true });
+      });
+    }
+    return { el, content, media, ytController };
   }
 
   // Double-click-to-edit: makes the text element itself the editing
@@ -1165,6 +1394,8 @@ export class CanvasView {
   // (switching rooms) starts from a clean slate rather than stacking a
   // second `world` div underneath/alongside the old one.
   dispose(): void {
+    if (this.clockTimer) clearInterval(this.clockTimer);
+    if (this.mediaControlsSeekTimer) clearInterval(this.mediaControlsSeekTimer);
     window.removeEventListener("mousemove", this.handleWindowMouseMove);
     window.removeEventListener("mouseup", this.handleWindowMouseUp);
     window.removeEventListener("keydown", this.handleWindowKeyDown);
@@ -1367,10 +1598,10 @@ export class CanvasView {
   // matching a typical canvas editor's resize-handle behavior.
   private positionHandles(): void {
     const entry = this.selectedEntry();
-    // Text assets size themselves to fit their own content (see
-    // autoSizeText) rather than being manually resized, so they never get
-    // corner handles regardless of selection/lock state.
-    if (!entry || entry.asset.locked || entry.asset.type === "text") {
+    // Text and clock assets size themselves to fit their own content (see
+    // autoSizeText/tickClocks) rather than being manually resized, so they
+    // never get corner handles regardless of selection/lock state.
+    if (!entry || entry.asset.locked || entry.asset.type === "text" || entry.asset.type === "clock") {
       for (const corner of CORNERS) this.handles[corner].style.display = "none";
     } else {
       const { x, y, width, height, rotation } = entry.asset;
@@ -1416,7 +1647,8 @@ export class CanvasView {
   // so it can never drift out of sync with the sidebar, which reads from
   // this exact same Entry.
   private updateMediaControls(entry: Entry | undefined): void {
-    if (!entry || (entry.asset.type !== "video" && entry.asset.type !== "audio")) {
+    const hasPlayback = entry?.asset.type === "video" || entry?.asset.type === "audio" || entry?.asset.type === "youtube";
+    if (!entry || !hasPlayback) {
       this.mediaControls.style.display = "none";
       return;
     }
@@ -1429,6 +1661,12 @@ export class CanvasView {
     const volumePercent = Math.round(asset.volume * 100);
     this.mediaControlsVolumeSlider.value = String(volumePercent);
     this.mediaControlsVolumeLabel.textContent = `volume: ${volumePercent}%`;
+    // Not while mid-drag -- the periodic timer (see mediaControlsSeekTimer)
+    // already skips itself for the same reason, but this call site (every
+    // upsert/patch/drag/selection change, not just the timer) needs the
+    // same guard so an incoming remote patch during a local scrub can't
+    // yank the slider out from under the user's own drag either.
+    if (!this.mediaControlsSeekDragging) this.updateSeekSlider(entry);
 
     // Centered above the asset's own (unrotated) top edge -- simpler than
     // the corner handles' rotation-aware math above, and reads fine for a
@@ -1444,6 +1682,68 @@ export class CanvasView {
     this.mediaControls.style.left = `${anchor.x}px`;
     this.mediaControls.style.top = `${anchor.y}px`;
     this.mediaControls.style.transform = "translate(-50%, calc(-100% - 8px))";
+  }
+
+  // Refreshes just the seek slider's position/duration -- deliberately
+  // separate from updateMediaControls (which this also delegates to being
+  // called from) since it also needs to run from the periodic poll timer,
+  // which has no Entry of its own to pass in.
+  private updateSeekSlider(entry?: Entry): void {
+    const target = entry ?? this.selectedEntry();
+    const hasPlayback = target?.asset.type === "video" || target?.asset.type === "audio" || target?.asset.type === "youtube";
+    if (!target || !hasPlayback) return;
+    const duration = this.getPlaybackDuration(target);
+    const position = this.getPlaybackPosition(target);
+    const percent = duration > 0 ? Math.min(100, Math.max(0, (position / duration) * 100)) : 0;
+    this.mediaControlsSeekSlider.value = String(percent);
+    this.mediaControlsSeekLabel.textContent = `${formatPlaybackTime(position)} / ${formatPlaybackTime(duration)}`;
+  }
+
+  // Reads the seek slider's current 0-100 value back into seconds, using
+  // whichever duration source applies to the entry's type.
+  private seekSliderToSeconds(entry: Entry): number {
+    const duration = this.getPlaybackDuration(entry);
+    return duration > 0 ? (Number(this.mediaControlsSeekSlider.value) / 100) * duration : 0;
+  }
+
+  private getPlaybackDuration(entry: Entry): number {
+    if (entry.media) return Number.isFinite(entry.media.duration) ? entry.media.duration : 0;
+    if (entry.ytController) return entry.ytController.getDuration();
+    return 0;
+  }
+
+  private getPlaybackPosition(entry: Entry): number {
+    if (entry.media) return entry.media.currentTime;
+    if (entry.ytController) return entry.ytController.getCurrentTime();
+    return 0;
+  }
+
+  // Applies a scrub immediately to the local element/player (so dragging
+  // always feels instant) and broadcasts it -- throttled while dragging
+  // (see SEEK_SEND_THROTTLE_MS), forced through unconditionally on release
+  // (the slider's "change" handler) so the exact drop position is never
+  // lost to the throttle window.
+  private seekAsset(assetId: string, positionSeconds: number, forceSend = false): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    if (entry.media) entry.media.currentTime = positionSeconds;
+    entry.ytController?.seekTo(positionSeconds);
+
+    const now = performance.now();
+    if (forceSend || now - this.lastSeekSentAt >= SEEK_SEND_THROTTLE_MS) {
+      this.lastSeekSentAt = now;
+      this.callbacks.onAssetSeek(assetId, positionSeconds);
+    }
+  }
+
+  // asset:seeked's own effect -- a pure ephemeral broadcast with no seq of
+  // its own, same as applyRemoteStop (see AssetSeekMessage's protocol doc
+  // comment for why).
+  applyRemoteSeek(assetId: string, positionSeconds: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    if (entry.media) entry.media.currentTime = positionSeconds;
+    entry.ytController?.seekTo(positionSeconds);
   }
 
   private applyWorldTransform(suppressCallback = false): void {
@@ -1478,9 +1778,19 @@ export class CanvasView {
   }
 }
 
+// m:ss -- matches a typical scrubber's label, not h:mm:ss (nothing playable
+// here is expected to run past an hour).
+function formatPlaybackTime(seconds: number): string {
+  const clamped = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const total = Math.floor(clamped);
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${minutes}:${String(secs).padStart(2, "0")}`;
+}
+
 // See setVolumeMultipliers -- volume-only updates must never touch
 // loop/play/pause/mute, only used from there.
-function applyVolume(media: HTMLVideoElement, effectiveVolume: number): void {
+function applyVolume(media: HTMLMediaElement, effectiveVolume: number): void {
   if (media.volume !== effectiveVolume) media.volume = effectiveVolume;
 }
 
@@ -1488,7 +1798,7 @@ function applyVolume(media: HTMLVideoElement, effectiveVolume: number): void {
 // state -- re-assigning .loop/.volume unconditionally is harmless, but
 // calling .play()/.pause() when already in that state can cause an
 // audible/visible stutter on some browsers.
-function syncMediaState(media: HTMLVideoElement, asset: Asset, effectiveVolume: number): void {
+function syncMediaState(media: HTMLMediaElement, asset: Asset, effectiveVolume: number): void {
   if (media.loop !== asset.loop) media.loop = asset.loop;
   applyVolume(media, effectiveVolume);
   if (asset.paused && !media.paused) {

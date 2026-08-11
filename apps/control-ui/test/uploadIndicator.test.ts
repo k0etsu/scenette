@@ -127,4 +127,29 @@ describe("UploadIndicator", () => {
     indicator.begin(makeFile("a.png", "image/png"));
     expect(root.querySelector(".upload-indicator-summary")!.textContent).toBe("uploading 1 file...");
   });
+
+  describe("beginFromUrl", () => {
+    it("shows the URL's last path segment as the name and previews directly from it", () => {
+      indicator.beginFromUrl("https://cdn.example.com/emote/01FM.gif?x=1");
+
+      const row = root.querySelector(".upload-row")!;
+      expect(row.querySelector(".upload-row-name")!.textContent).toBe("01FM.gif");
+      const thumb = row.querySelector<HTMLImageElement>("img.upload-thumb")!;
+      expect(thumb.src).toBe("https://cdn.example.com/emote/01FM.gif?x=1");
+    });
+
+    it("falls back to the generic icon if the preview fails to load", () => {
+      indicator.beginFromUrl("https://cdn.example.com/clip.mp4");
+      const thumb = root.querySelector<HTMLImageElement>("img.upload-thumb")!;
+      thumb.dispatchEvent(new Event("error"));
+      expect(root.querySelector("img.upload-thumb")).toBeNull();
+      expect(root.querySelector(".upload-thumb-icon")).not.toBeNull();
+    });
+
+    it("succeeds/fails like a file-based upload", () => {
+      const handle = indicator.beginFromUrl("https://cdn.example.com/e.gif");
+      handle.succeed();
+      expect(root.querySelector(".upload-row-status")!.classList.contains("done")).toBe(true);
+    });
+  });
 });

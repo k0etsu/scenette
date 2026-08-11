@@ -1,15 +1,26 @@
-import { AssetAddMessage, ServerMessage, DEFAULT_TEXT_STYLE } from "@scenette/protocol";
+import {
+  AssetAddMessage,
+  ServerMessage,
+  DEFAULT_TEXT_STYLE,
+  DEFAULT_CLOCK_FORMAT,
+  ClockFields,
+  computeClockDisplay,
+  localTimezone,
+  extractYoutubeVideoId,
+  isSeqGuardedMessage,
+} from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { CanvasView, MIN_ASSET_SIZE } from "./canvas";
 import { Sidebar } from "./sidebar";
 import { SoundPanel } from "./sound";
 import { ConnectedUsersPanel } from "./connectedUsers";
 import { VariablesPanel } from "./variablesPanel";
-import { uploadFile } from "./upload";
+import { uploadFile, uploadFromUrl, UploadResult } from "./upload";
 import { UploadIndicator } from "./uploadIndicator";
 import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
 import { SettingsModal } from "./settingsModal";
+import { YoutubeUrlModal } from "./youtubeUrlModal";
 import { RoomPicker } from "./roomPicker";
 import { StreamPreviewPanel } from "./streamPreview";
 import { measureTextBoxSize } from "./textMeasure";
@@ -67,6 +78,9 @@ const statusEl = document.getElementById("status");
 const contextMenu = document.getElementById("context-menu");
 const contextMenuTextButton = document.getElementById("context-menu-text");
 const contextMenuMediaButton = document.getElementById("context-menu-media");
+const contextMenuClockButton = document.getElementById("context-menu-clock");
+const contextMenuYoutubeButton = document.getElementById("context-menu-youtube");
+const youtubeUrlModalEl = document.getElementById("youtube-url-modal");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !loginHint ||
@@ -76,7 +90,8 @@ if (
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !uploadIndicatorEl || !manageAccessButton || !accessModalEl || !settingsModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
-  !contextMenuTextButton || !contextMenuMediaButton
+  !contextMenuTextButton || !contextMenuMediaButton || !contextMenuClockButton ||
+  !contextMenuYoutubeButton || !youtubeUrlModalEl
 ) {
   throw new Error("Missing required DOM elements");
 }
@@ -84,14 +99,26 @@ if (
 // Everything that lives for exactly one room at a time -- torn down and
 // rebuilt on every room switch (Dashboard button, picking a different room,
 // browser back/forward). Kept in one mutable holder rather than scattered
-// Deliberately more conservative than browser-source's own poll (see that
-// app's main.ts) -- cost here scales with concurrent collaborator tabs per
-// room, not just one OBS source, and (unlike browser-source) a poll landing
-// mid-edit carries real correctness risk without the guards in canvas.ts's
-// setAssets. This is a slower defense-in-depth safety net for a
-// *collaborator's* drift, not the primary (already near-real-time) sync
-// path for this browser's own edits.
-const SNAPSHOT_POLL_INTERVAL_MS = 5000;
+// Self-heals a delta that lost its seq race and got silently dropped
+// server-side (see isSeqGuardedMessage's own doc comment for exactly which
+// broadcast types that applies to) -- see canvas.ts's setAssets for the
+// guards that keep an incoming snapshot from clobbering an in-progress local
+// edit, so a poll landing mid-drag/mid-edit is already safe regardless of
+// what triggers it.
+//
+// Activity-gated (armed by isSeqGuardedMessage broadcasts, see enterRoom's
+// armResyncSettleTimer) rather than a constant interval -- a drop can only
+// happen when something is actually racing, so an idle room gets zero polls.
+// A prior fixed-interval design (every 5s, forever, regardless of activity)
+// contributed meaningfully to a free-tier Lambda usage incident even at this
+// looser interval than browser-source's own (which was the dominant cause at
+// a much tighter 1s) -- see that app's main.ts for the fuller writeup.
+const RESYNC_SETTLE_MS = 3000;
+// Sparse fallback for a drop followed by total silence (no further
+// seq-guarded broadcast ever arrives to re-arm the settle timer) -- infrequent
+// enough to be nearly free. Reconnect gaps are already fully covered
+// separately (onOpen always re-requests a snapshot immediately).
+const RESYNC_FALLBACK_INTERVAL_MS = 3 * 60 * 1000;
 
 // How often to re-check the session while logged in. Each check slides the
 // session TTL and re-issues the cookie server-side (keeping a long-open tab's
@@ -121,12 +148,12 @@ interface RoomSession {
   // land -- world coords from a right-click, or undefined to default to
   // the viewport center.
   createPosition?: { x: number; y: number };
-  // Periodic room:snapshot:request poll (see the connection's onOpen below)
-  // -- self-heals any delta that lost its seq race against another message
-  // and got silently dropped server-side. Cleared in teardownCurrentRoom()
-  // so switching rooms doesn't leave a timer still polling a room this
-  // connection has left.
-  pollTimer?: ReturnType<typeof setInterval>;
+  // Activity-gated resync timers (see the connection's onOpen below and
+  // RESYNC_SETTLE_MS's own doc comment) -- both cleared in
+  // teardownCurrentRoom() so switching rooms doesn't leave either still
+  // polling a room this connection has left.
+  settleTimer?: ReturnType<typeof setTimeout>;
+  fallbackTimer?: ReturnType<typeof setInterval>;
   // Set true once the first room:snapshot of this session has been fed to the
   // stream-preview panel via enterRoom() (a one-time reset of local-only view
   // toggles -- embed/interactive/opacity). Later snapshots go through the
@@ -151,6 +178,36 @@ document.addEventListener("mousedown", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") contextMenu!.style.display = "none";
 });
+
+// A plain-text paste with no accompanying file item -- used to catch a
+// pasted image URL (e.g. copied via a browser's "Copy image address", or
+// the URL text a "Copy image" sometimes leaves alongside its flattened png).
+// Deliberately narrow: only a single bare http(s) URL and nothing else, so
+// pasting an arbitrary sentence or multi-line text never gets mistaken for
+// an upload attempt.
+// True while the paste's actual target is a normal text-entry surface (an
+// <input>/<textarea>, or a contentEditable element -- e.g. a text asset
+// mid inline-edit, or the YouTube URL modal's own field) -- the global
+// paste handler below must leave those alone entirely. Without this, pasting
+// a URL into any such field also (incorrectly) created a canvas asset from
+// the very same paste, since the window-level listener fires regardless of
+// focus -- most visibly as two identical youtube assets when pasting into
+// the "Add YouTube" modal's input, whose own submit already creates one.
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+}
+
+function extractMediaUrl(clipboardData: DataTransfer | null | undefined): string | undefined {
+  const text = (clipboardData?.getData("text/uri-list") || clipboardData?.getData("text/plain"))?.trim();
+  if (!text || /\s/.test(text)) return undefined;
+  try {
+    const url = new URL(text);
+    return url.protocol === "http:" || url.protocol === "https:" ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 async function main(): Promise<void> {
   const { wsUrl, httpApiUrl, assetsDomain, browserSourceUrl } = await loadConfig();
@@ -216,7 +273,8 @@ async function main(): Promise<void> {
 
   function teardownCurrentRoom(): void {
     if (!current) return;
-    if (current.pollTimer) clearInterval(current.pollTimer);
+    if (current.settleTimer) clearTimeout(current.settleTimer);
+    if (current.fallbackTimer) clearInterval(current.fallbackTimer);
     current.connection.stop();
     current.canvas.dispose();
     current.sidebar.dispose();
@@ -243,7 +301,17 @@ async function main(): Promise<void> {
           window.location.href = window.location.pathname;
         });
       },
-      onSettings: () => settingsModal.open(httpApiUrl, session!.email),
+      onSettings: () =>
+        settingsModal.open(httpApiUrl, session!.email, () => {
+          // The dashboard was rendered from the session fetched at login --
+          // refetch so a newly-verified email's room shows up without
+          // requiring a manual reload (personalRoomId/emailVerified only
+          // change server-side here, never client-side).
+          void checkSession(httpApiUrl).then((fresh) => {
+            if (fresh) session = fresh;
+            void showDashboardView();
+          });
+        }),
     });
     // Show the dashboard shell immediately, then fill it in -- otherwise the
     // room view just blanks out for the duration of the listRooms fetch,
@@ -326,6 +394,68 @@ async function main(): Promise<void> {
     });
   }
 
+  function createClockAsset(): void {
+    if (!current) return;
+    // Defaults to a live time-of-day clock in the viewer's own timezone.
+    const clock: ClockFields = {
+      clockMode: "clock",
+      clockTimezone: localTimezone(),
+      clockFormat: DEFAULT_CLOCK_FORMAT,
+      clockRunning: true,
+    };
+    // Size the box to the initial rendered time up front (same as text), so it
+    // appears already fitted rather than self-correcting on the first tick.
+    const { width, height } = measureTextBoxSize(computeClockDisplay(clock, Date.now()), DEFAULT_TEXT_STYLE, MIN_ASSET_SIZE);
+    const viewport = current.canvas.getViewport();
+    const pos = current.createPosition ?? {
+      x: viewport.x + viewport.width / 2 - width / 2,
+      y: viewport.y + viewport.height / 2 - height / 2,
+    };
+    current.createPosition = undefined;
+
+    current.connection.send({
+      action: "asset:add",
+      roomId: current.roomId,
+      asset: { assetId: crypto.randomUUID(), type: "clock", x: pos.x, y: pos.y, width, height, ...clock },
+    });
+  }
+
+  // No upload, no server round-trip for the video itself -- same shape as
+  // createTextAsset/createClockAsset above, not placeUploadedAsset's
+  // UploadResult-based path. There's no natural size to measure the way an
+  // uploaded file has (nothing is fetched here), so this defaults to a
+  // fixed 16:9 box matching the embed's own native 1280x720 ratio (see
+  // canvas.ts's YOUTUBE_NATIVE_WIDTH).
+  function createYoutubeAsset(videoId: string): void {
+    if (!current) return;
+    const width = 480;
+    const height = 270;
+    const viewport = current.canvas.getViewport();
+    const pos = current.createPosition ??
+      current.canvas.getCursorWorldPosition() ?? {
+        x: viewport.x + viewport.width / 2 - width / 2,
+        y: viewport.y + viewport.height / 2 - height / 2,
+      };
+    current.createPosition = undefined;
+
+    current.connection.send({
+      action: "asset:add",
+      roomId: current.roomId,
+      asset: {
+        assetId: crypto.randomUUID(),
+        type: "youtube",
+        x: pos.x,
+        y: pos.y,
+        width,
+        height,
+        youtubeVideoId: videoId,
+        // Matches the existing upload convention (see placeUploadedAsset) --
+        // starts paused rather than autoplaying immediately into the room.
+        paused: true,
+      },
+    });
+  }
+
   contextMenuTextButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     createTextAsset();
@@ -339,46 +469,71 @@ async function main(): Promise<void> {
   // persists across room switches, so created exactly once.
   const uploadIndicator = new UploadIndicator(uploadIndicatorEl!);
 
-  async function handleUpload(file: File): Promise<void> {
+  // Shared by both upload paths below (a real file, or bytes fetched
+  // server-side from a pasted URL) -- once an UploadResult exists, placing
+  // it on the canvas is identical either way.
+  function placeUploadedAsset(result: UploadResult): void {
     if (!current) return;
     const { roomId, canvas, connection } = current;
+    const viewport = canvas.getViewport();
+    // createPosition (an explicit right-click "add media" here) wins when
+    // set; otherwise this was triggered from the toolbar button or a
+    // clipboard paste, neither of which has a click of its own to read a
+    // position from -- fall back to wherever the mouse was last actually
+    // over the canvas rather than always dropping the asset dead center.
+    const pos = current.createPosition ??
+      canvas.getCursorWorldPosition() ?? {
+        x: viewport.x + viewport.width / 2 - result.width / 2,
+        y: viewport.y + viewport.height / 2 - result.height / 2,
+      };
+    current.createPosition = undefined;
+
+    connection.send({
+      action: "asset:add",
+      roomId,
+      asset: {
+        assetId: result.assetId,
+        type: result.type,
+        x: pos.x,
+        y: pos.y,
+        width: result.width,
+        height: result.height,
+        s3Key: result.s3Key,
+        // Starts paused rather than autoplaying immediately on upload --
+        // a streamer placing a video/audio clip needs a moment to
+        // position/size it before it's actually live for viewers, and
+        // autoplaying it into an empty room (or over background audio)
+        // the instant it lands was surprising. No-op for every other
+        // asset type, which ignores `paused` entirely (no play/pause UI
+        // is ever shown for them).
+        paused: result.type === "video" || result.type === "audio" ? true : undefined,
+      },
+    });
+  }
+
+  async function handleUpload(file: File): Promise<void> {
+    if (!current) return;
+    const { roomId } = current;
     const indicator = uploadIndicator.begin(file);
     try {
-      const result = await uploadFile(httpApiUrl, roomId, file);
-      const viewport = canvas.getViewport();
-      // createPosition (an explicit right-click "add media" here) wins when
-      // set; otherwise this was triggered from the toolbar button or a
-      // clipboard paste, neither of which has a click of its own to read a
-      // position from -- fall back to wherever the mouse was last actually
-      // over the canvas rather than always dropping the asset dead center.
-      const pos = current.createPosition ??
-        canvas.getCursorWorldPosition() ?? {
-          x: viewport.x + viewport.width / 2 - result.width / 2,
-          y: viewport.y + viewport.height / 2 - result.height / 2,
-        };
-      current.createPosition = undefined;
+      placeUploadedAsset(await uploadFile(httpApiUrl, roomId, file));
+      indicator.succeed();
+    } catch (err) {
+      indicator.fail(err instanceof Error ? err.message : String(err));
+    }
+  }
 
-      connection.send({
-        action: "asset:add",
-        roomId,
-        asset: {
-          assetId: result.assetId,
-          type: result.type,
-          x: pos.x,
-          y: pos.y,
-          width: result.width,
-          height: result.height,
-          s3Key: result.s3Key,
-          // Starts paused rather than autoplaying immediately on upload --
-          // a streamer placing a video/audio clip needs a moment to
-          // position/size it before it's actually live for viewers, and
-          // autoplaying it into an empty room (or over background audio)
-          // the instant it lands was surprising. No-op for every other
-          // asset type, which ignores `paused` entirely (no play/pause UI
-          // is ever shown for them).
-          paused: result.type === "video" || result.type === "audio" ? true : undefined,
-        },
-      });
+  // The paste-a-URL path: a browser's "Copy image" flattens an animated gif
+  // to a static png before the page ever sees it (that's the OS/browser
+  // clipboard's own conversion, not something a page can opt out of), so a
+  // pasted URL with no accompanying file is fetched by the server instead,
+  // preserving the original bytes.
+  async function handleUploadFromUrl(sourceUrl: string): Promise<void> {
+    if (!current) return;
+    const { roomId } = current;
+    const indicator = uploadIndicator.beginFromUrl(sourceUrl);
+    try {
+      placeUploadedAsset(await uploadFromUrl(httpApiUrl, roomId, sourceUrl, assetsDomain));
       indicator.succeed();
     } catch (err) {
       indicator.fail(err instanceof Error ? err.message : String(err));
@@ -392,15 +547,41 @@ async function main(): Promise<void> {
   });
 
   window.addEventListener("paste", (event) => {
+    if (isEditableTarget(event.target)) return;
     const file = Array.from(event.clipboardData?.items ?? [])
       .find((item) => item.kind === "file")
       ?.getAsFile();
-    if (file) void handleUpload(file);
+    if (file) {
+      void handleUpload(file);
+      return;
+    }
+    const pastedUrl = extractMediaUrl(event.clipboardData);
+    if (!pastedUrl) return;
+    // Checked before the generic upload-from-url path -- a YouTube page
+    // isn't a downloadable media file, so fetching it server-side the way
+    // an image/gif URL is would just fail.
+    const videoId = extractYoutubeVideoId(pastedUrl);
+    if (videoId) {
+      createYoutubeAsset(videoId);
+    } else {
+      void handleUploadFromUrl(pastedUrl);
+    }
   });
 
   contextMenuMediaButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     triggerMediaUpload();
+  });
+
+  const youtubeUrlModal = new YoutubeUrlModal(youtubeUrlModalEl!);
+  contextMenuYoutubeButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    youtubeUrlModal.open((videoId) => createYoutubeAsset(videoId));
+  });
+
+  contextMenuClockButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    createClockAsset();
   });
 
   const streamPreviewPanel = new StreamPreviewPanel(
@@ -621,12 +802,18 @@ function enterRoom(
       onAssetStop: (assetId) => {
         room.connection.send({ action: "asset:stop", roomId, assetId });
       },
+      onAssetSeek: (assetId, positionSeconds) => {
+        room.connection.send({ action: "asset:seek", roomId, assetId, positionSeconds });
+      },
       onContextMenu: (worldX, worldY, screenX, screenY) => {
         room.createPosition = { x: worldX, y: worldY };
         showContextMenu(screenX, screenY);
       },
       onSelectionChange: (assetId) => {
         room.sidebar.setSelected(assetId);
+        // Selecting an asset clears any variable selection/highlight so only
+        // one thing is ever focused in the properties card at a time.
+        if (assetId) variablesPanel.setSelectedKey(undefined);
       },
       // The stream-preview overlay is a sibling of #canvas-inner, not a
       // child of it, so it survives room switches (CanvasView.dispose()
@@ -680,6 +867,27 @@ function enterRoom(
       room.createPosition = undefined; // sidebar-triggered creates default to viewport center
       showContextMenu(rect.right + 4, rect.top);
     },
+    onVariableSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
+    onVariableDelete: (key) => room.connection.send({ action: "variable:delete", roomId, key }),
+    // Rename = create-under-the-new-key + delete-the-old (the key is identity).
+    // Skipped if the new key already exists; the card is re-selected on the new
+    // key either way so the user stays on the variable they were editing.
+    onVariableRename: (oldKey, newKey) => {
+      const existing = variablesPanel.get(oldKey);
+      if (!existing) return;
+      if (variablesPanel.get(newKey)) {
+        sidebar.selectVariable(existing); // collision -- revert to the old key
+        return;
+      }
+      const renamed = { ...existing, key: newKey };
+      room.connection.send({ action: "variable:set", roomId, key: newKey, type: existing.type, value: existing.value });
+      room.connection.send({ action: "variable:delete", roomId, key: oldKey });
+      // Rename in place so the row keeps its position (delete+append would move
+      // it to the bottom). The old key's later variable:deleted echo is a no-op.
+      variablesPanel.renameKey(oldKey, newKey, renamed);
+      variablesPanel.setSelectedKey(newKey);
+      sidebar.selectVariable(renamed);
+    },
   });
   room.sidebar = sidebar;
 
@@ -698,9 +906,38 @@ function enterRoom(
   room.connectedUsersPanel = connectedUsersPanel;
 
   const variablesPanel = new VariablesPanel(variablesPanelEl!, {
-    onSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
+    // Selecting a variable focuses it in the shared properties card; clear any
+    // canvas asset selection so only one thing is ever "selected" at a time.
+    onSelect: (variable) => {
+      canvas.selectAsset(undefined);
+      sidebar.selectVariable(variable);
+      variablesPanel.setSelectedKey(variable.key);
+    },
+    // Instant-create a default variable (no form/confirm), then select it in
+    // the card for immediate editing/renaming.
+    onAdd: () => {
+      const key = variablesPanel.nextNewVariableKey();
+      const created = { key, type: "number" as const, value: "0", createdAt: new Date().toISOString() };
+      room.connection.send({ action: "variable:set", roomId, key, type: "number", value: "0" });
+      variablesPanel.upsertVariable(created); // optimistic; server echo confirms
+      variablesPanel.setSelectedKey(key);
+      canvas.selectAsset(undefined);
+      sidebar.selectVariable(created);
+    },
     onDelete: (key) => room.connection.send({ action: "variable:delete", roomId, key }),
+    onSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
   });
+
+  // (Re-)arms the catch-up snapshot request -- called on every seq-guarded
+  // broadcast (see isSeqGuardedMessage), so it only ever actually fires
+  // RESYNC_SETTLE_MS after activity goes quiet, not on a fixed cadence.
+  function armResyncSettleTimer(): void {
+    if (room.settleTimer) clearTimeout(room.settleTimer);
+    room.settleTimer = setTimeout(() => {
+      room.settleTimer = undefined;
+      connection.send({ action: "room:snapshot:request", roomId });
+    }, RESYNC_SETTLE_MS);
+  }
 
   const connection = new ResilientConnection({
     wsUrl,
@@ -710,20 +947,19 @@ function enterRoom(
     onOpen: () => {
       connection.send({ action: "room:snapshot:request", roomId });
 
-      // (Re-)armed here rather than started once outside onOpen -- onOpen
-      // already fires on every reconnect (proactive swap or drop/retry), so
-      // arming from inside it guarantees no two overlapping intervals can
-      // ever run across a reconnect. Self-heals any delta that lost its seq
-      // race against another message and got silently dropped server-side
-      // (see roomState.ts's per-asset conditional write) -- see
-      // canvas.ts's setAssets for the guards that keep this from clobbering
-      // an in-progress local edit.
-      if (room.pollTimer) clearInterval(room.pollTimer);
-      room.pollTimer = setInterval(() => {
+      // Timers (re-)armed here rather than started once outside onOpen --
+      // onOpen already fires on every reconnect (proactive swap or
+      // drop/retry), so arming from inside it guarantees no two overlapping
+      // timers can ever run across a reconnect.
+      if (room.settleTimer) clearTimeout(room.settleTimer);
+      room.settleTimer = undefined;
+      if (room.fallbackTimer) clearInterval(room.fallbackTimer);
+      room.fallbackTimer = setInterval(() => {
         connection.send({ action: "room:snapshot:request", roomId });
-      }, SNAPSHOT_POLL_INTERVAL_MS);
+      }, RESYNC_FALLBACK_INTERVAL_MS);
     },
     onMessage: (message: ServerMessage) => {
+      if (isSeqGuardedMessage(message.type)) armResyncSettleTimer();
       switch (message.type) {
         case "room:snapshot":
           canvas.setViewport({ roomId, ...message.viewport });
@@ -757,6 +993,9 @@ function enterRoom(
           }
           canvas.setVariables(Object.fromEntries(message.variables.map((v) => [v.key, v])));
           variablesPanel.setVariables(message.variables);
+          // Keep the properties card's variable (if any) in sync with the
+          // authoritative snapshot -- refresh its value or drop it if deleted.
+          sidebar.reconcileVariables(message.variables);
           connectedUsersPanel.setPresence(message.presence);
           break;
         case "asset:added":
@@ -790,6 +1029,9 @@ function enterRoom(
         case "asset:stopped":
           canvas.applyRemoteStop(message.assetId);
           break;
+        case "asset:seeked":
+          canvas.applyRemoteSeek(message.assetId, message.positionSeconds);
+          break;
         case "room:globalVolumeChanged":
           soundPanel.setGlobalVolume(message.globalVolume, message.seq);
           break;
@@ -799,10 +1041,12 @@ function enterRoom(
         case "variable:updated":
           variablesPanel.upsertVariable(message.variable);
           canvas.upsertVariable(message.variable);
+          sidebar.refreshVariable(message.variable);
           break;
         case "variable:deleted":
           variablesPanel.removeVariable(message.key);
           canvas.removeVariable(message.key);
+          sidebar.onVariableDeleted(message.key);
           break;
         case "presence:joined":
           connectedUsersPanel.addPresence(message.entry);
@@ -843,6 +1087,7 @@ function enterRoom(
       zIndex: source.zIndex,
       s3Key: source.s3Key,
       text: source.text,
+      youtubeVideoId: source.youtubeVideoId,
       name: source.name,
       opacity: source.opacity,
       blur: source.blur,

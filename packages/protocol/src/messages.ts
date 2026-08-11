@@ -1,4 +1,5 @@
 import { Asset, AssetType } from "./asset";
+import { ClockFields, isClockMode, isClockTimeFormat } from "./clock";
 import { Variable, VariableType } from "./variables";
 import { isSafeColor } from "./textStyle";
 
@@ -44,6 +45,7 @@ export interface AssetAddMessage {
     zIndex?: number;
     s3Key?: string;
     text?: string;
+    youtubeVideoId?: string;
     name?: string;
     // Optional so a plain new upload/text-add can omit them (server
     // defaults apply) while a client-side "duplicate" can carry over the
@@ -58,7 +60,8 @@ export interface AssetAddMessage {
     muted?: boolean;
     volume?: number;
     paused?: boolean;
-  } & TextStyleFields;
+  } & TextStyleFields &
+    ClockFields;
 }
 
 // Patch-style: only changed fields are sent/applied, covering every asset
@@ -67,7 +70,7 @@ export interface AssetAddMessage {
 // control (opacity, blur, flip, lock, loop, mute, volume, pause, text edit)
 // since these are all occasional, low-frequency edits with identical
 // handling needs.
-export interface AssetPatch extends TextStyleFields {
+export interface AssetPatch extends TextStyleFields, ClockFields {
   text?: string;
   name?: string;
   hidden?: boolean;
@@ -151,6 +154,18 @@ export interface AssetStopMessage {
   assetId: string;
 }
 
+// Same "ephemeral, never persisted" rationale as AssetStopMessage above --
+// scrubbing a video/audio/youtube asset's seek slider is a live position
+// jump, not a change to any stored Asset field. A client that connects
+// after a seek simply starts from wherever the media naturally is; there's
+// nothing later arrivals need to catch up on.
+export interface AssetSeekMessage {
+  action: "asset:seek";
+  roomId: string;
+  assetId: string;
+  positionSeconds: number;
+}
+
 // Global volume is a room-level master multiplier applied on top of each
 // asset's own volume, broadcast to every client (control-ui AND
 // browser-source) -- it's what viewers actually hear. Local volume (see
@@ -218,6 +233,7 @@ export type ClientMessage =
   | AssetUpdateMessage
   | AssetDeleteMessage
   | AssetStopMessage
+  | AssetSeekMessage
   | RoomSetGlobalVolumeMessage
   | RoomSetStreamPreviewSettingsMessage
   | VariableSetMessage
@@ -275,6 +291,7 @@ export type ServerMessage =
   | { type: "asset:updated"; assetId: string; patch: AssetPatch; visible: boolean; seq: number }
   | { type: "asset:deleted"; assetId: string }
   | { type: "asset:stopped"; assetId: string }
+  | { type: "asset:seeked"; assetId: string; positionSeconds: number }
   | { type: "room:globalVolumeChanged"; globalVolume: number; seq: number }
   | { type: "room:streamPreviewSettingsChanged"; settings: StreamPreviewSettings; seq: number }
   | { type: "variable:updated"; variable: Variable }
@@ -285,6 +302,29 @@ export type ServerMessage =
   // listed -- username alone can't tell them apart.
   | { type: "presence:left"; username: string; connectedAt: string }
   | { type: "error"; message: string };
+
+// The subset of broadcast types whose corresponding server-side write can be
+// silently dropped by a losing seq race -- see roomState.ts's conditional
+// writes (moveAsset/resizeAsset/updateAsset/setGlobalVolume/
+// setStreamPreviewSettings all `if (result === "stale") break;` with no
+// broadcast at all when they lose). asset:added/asset:deleted/variable:*
+// deliberately excluded: those are plain unconditional writes (a fresh
+// randomUUID for add, a delete-by-key with no staleness check) with no race
+// to silently lose. Shared here so control-ui's and browser-source's
+// resync-poll logic (see each app's main.ts) agree on exactly which incoming
+// broadcasts indicate "activity that could plausibly need a catch-up
+// snapshot", rather than each maintaining its own list that could drift.
+const SEQ_GUARDED_MESSAGE_TYPES: ReadonlySet<ServerMessage["type"]> = new Set([
+  "asset:moved",
+  "asset:resized",
+  "asset:updated",
+  "room:globalVolumeChanged",
+  "room:streamPreviewSettingsChanged",
+] satisfies ServerMessage["type"][]);
+
+export function isSeqGuardedMessage(type: ServerMessage["type"]): boolean {
+  return SEQ_GUARDED_MESSAGE_TYPES.has(type);
+}
 
 // Untrusted input arrives as raw JSON off the wire — validate the shape
 // before trusting any field, per this project's system-boundary rule.
@@ -317,6 +357,9 @@ export function parseClientMessage(raw: string): ClientMessage {
       for (const key of ["x", "y", "width", "height"] as const) {
         if (typeof asset[key] !== "number") throw new Error(`Missing/invalid asset.${key}`);
       }
+      if (asset.type === "youtube" && !isValidYoutubeVideoId(asset.youtubeVideoId)) {
+        throw new Error("Missing/invalid asset.youtubeVideoId");
+      }
       return {
         action: "asset:add",
         roomId: msg.roomId,
@@ -331,6 +374,7 @@ export function parseClientMessage(raw: string): ClientMessage {
           zIndex: typeof asset.zIndex === "number" ? asset.zIndex : undefined,
           s3Key: typeof asset.s3Key === "string" ? asset.s3Key : undefined,
           text: typeof asset.text === "string" ? asset.text : undefined,
+          youtubeVideoId: isValidYoutubeVideoId(asset.youtubeVideoId) ? asset.youtubeVideoId : undefined,
           name: typeof asset.name === "string" ? asset.name : undefined,
           opacity: typeof asset.opacity === "number" ? asset.opacity : undefined,
           blur: typeof asset.blur === "number" ? asset.blur : undefined,
@@ -343,6 +387,7 @@ export function parseClientMessage(raw: string): ClientMessage {
           volume: typeof asset.volume === "number" ? asset.volume : undefined,
           paused: typeof asset.paused === "boolean" ? asset.paused : undefined,
           ...parseTextStyleFields(asset),
+          ...parseClockFields(asset),
         },
       };
     }
@@ -385,7 +430,7 @@ export function parseClientMessage(raw: string): ClientMessage {
       const rawPatch = msg.patch as Record<string, unknown> | undefined;
       if (!rawPatch || typeof rawPatch !== "object") throw new Error("Missing patch");
 
-      const patch: AssetPatch = { ...parseTextStyleFields(rawPatch) };
+      const patch: AssetPatch = { ...parseTextStyleFields(rawPatch), ...parseClockFields(rawPatch) };
       if (typeof rawPatch.text === "string") patch.text = rawPatch.text;
       if (typeof rawPatch.name === "string") patch.name = rawPatch.name;
       if (typeof rawPatch.hidden === "boolean") patch.hidden = rawPatch.hidden;
@@ -415,6 +460,14 @@ export function parseClientMessage(raw: string): ClientMessage {
     case "asset:stop": {
       if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
       return { action: "asset:stop", roomId: msg.roomId, assetId: msg.assetId };
+    }
+
+    case "asset:seek": {
+      if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
+      if (typeof msg.positionSeconds !== "number" || msg.positionSeconds < 0) {
+        throw new Error("Missing/invalid positionSeconds");
+      }
+      return { action: "asset:seek", roomId: msg.roomId, assetId: msg.assetId, positionSeconds: msg.positionSeconds };
     }
 
     case "room:setGlobalVolume": {
@@ -483,10 +536,66 @@ function parseTextStyleFields(raw: Record<string, unknown>): TextStyleFields {
   return fields;
 }
 
+function parseClockFields(raw: Record<string, unknown>): ClockFields {
+  const fields: ClockFields = {};
+  if (isClockMode(raw.clockMode)) fields.clockMode = raw.clockMode;
+  if (typeof raw.clockRunning === "boolean") fields.clockRunning = raw.clockRunning;
+  if (typeof raw.clockAnchorMs === "number") fields.clockAnchorMs = raw.clockAnchorMs;
+  if (typeof raw.clockElapsedMs === "number") fields.clockElapsedMs = raw.clockElapsedMs;
+  if (typeof raw.clockDurationMs === "number") fields.clockDurationMs = raw.clockDurationMs;
+  if (typeof raw.clockTargetMs === "number") fields.clockTargetMs = raw.clockTargetMs;
+  if (typeof raw.clockTimezone === "string") fields.clockTimezone = raw.clockTimezone;
+  if (isClockTimeFormat(raw.clockFormat)) fields.clockFormat = raw.clockFormat;
+  return fields;
+}
+
 function isAssetType(value: unknown): value is AssetType {
-  return value === "image" || value === "gif" || value === "video" || value === "audio" || value === "text";
+  return (
+    value === "image" ||
+    value === "gif" ||
+    value === "video" ||
+    value === "audio" ||
+    value === "text" ||
+    value === "clock" ||
+    value === "youtube"
+  );
 }
 
 function isVariableType(value: unknown): value is VariableType {
   return value === "number" || value === "text";
+}
+
+// The shape of a YouTube video ID -- always exactly 11 characters from this
+// set, regardless of which URL format it was extracted from.
+export function isValidYoutubeVideoId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-zA-Z0-9_-]{11}$/.test(value);
+}
+
+// Parses the video ID out of every common YouTube URL shape (watch, share
+// link, shorts, and the embed URL itself), with or without "www.". Returns
+// undefined for anything else, including a bare video ID with no URL at all
+// -- callers that already have a bare ID don't need this. Shared between
+// control-ui's paste/context-menu entry points and the server's asset:add
+// validation so both agree on exactly what counts as "a YouTube URL".
+export function extractYoutubeVideoId(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  const host = parsed.hostname.replace(/^www\./, "");
+  let candidate: string | undefined;
+  if (host === "youtu.be") {
+    candidate = parsed.pathname.slice(1);
+  } else if (host === "youtube.com" || host === "m.youtube.com") {
+    if (parsed.pathname === "/watch") {
+      candidate = parsed.searchParams.get("v") ?? undefined;
+    } else if (parsed.pathname.startsWith("/shorts/")) {
+      candidate = parsed.pathname.slice("/shorts/".length);
+    } else if (parsed.pathname.startsWith("/embed/")) {
+      candidate = parsed.pathname.slice("/embed/".length);
+    }
+  }
+  return candidate && isValidYoutubeVideoId(candidate) ? candidate : undefined;
 }

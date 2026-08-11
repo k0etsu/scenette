@@ -62,21 +62,33 @@ export class UploadIndicator {
   }
 
   begin(file: File): UploadHandle {
-    const row = document.createElement("div");
-    row.className = "upload-row";
+    const entry: Entry = { row: document.createElement("div"), statusEl: document.createElement("span"), state: "uploading" };
+    return this.start(entry, file.name, this.buildThumbnail(file, entry));
+  }
 
-    const statusEl = document.createElement("span");
-    statusEl.className = "upload-row-status";
-    statusEl.innerHTML = '<span class="upload-spinner"></span>';
+  // Same row/spinner UI, for an upload whose bytes never touch the client
+  // (see upload.ts's uploadFromUrl) -- there's no File to read a name or
+  // build a real thumbnail from, so this shows the URL's last path segment
+  // and previews directly from the source URL. Rendering an <img> doesn't
+  // need CORS (only pixel readback, e.g. via canvas, would), so this works
+  // even though the client can't fetch the URL's bytes itself.
+  beginFromUrl(sourceUrl: string): UploadHandle {
+    const entry: Entry = { row: document.createElement("div"), statusEl: document.createElement("span"), state: "uploading" };
+    return this.start(entry, this.nameFromUrl(sourceUrl), this.buildUrlThumbnail(sourceUrl));
+  }
 
-    const name = document.createElement("span");
-    name.className = "upload-row-name";
-    name.textContent = file.name;
-    name.title = file.name;
+  private start(entry: Entry, name: string, thumbnail: HTMLElement): UploadHandle {
+    entry.row.className = "upload-row";
+    entry.statusEl.className = "upload-row-status";
+    entry.statusEl.innerHTML = '<span class="upload-spinner"></span>';
 
-    const entry: Entry = { row, statusEl, state: "uploading" };
-    row.append(statusEl, this.buildThumbnail(file, entry), name);
-    this.list.appendChild(row);
+    const nameEl = document.createElement("span");
+    nameEl.className = "upload-row-name";
+    nameEl.textContent = name;
+    nameEl.title = name;
+
+    entry.row.append(entry.statusEl, thumbnail, nameEl);
+    this.list.appendChild(entry.row);
     this.entries.add(entry);
     // A new upload always expands the card so progress is visible without
     // any interaction -- even if the user had minimized it earlier.
@@ -87,6 +99,33 @@ export class UploadIndicator {
       succeed: () => this.finish(entry, "done"),
       fail: (message) => this.finish(entry, "failed", message),
     };
+  }
+
+  private nameFromUrl(sourceUrl: string): string {
+    try {
+      const last = decodeURIComponent(new URL(sourceUrl).pathname.split("/").pop() ?? "");
+      return last.length > 0 ? last : sourceUrl;
+    } catch {
+      return sourceUrl;
+    }
+  }
+
+  private buildUrlThumbnail(sourceUrl: string): HTMLElement {
+    const img = document.createElement("img");
+    img.className = "upload-thumb";
+    // Not every pasted URL is actually an image (video/gif URLs still are;
+    // audio/video previews just fail to decode) -- fall back to the generic
+    // icon rather than leaving a broken-image glyph in a transient row.
+    img.onerror = () => img.replaceWith(this.iconThumb());
+    img.src = sourceUrl;
+    return img;
+  }
+
+  private iconThumb(kind: "image" | "video" | "audio" = "image"): HTMLElement {
+    const icon = document.createElement("span");
+    icon.className = "upload-thumb upload-thumb-icon";
+    icon.innerHTML = kind === "video" ? ICON_VIDEO : kind === "audio" ? ICON_AUDIO : ICON_IMAGE;
+    return icon;
   }
 
   // Room switches don't cancel in-flight uploads (handleUpload already
@@ -113,10 +152,7 @@ export class UploadIndicator {
       img.src = entry.objectUrl;
       return img;
     }
-    const icon = document.createElement("span");
-    icon.className = "upload-thumb upload-thumb-icon";
-    icon.innerHTML = file.type.startsWith("video/") ? ICON_VIDEO : file.type.startsWith("audio/") ? ICON_AUDIO : ICON_IMAGE;
-    return icon;
+    return this.iconThumb(file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : "image");
   }
 
   private finish(entry: Entry, state: "done" | "failed", message?: string): void {

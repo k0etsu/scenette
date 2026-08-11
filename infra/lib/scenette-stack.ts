@@ -399,6 +399,12 @@ export class ScenetteStack extends cdk.Stack {
     const uploadUrlFn = new lambdaNode.NodejsFunction(this, "UploadUrlFn", {
       entry: path.join(__dirname, "../../services/upload-url/src/index.ts"),
       runtime: lambda.Runtime.NODEJS_22_X,
+      // Default 3s/128MB is plenty for minting a presigned URL, but this
+      // Lambda also now fetches pasted third-party media (POST
+      // /assets/upload-from-url) and buffers it in memory before the S3
+      // PutObject -- needs headroom for a slow origin and a multi-MB gif.
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 512,
       environment: {
         ASSETS_BUCKET: assetsBucket.bucketName,
         ASSETS_TABLE: assetsTable.tableName,
@@ -409,9 +415,10 @@ export class ScenetteStack extends cdk.Stack {
       },
     });
     // Write-only on the bucket — this Lambda only ever needs to mint
-    // presigned PUT URLs, never to read or list what's already there.
-    // Read-only on assets/sessions/memberships -- sums existing usage for
-    // the quota check and resolves+checks the caller's membership, same as
+    // presigned PUT URLs (or, for upload-from-url, PUT fetched bytes
+    // directly), never to read or list what's already there. Read-only on
+    // assets/sessions/memberships -- sums existing usage for the quota
+    // check and resolves+checks the caller's membership, same as
     // ConnectFn/MessageFn.
     assetsBucket.grantPut(uploadUrlFn);
     assetsTable.grantReadData(uploadUrlFn);
@@ -423,6 +430,17 @@ export class ScenetteStack extends cdk.Stack {
       methods: [apigwv2.HttpMethod.GET],
       integration: new apigwv2Integrations.HttpLambdaIntegration(
         "UploadUrlIntegration",
+        uploadUrlFn
+      ),
+    });
+    // Upload-by-pasted-URL -- see services/upload-url/src/index.ts's
+    // handleUploadFromUrl for why this exists (browser "copy image" flattens
+    // an animated gif to a static png before it ever reaches the page).
+    httpApi.addRoutes({
+      path: "/assets/upload-from-url",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwv2Integrations.HttpLambdaIntegration(
+        "UploadFromUrlIntegration",
         uploadUrlFn
       ),
     });
@@ -451,6 +469,12 @@ export class ScenetteStack extends cdk.Stack {
         SESSION_COOKIE_NAME: sessionCookieName,
         // control-ui origin -- the emailed verify page redirects here on success.
         APP_URL: `https://${controlUiDomain}`,
+        // Temporary: SES prod access is still pending, so sandbox mode blocks
+        // verification emails to unverified recipients. Controlled by the
+        // "skipEmailVerification" key in infra/cdk.json (not a CLI --context
+        // flag) since deploys run unattended via CI on every push -- flip it
+        // back to false there once SES prod access is approved.
+        SKIP_EMAIL_VERIFICATION: String(this.node.tryGetContext("skipEmailVerification") === true),
       },
     });
     accountsTable.grantReadWriteData(accountsFn);

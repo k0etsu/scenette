@@ -127,6 +127,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           paused: message.asset.paused ?? false,
           s3Key: message.asset.s3Key,
           text: message.asset.text,
+          youtubeVideoId: message.asset.youtubeVideoId,
           name: message.asset.name,
           fontFamily: message.asset.fontFamily,
           fontSize: message.asset.fontSize,
@@ -143,6 +144,14 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           outlineEnabled: message.asset.outlineEnabled,
           outlineColor: message.asset.outlineColor,
           outlineWidth: message.asset.outlineWidth,
+          clockMode: message.asset.clockMode,
+          clockRunning: message.asset.clockRunning,
+          clockAnchorMs: message.asset.clockAnchorMs,
+          clockElapsedMs: message.asset.clockElapsedMs,
+          clockDurationMs: message.asset.clockDurationMs,
+          clockTargetMs: message.asset.clockTargetMs,
+          clockTimezone: message.asset.clockTimezone,
+          clockFormat: message.asset.clockFormat,
           fileSize,
           uploadedAt: now,
           lastUsedAt: now,
@@ -259,6 +268,17 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
         await broadcastToRoom(apiGw, message.roomId, {
           type: "asset:stopped",
           assetId: message.assetId,
+        });
+        break;
+      }
+
+      // Same pure-relay shape as asset:stop above -- see AssetSeekMessage's
+      // protocol doc comment for why a seek is never persisted either.
+      case "asset:seek": {
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "asset:seeked",
+          assetId: message.assetId,
+          positionSeconds: message.positionSeconds,
         });
         break;
       }

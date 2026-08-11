@@ -8,6 +8,12 @@ import { changePassword, changeEmail, deleteAccount } from "./auth";
 // exception that needs to leave the app entirely (see handleDeleteAccount).
 export class SettingsModal {
   private httpApiUrl = "";
+  // Set by open() for the duration of this modal visit -- called after a
+  // successful email change so the dashboard behind the modal (which
+  // rendered from a session snapshot taken before the modal opened) can
+  // refetch and pick up the new emailVerified/personalRoomId state instead
+  // of only catching up on the next full reload.
+  private onEmailChanged: (() => void) | undefined;
   private readonly statusEl: HTMLElement;
   private readonly emailInput: HTMLInputElement;
   private readonly currentPasswordInput: HTMLInputElement;
@@ -62,8 +68,9 @@ export class SettingsModal {
     root.querySelector('[data-role="delete-account"]')!.addEventListener("click", () => this.handleDeleteAccount());
   }
 
-  open(httpApiUrl: string, currentEmail: string | undefined): void {
+  open(httpApiUrl: string, currentEmail: string | undefined, onEmailChanged?: () => void): void {
     this.httpApiUrl = httpApiUrl;
+    this.onEmailChanged = onEmailChanged;
     this.statusEl.textContent = "";
     this.currentPasswordInput.value = "";
     this.newPasswordInput.value = "";
@@ -93,6 +100,7 @@ export class SettingsModal {
     try {
       await changeEmail(this.httpApiUrl, this.emailInput.value.trim());
       this.statusEl.textContent = "Email updated.";
+      this.onEmailChanged?.();
     } catch (err) {
       this.statusEl.textContent = `Failed to update email: ${err instanceof Error ? err.message : String(err)}`;
     }
