@@ -1082,6 +1082,15 @@ export class CanvasView {
         wrapper.style.width = `${YOUTUBE_NATIVE_WIDTH}px`;
         wrapper.style.height = `${YOUTUBE_NATIVE_HEIGHT}px`;
         wrapper.style.transformOrigin = "0 0";
+        // The YT iframe is a separate browsing context -- mouse events over
+        // it never bubble up to `el`'s own mousedown listener below, which
+        // is what drives select/drag/resize, so without this the asset was
+        // simply unclickable/undraggable anywhere the iframe covers (i.e.
+        // everywhere). Safe to disable entirely: controls: 0 (see
+        // createYoutubePlayerController below) already means there's no
+        // YouTube UI in there to click on directly -- playback is driven
+        // from the sidebar/media-controls widget instead.
+        wrapper.style.pointerEvents = "none";
         content = wrapper;
         const mount = document.createElement("div");
         mount.style.width = "100%";

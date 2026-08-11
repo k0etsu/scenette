@@ -172,6 +172,19 @@ document.addEventListener("keydown", (event) => {
 // Deliberately narrow: only a single bare http(s) URL and nothing else, so
 // pasting an arbitrary sentence or multi-line text never gets mistaken for
 // an upload attempt.
+// True while the paste's actual target is a normal text-entry surface (an
+// <input>/<textarea>, or a contentEditable element -- e.g. a text asset
+// mid inline-edit, or the YouTube URL modal's own field) -- the global
+// paste handler below must leave those alone entirely. Without this, pasting
+// a URL into any such field also (incorrectly) created a canvas asset from
+// the very same paste, since the window-level listener fires regardless of
+// focus -- most visibly as two identical youtube assets when pasting into
+// the "Add YouTube" modal's input, whose own submit already creates one.
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+}
+
 function extractMediaUrl(clipboardData: DataTransfer | null | undefined): string | undefined {
   const text = (clipboardData?.getData("text/uri-list") || clipboardData?.getData("text/plain"))?.trim();
   if (!text || /\s/.test(text)) return undefined;
@@ -520,6 +533,7 @@ async function main(): Promise<void> {
   });
 
   window.addEventListener("paste", (event) => {
+    if (isEditableTarget(event.target)) return;
     const file = Array.from(event.clipboardData?.items ?? [])
       .find((item) => item.kind === "file")
       ?.getAsFile();

@@ -940,6 +940,12 @@ describe("youtube asset", () => {
     expect(wrapper.children).toHaveLength(1); // the mount div the YT player attaches into
   });
 
+  it("disables pointer events on the wrapper -- regression: the YT iframe is a separate browsing context, so mouse events over it never bubble up to el's own mousedown listener, making the asset unclickable/undraggable", () => {
+    const { canvas } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(ytWrapper().style.pointerEvents).toBe("none");
+  });
+
   it("CSS-scales the wrapper non-uniformly to fit the asset's actual box, rather than resizing it directly", () => {
     const { canvas } = setup();
     canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 640, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
