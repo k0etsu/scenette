@@ -2,7 +2,13 @@
   "compilerOptions": {
     "target": "ES2022",
     "module": "commonjs",
-    "lib": ["ES2022"],
+    // DOM is only needed by youtubePlayer.ts (a deliberate exception to the
+    // rest of this package's pure, environment-agnostic functions -- see
+    // its own header comment). skipLibCheck (set here and in every other
+    // tsconfig in this repo) means server-side consumers with no DOM lib
+    // of their own never need to resolve these types just to import
+    // unrelated exports from this package.
+    "lib": ["ES2022", "DOM"],
     "declaration": true,
     "strict": true,
     "esModuleInterop": true,

@@ -75,6 +75,27 @@ describe("visibility and geometry", () => {
   });
 });
 
+describe("pointer-events -- this is a pure output surface, nothing should ever interact with playback directly", () => {
+  it("disables pointer events on a video element", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "video" }));
+    expect((root.querySelector("video") as HTMLElement).style.pointerEvents).toBe("none");
+  });
+
+  it("disables pointer events on an audio element", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "audio" }));
+    expect((root.querySelector("audio") as HTMLElement).style.pointerEvents).toBe("none");
+  });
+
+  it("disables pointer events on the youtube wrapper", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    const wrapper = root.querySelector('[data-asset-type="youtube"]')!.firstElementChild as HTMLElement;
+    expect(wrapper.style.pointerEvents).toBe("none");
+  });
+});
+
 describe("stop()", () => {
   it("resets a video's currentTime to 0", () => {
     const renderer = new Renderer(root, "assets.example.com");
@@ -107,6 +128,47 @@ describe("stop()", () => {
     const renderer = new Renderer(root, "assets.example.com");
     renderer.upsert(makeAsset({ type: "image" }));
     expect(() => renderer.stop("a1")).not.toThrow();
+  });
+});
+
+describe("seek()", () => {
+  it("sets a video's currentTime to the given position", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "video" }));
+    const video = root.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true });
+
+    renderer.seek("a1", 42.5);
+
+    expect(video.currentTime).toBe(42.5);
+  });
+
+  it("sets an audio asset's currentTime too", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "audio" }));
+    const audio = root.querySelector("audio") as HTMLAudioElement;
+    Object.defineProperty(audio, "currentTime", { value: 0, writable: true });
+
+    renderer.seek("a1", 10);
+
+    expect(audio.currentTime).toBe(10);
+  });
+
+  it("does nothing for an unknown assetId", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    expect(() => renderer.seek("missing", 5)).not.toThrow();
+  });
+
+  it("does nothing for a non-media asset type (e.g. image)", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "image" }));
+    expect(() => renderer.seek("a1", 5)).not.toThrow();
+  });
+
+  it("does not throw for a youtube asset (player not necessarily ready yet)", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => renderer.seek("a1", 5)).not.toThrow();
   });
 });
 
@@ -221,6 +283,145 @@ describe("global volume (regression: playback going unresponsive during a volume
     renderer.setGlobalVolume(0.5, 1);
     const audio = root.querySelector("audio") as HTMLAudioElement;
     expect(audio.volume).toBeCloseTo(0.25, 5);
+  });
+});
+
+// Regression coverage for the loop bug: this connection is read-only (no
+// session, blocked from asset:update server-side), so unlike control-ui it
+// can never patch the server's stale asset.paused itself when a video/audio
+// naturally ends -- it has to suppress the resulting auto-restart locally
+// instead (see Entry.endedWhileNotLooping's doc comment in render.ts).
+describe("media 'ended' event (loop-bug regression)", () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  });
+
+  it("stops re-issuing .play() after a non-looping video ends, even though asset.paused still (incorrectly) says false", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "video", paused: false, loop: false });
+    renderer.upsert(asset);
+    const video = root.querySelector("video") as HTMLVideoElement;
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+
+    video.dispatchEvent(new Event("ended"));
+    // A subsequent resync (e.g. the periodic room:snapshot poll) re-delivers
+    // the same stale asset -- this must not call .play() again.
+    renderer.upsert({ ...asset });
+
+    expect(playSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not suppress when the asset is set to loop", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "video", paused: false, loop: true });
+    renderer.upsert(asset);
+    const video = root.querySelector("video") as HTMLVideoElement;
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+
+    video.dispatchEvent(new Event("ended"));
+    renderer.upsert({ ...asset });
+
+    expect(playSpy).toHaveBeenCalled();
+  });
+
+  it("stops suppressing once the server's own state catches up with paused: true", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "video", paused: false, loop: false });
+    renderer.upsert(asset);
+    const video = root.querySelector("video") as HTMLVideoElement;
+    video.dispatchEvent(new Event("ended"));
+
+    // The corrected patch arrives (from some other, non-read-only
+    // connection) -- paused: true, so this render just applies the pause,
+    // no suppression needed or left behind.
+    renderer.upsert({ ...asset, paused: true, seq: 2 });
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+
+    // A later explicit resume (someone clicks Play again) must work normally.
+    renderer.upsert({ ...asset, paused: false, seq: 3 });
+
+    expect(playSpy).toHaveBeenCalled();
+  });
+
+  it("stop() clears the suppression so a later resume plays normally", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "video", paused: false, loop: false });
+    renderer.upsert(asset);
+    const video = root.querySelector("video") as HTMLVideoElement;
+    video.dispatchEvent(new Event("ended"));
+
+    renderer.stop("a1");
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+    renderer.upsert({ ...asset, seq: 2 });
+
+    expect(playSpy).toHaveBeenCalled();
+  });
+
+  it("also suppresses for a non-looping audio asset", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    const asset = makeAsset({ type: "audio", paused: false, loop: false });
+    renderer.upsert(asset);
+    const audio = root.querySelector("audio") as HTMLAudioElement;
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play);
+    playSpy.mockClear();
+
+    audio.dispatchEvent(new Event("ended"));
+    renderer.upsert({ ...asset });
+
+    expect(playSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("youtube asset", () => {
+  function ytWrapper(): HTMLElement {
+    return root.querySelector('[data-asset-type="youtube"]')!.firstElementChild as HTMLElement;
+  }
+
+  it("renders a fixed 1280x720 wrapper nested inside the positioned outer element, regardless of the asset's own box size", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", width: 320, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    const wrapper = ytWrapper();
+    expect(wrapper.style.width).toBe("1280px");
+    expect(wrapper.style.height).toBe("720px");
+  });
+
+  it("letterboxes (uniform scale, contain-style) rather than stretching non-uniformly -- snaps immediately on first appearance, nothing to interpolate from yet", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    // Box isn't 16:9 -- height (180) is the binding constraint for a
+    // 640-wide box, matching CSS object-fit: contain.
+    renderer.upsert(makeAsset({ type: "youtube", width: 640, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    const scale = 180 / 720; // 0.25
+    const offsetX = (640 - 1280 * scale) / 2; // 160
+    expect(ytWrapper().style.transform).toBe(`translate(${offsetX}px, 0px) scale(${scale})`);
+  });
+
+  it("stop() does not throw for a youtube asset (player not necessarily ready yet)", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => renderer.stop("a1")).not.toThrow();
+  });
+
+  it("remove() destroys the youtube player controller without throwing", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => renderer.remove("a1")).not.toThrow();
+    expect(root.children).toHaveLength(0);
+  });
+
+  it("setAssets removing a youtube asset destroys its controller without throwing", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.setAssets([makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" })]);
+    expect(() => renderer.setAssets([])).not.toThrow();
+  });
+
+  it("setGlobalVolume does not throw for a youtube asset", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => renderer.setGlobalVolume(0.5, 1)).not.toThrow();
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseClientMessage } from "../src/messages";
+import { parseClientMessage, isValidYoutubeVideoId, extractYoutubeVideoId, isSeqGuardedMessage } from "../src/messages";
 
 function send(body: unknown): ReturnType<typeof parseClientMessage> {
   return parseClientMessage(JSON.stringify(body));
@@ -52,6 +52,7 @@ describe("parseClientMessage", () => {
           zIndex: undefined,
           s3Key: undefined,
           text: undefined,
+          youtubeVideoId: undefined,
           name: undefined,
           opacity: undefined,
           blur: undefined,
@@ -135,6 +136,27 @@ describe("parseClientMessage", () => {
 
     it("rejects an invalid asset type", () => {
       expect(() => send({ ...base, asset: { ...base.asset, type: "bogus" } })).toThrow("Invalid asset.type");
+    });
+
+    it("accepts a youtube asset with a valid video ID", () => {
+      const result = send({
+        ...base,
+        asset: { ...base.asset, type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" },
+      }) as { asset: { type: string; youtubeVideoId?: string } };
+      expect(result.asset.type).toBe("youtube");
+      expect(result.asset.youtubeVideoId).toBe("dQw4w9WgXcQ");
+    });
+
+    it("rejects a youtube asset with no video ID", () => {
+      expect(() => send({ ...base, asset: { ...base.asset, type: "youtube" } })).toThrow(
+        "Missing/invalid asset.youtubeVideoId"
+      );
+    });
+
+    it("rejects a youtube asset with a malformed video ID", () => {
+      expect(() =>
+        send({ ...base, asset: { ...base.asset, type: "youtube", youtubeVideoId: "not-11-chars" } })
+      ).toThrow("Missing/invalid asset.youtubeVideoId");
     });
 
     it.each(["x", "y", "width", "height"])("rejects a missing/non-numeric %s", (key) => {
@@ -374,6 +396,39 @@ describe("parseClientMessage", () => {
     });
   });
 
+  describe("asset:seek", () => {
+    it("parses a seek message", () => {
+      expect(send({ action: "asset:seek", roomId: "room1", assetId: "a1", positionSeconds: 12.5 })).toEqual({
+        action: "asset:seek",
+        roomId: "room1",
+        assetId: "a1",
+        positionSeconds: 12.5,
+      });
+    });
+
+    it("accepts a position of exactly 0", () => {
+      expect(send({ action: "asset:seek", roomId: "room1", assetId: "a1", positionSeconds: 0 })).toMatchObject({
+        positionSeconds: 0,
+      });
+    });
+
+    it("rejects a missing assetId", () => {
+      expect(() => send({ action: "asset:seek", roomId: "room1", positionSeconds: 5 })).toThrow("Missing assetId");
+    });
+
+    it("rejects a missing positionSeconds", () => {
+      expect(() => send({ action: "asset:seek", roomId: "room1", assetId: "a1" })).toThrow(
+        "Missing/invalid positionSeconds"
+      );
+    });
+
+    it("rejects a negative positionSeconds", () => {
+      expect(() =>
+        send({ action: "asset:seek", roomId: "room1", assetId: "a1", positionSeconds: -1 })
+      ).toThrow("Missing/invalid positionSeconds");
+    });
+  });
+
   describe("room:setGlobalVolume", () => {
     it("parses a valid message", () => {
       const msg = { action: "room:setGlobalVolume", roomId: "room1", globalVolume: 0.5, seq: 123 };
@@ -478,5 +533,74 @@ describe("parseClientMessage", () => {
     it("rejects an empty key", () => {
       expect(() => send({ action: "variable:delete", roomId: "room1", key: "" })).toThrow("Missing key");
     });
+  });
+});
+
+describe("isValidYoutubeVideoId", () => {
+  it("accepts an 11-character id from the expected character set", () => {
+    expect(isValidYoutubeVideoId("dQw4w9WgXcQ")).toBe(true);
+    expect(isValidYoutubeVideoId("a-b_c1D2e3F")).toBe(true);
+  });
+
+  it.each([
+    ["too short", "short"],
+    ["too long", "dQw4w9WgXcQQ"],
+    ["disallowed character", "dQw4w9Wg$cQ"],
+    ["not a string", 12345],
+    ["undefined", undefined],
+  ])("rejects %s", (_label, value) => {
+    expect(isValidYoutubeVideoId(value)).toBe(false);
+  });
+});
+
+describe("extractYoutubeVideoId", () => {
+  const id = "dQw4w9WgXcQ";
+
+  it.each([
+    ["watch URL", `https://www.youtube.com/watch?v=${id}`],
+    ["watch URL without www", `https://youtube.com/watch?v=${id}`],
+    ["watch URL with extra query params", `https://www.youtube.com/watch?v=${id}&t=30s&list=PL123`],
+    ["http (not https)", `http://www.youtube.com/watch?v=${id}`],
+    ["youtu.be short link", `https://youtu.be/${id}`],
+    ["youtu.be with query params", `https://youtu.be/${id}?t=30`],
+    ["shorts URL", `https://www.youtube.com/shorts/${id}`],
+    ["embed URL", `https://www.youtube.com/embed/${id}`],
+    ["m.youtube.com watch URL", `https://m.youtube.com/watch?v=${id}`],
+  ])("extracts the video id from a %s", (_label, url) => {
+    expect(extractYoutubeVideoId(url)).toBe(id);
+  });
+
+  it.each([
+    ["not a URL at all", "just some text"],
+    ["a non-YouTube URL", "https://example.com/watch?v=dQw4w9WgXcQ"],
+    ["a YouTube URL with no video id", "https://www.youtube.com/watch"],
+    ["a YouTube channel URL", "https://www.youtube.com/@someChannel"],
+    ["a malformed video id", `https://www.youtube.com/watch?v=short`],
+  ])("returns undefined for %s", (_label, url) => {
+    expect(extractYoutubeVideoId(url)).toBeUndefined();
+  });
+});
+
+describe("isSeqGuardedMessage", () => {
+  it.each(["asset:moved", "asset:resized", "asset:updated", "room:globalVolumeChanged", "room:streamPreviewSettingsChanged"])(
+    "returns true for %s -- a losing seq race silently drops it with no broadcast",
+    (type) => {
+      expect(isSeqGuardedMessage(type as never)).toBe(true);
+    }
+  );
+
+  it.each([
+    "asset:added",
+    "asset:deleted",
+    "asset:stopped",
+    "asset:seeked",
+    "variable:updated",
+    "variable:deleted",
+    "presence:joined",
+    "presence:left",
+    "error",
+    "room:snapshot",
+  ])("returns false for %s -- an unconditional write, or already its own no-drop broadcast, with no race to lose", (type) => {
+    expect(isSeqGuardedMessage(type as never)).toBe(false);
   });
 });

@@ -127,6 +127,7 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
           paused: message.asset.paused ?? false,
           s3Key: message.asset.s3Key,
           text: message.asset.text,
+          youtubeVideoId: message.asset.youtubeVideoId,
           name: message.asset.name,
           fontFamily: message.asset.fontFamily,
           fontSize: message.asset.fontSize,
@@ -267,6 +268,17 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
         await broadcastToRoom(apiGw, message.roomId, {
           type: "asset:stopped",
           assetId: message.assetId,
+        });
+        break;
+      }
+
+      // Same pure-relay shape as asset:stop above -- see AssetSeekMessage's
+      // protocol doc comment for why a seek is never persisted either.
+      case "asset:seek": {
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "asset:seeked",
+          assetId: message.assetId,
+          positionSeconds: message.positionSeconds,
         });
         break;
       }

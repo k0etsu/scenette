@@ -6,6 +6,8 @@ import {
   ClockFields,
   computeClockDisplay,
   localTimezone,
+  extractYoutubeVideoId,
+  isSeqGuardedMessage,
 } from "@scenette/protocol";
 import { ResilientConnection } from "@scenette/ws-client";
 import { CanvasView, MIN_ASSET_SIZE } from "./canvas";
@@ -18,6 +20,7 @@ import { UploadIndicator } from "./uploadIndicator";
 import { loadConfig } from "./config";
 import { AccessModal } from "./accessModal";
 import { SettingsModal } from "./settingsModal";
+import { YoutubeUrlModal } from "./youtubeUrlModal";
 import { RoomPicker } from "./roomPicker";
 import { StreamPreviewPanel } from "./streamPreview";
 import { measureTextBoxSize } from "./textMeasure";
@@ -76,6 +79,8 @@ const contextMenu = document.getElementById("context-menu");
 const contextMenuTextButton = document.getElementById("context-menu-text");
 const contextMenuMediaButton = document.getElementById("context-menu-media");
 const contextMenuClockButton = document.getElementById("context-menu-clock");
+const contextMenuYoutubeButton = document.getElementById("context-menu-youtube");
+const youtubeUrlModalEl = document.getElementById("youtube-url-modal");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !loginHint ||
@@ -85,7 +90,8 @@ if (
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !uploadIndicatorEl || !manageAccessButton || !accessModalEl || !settingsModalEl ||
   !copyBrowserSourceButton || !dashboardButton || !statusEl || !contextMenu ||
-  !contextMenuTextButton || !contextMenuMediaButton || !contextMenuClockButton
+  !contextMenuTextButton || !contextMenuMediaButton || !contextMenuClockButton ||
+  !contextMenuYoutubeButton || !youtubeUrlModalEl
 ) {
   throw new Error("Missing required DOM elements");
 }
@@ -93,14 +99,26 @@ if (
 // Everything that lives for exactly one room at a time -- torn down and
 // rebuilt on every room switch (Dashboard button, picking a different room,
 // browser back/forward). Kept in one mutable holder rather than scattered
-// Deliberately more conservative than browser-source's own poll (see that
-// app's main.ts) -- cost here scales with concurrent collaborator tabs per
-// room, not just one OBS source, and (unlike browser-source) a poll landing
-// mid-edit carries real correctness risk without the guards in canvas.ts's
-// setAssets. This is a slower defense-in-depth safety net for a
-// *collaborator's* drift, not the primary (already near-real-time) sync
-// path for this browser's own edits.
-const SNAPSHOT_POLL_INTERVAL_MS = 5000;
+// Self-heals a delta that lost its seq race and got silently dropped
+// server-side (see isSeqGuardedMessage's own doc comment for exactly which
+// broadcast types that applies to) -- see canvas.ts's setAssets for the
+// guards that keep an incoming snapshot from clobbering an in-progress local
+// edit, so a poll landing mid-drag/mid-edit is already safe regardless of
+// what triggers it.
+//
+// Activity-gated (armed by isSeqGuardedMessage broadcasts, see enterRoom's
+// armResyncSettleTimer) rather than a constant interval -- a drop can only
+// happen when something is actually racing, so an idle room gets zero polls.
+// A prior fixed-interval design (every 5s, forever, regardless of activity)
+// contributed meaningfully to a free-tier Lambda usage incident even at this
+// looser interval than browser-source's own (which was the dominant cause at
+// a much tighter 1s) -- see that app's main.ts for the fuller writeup.
+const RESYNC_SETTLE_MS = 3000;
+// Sparse fallback for a drop followed by total silence (no further
+// seq-guarded broadcast ever arrives to re-arm the settle timer) -- infrequent
+// enough to be nearly free. Reconnect gaps are already fully covered
+// separately (onOpen always re-requests a snapshot immediately).
+const RESYNC_FALLBACK_INTERVAL_MS = 3 * 60 * 1000;
 
 // How often to re-check the session while logged in. Each check slides the
 // session TTL and re-issues the cookie server-side (keeping a long-open tab's
@@ -130,12 +148,12 @@ interface RoomSession {
   // land -- world coords from a right-click, or undefined to default to
   // the viewport center.
   createPosition?: { x: number; y: number };
-  // Periodic room:snapshot:request poll (see the connection's onOpen below)
-  // -- self-heals any delta that lost its seq race against another message
-  // and got silently dropped server-side. Cleared in teardownCurrentRoom()
-  // so switching rooms doesn't leave a timer still polling a room this
-  // connection has left.
-  pollTimer?: ReturnType<typeof setInterval>;
+  // Activity-gated resync timers (see the connection's onOpen below and
+  // RESYNC_SETTLE_MS's own doc comment) -- both cleared in
+  // teardownCurrentRoom() so switching rooms doesn't leave either still
+  // polling a room this connection has left.
+  settleTimer?: ReturnType<typeof setTimeout>;
+  fallbackTimer?: ReturnType<typeof setInterval>;
   // Set true once the first room:snapshot of this session has been fed to the
   // stream-preview panel via enterRoom() (a one-time reset of local-only view
   // toggles -- embed/interactive/opacity). Later snapshots go through the
@@ -167,6 +185,19 @@ document.addEventListener("keydown", (event) => {
 // Deliberately narrow: only a single bare http(s) URL and nothing else, so
 // pasting an arbitrary sentence or multi-line text never gets mistaken for
 // an upload attempt.
+// True while the paste's actual target is a normal text-entry surface (an
+// <input>/<textarea>, or a contentEditable element -- e.g. a text asset
+// mid inline-edit, or the YouTube URL modal's own field) -- the global
+// paste handler below must leave those alone entirely. Without this, pasting
+// a URL into any such field also (incorrectly) created a canvas asset from
+// the very same paste, since the window-level listener fires regardless of
+// focus -- most visibly as two identical youtube assets when pasting into
+// the "Add YouTube" modal's input, whose own submit already creates one.
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
+}
+
 function extractMediaUrl(clipboardData: DataTransfer | null | undefined): string | undefined {
   const text = (clipboardData?.getData("text/uri-list") || clipboardData?.getData("text/plain"))?.trim();
   if (!text || /\s/.test(text)) return undefined;
@@ -242,7 +273,8 @@ async function main(): Promise<void> {
 
   function teardownCurrentRoom(): void {
     if (!current) return;
-    if (current.pollTimer) clearInterval(current.pollTimer);
+    if (current.settleTimer) clearTimeout(current.settleTimer);
+    if (current.fallbackTimer) clearInterval(current.fallbackTimer);
     current.connection.stop();
     current.canvas.dispose();
     current.sidebar.dispose();
@@ -388,6 +420,42 @@ async function main(): Promise<void> {
     });
   }
 
+  // No upload, no server round-trip for the video itself -- same shape as
+  // createTextAsset/createClockAsset above, not placeUploadedAsset's
+  // UploadResult-based path. There's no natural size to measure the way an
+  // uploaded file has (nothing is fetched here), so this defaults to a
+  // fixed 16:9 box matching the embed's own native 1280x720 ratio (see
+  // canvas.ts's YOUTUBE_NATIVE_WIDTH).
+  function createYoutubeAsset(videoId: string): void {
+    if (!current) return;
+    const width = 480;
+    const height = 270;
+    const viewport = current.canvas.getViewport();
+    const pos = current.createPosition ??
+      current.canvas.getCursorWorldPosition() ?? {
+        x: viewport.x + viewport.width / 2 - width / 2,
+        y: viewport.y + viewport.height / 2 - height / 2,
+      };
+    current.createPosition = undefined;
+
+    current.connection.send({
+      action: "asset:add",
+      roomId: current.roomId,
+      asset: {
+        assetId: crypto.randomUUID(),
+        type: "youtube",
+        x: pos.x,
+        y: pos.y,
+        width,
+        height,
+        youtubeVideoId: videoId,
+        // Matches the existing upload convention (see placeUploadedAsset) --
+        // starts paused rather than autoplaying immediately into the room.
+        paused: true,
+      },
+    });
+  }
+
   contextMenuTextButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     createTextAsset();
@@ -479,6 +547,7 @@ async function main(): Promise<void> {
   });
 
   window.addEventListener("paste", (event) => {
+    if (isEditableTarget(event.target)) return;
     const file = Array.from(event.clipboardData?.items ?? [])
       .find((item) => item.kind === "file")
       ?.getAsFile();
@@ -487,12 +556,27 @@ async function main(): Promise<void> {
       return;
     }
     const pastedUrl = extractMediaUrl(event.clipboardData);
-    if (pastedUrl) void handleUploadFromUrl(pastedUrl);
+    if (!pastedUrl) return;
+    // Checked before the generic upload-from-url path -- a YouTube page
+    // isn't a downloadable media file, so fetching it server-side the way
+    // an image/gif URL is would just fail.
+    const videoId = extractYoutubeVideoId(pastedUrl);
+    if (videoId) {
+      createYoutubeAsset(videoId);
+    } else {
+      void handleUploadFromUrl(pastedUrl);
+    }
   });
 
   contextMenuMediaButton!.addEventListener("click", () => {
     contextMenu!.style.display = "none";
     triggerMediaUpload();
+  });
+
+  const youtubeUrlModal = new YoutubeUrlModal(youtubeUrlModalEl!);
+  contextMenuYoutubeButton!.addEventListener("click", () => {
+    contextMenu!.style.display = "none";
+    youtubeUrlModal.open((videoId) => createYoutubeAsset(videoId));
   });
 
   contextMenuClockButton!.addEventListener("click", () => {
@@ -718,6 +802,9 @@ function enterRoom(
       onAssetStop: (assetId) => {
         room.connection.send({ action: "asset:stop", roomId, assetId });
       },
+      onAssetSeek: (assetId, positionSeconds) => {
+        room.connection.send({ action: "asset:seek", roomId, assetId, positionSeconds });
+      },
       onContextMenu: (worldX, worldY, screenX, screenY) => {
         room.createPosition = { x: worldX, y: worldY };
         showContextMenu(screenX, screenY);
@@ -841,6 +928,17 @@ function enterRoom(
     onSet: (key, type, value) => room.connection.send({ action: "variable:set", roomId, key, type, value }),
   });
 
+  // (Re-)arms the catch-up snapshot request -- called on every seq-guarded
+  // broadcast (see isSeqGuardedMessage), so it only ever actually fires
+  // RESYNC_SETTLE_MS after activity goes quiet, not on a fixed cadence.
+  function armResyncSettleTimer(): void {
+    if (room.settleTimer) clearTimeout(room.settleTimer);
+    room.settleTimer = setTimeout(() => {
+      room.settleTimer = undefined;
+      connection.send({ action: "room:snapshot:request", roomId });
+    }, RESYNC_SETTLE_MS);
+  }
+
   const connection = new ResilientConnection({
     wsUrl,
     roomId,
@@ -849,20 +947,19 @@ function enterRoom(
     onOpen: () => {
       connection.send({ action: "room:snapshot:request", roomId });
 
-      // (Re-)armed here rather than started once outside onOpen -- onOpen
-      // already fires on every reconnect (proactive swap or drop/retry), so
-      // arming from inside it guarantees no two overlapping intervals can
-      // ever run across a reconnect. Self-heals any delta that lost its seq
-      // race against another message and got silently dropped server-side
-      // (see roomState.ts's per-asset conditional write) -- see
-      // canvas.ts's setAssets for the guards that keep this from clobbering
-      // an in-progress local edit.
-      if (room.pollTimer) clearInterval(room.pollTimer);
-      room.pollTimer = setInterval(() => {
+      // Timers (re-)armed here rather than started once outside onOpen --
+      // onOpen already fires on every reconnect (proactive swap or
+      // drop/retry), so arming from inside it guarantees no two overlapping
+      // timers can ever run across a reconnect.
+      if (room.settleTimer) clearTimeout(room.settleTimer);
+      room.settleTimer = undefined;
+      if (room.fallbackTimer) clearInterval(room.fallbackTimer);
+      room.fallbackTimer = setInterval(() => {
         connection.send({ action: "room:snapshot:request", roomId });
-      }, SNAPSHOT_POLL_INTERVAL_MS);
+      }, RESYNC_FALLBACK_INTERVAL_MS);
     },
     onMessage: (message: ServerMessage) => {
+      if (isSeqGuardedMessage(message.type)) armResyncSettleTimer();
       switch (message.type) {
         case "room:snapshot":
           canvas.setViewport({ roomId, ...message.viewport });
@@ -932,6 +1029,9 @@ function enterRoom(
         case "asset:stopped":
           canvas.applyRemoteStop(message.assetId);
           break;
+        case "asset:seeked":
+          canvas.applyRemoteSeek(message.assetId, message.positionSeconds);
+          break;
         case "room:globalVolumeChanged":
           soundPanel.setGlobalVolume(message.globalVolume, message.seq);
           break;
@@ -987,6 +1087,7 @@ function enterRoom(
       zIndex: source.zIndex,
       s3Key: source.s3Key,
       text: source.text,
+      youtubeVideoId: source.youtubeVideoId,
       name: source.name,
       opacity: source.opacity,
       blur: source.blur,
