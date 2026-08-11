@@ -788,6 +788,9 @@ function enterRoom(
       onAssetStop: (assetId) => {
         room.connection.send({ action: "asset:stop", roomId, assetId });
       },
+      onAssetSeek: (assetId, positionSeconds) => {
+        room.connection.send({ action: "asset:seek", roomId, assetId, positionSeconds });
+      },
       onContextMenu: (worldX, worldY, screenX, screenY) => {
         room.createPosition = { x: worldX, y: worldY };
         showContextMenu(screenX, screenY);
@@ -1001,6 +1004,9 @@ function enterRoom(
           break;
         case "asset:stopped":
           canvas.applyRemoteStop(message.assetId);
+          break;
+        case "asset:seeked":
+          canvas.applyRemoteSeek(message.assetId, message.positionSeconds);
           break;
         case "room:globalVolumeChanged":
           soundPanel.setGlobalVolume(message.globalVolume, message.seq);

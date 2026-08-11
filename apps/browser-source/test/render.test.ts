@@ -75,6 +75,27 @@ describe("visibility and geometry", () => {
   });
 });
 
+describe("pointer-events -- this is a pure output surface, nothing should ever interact with playback directly", () => {
+  it("disables pointer events on a video element", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "video" }));
+    expect((root.querySelector("video") as HTMLElement).style.pointerEvents).toBe("none");
+  });
+
+  it("disables pointer events on an audio element", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "audio" }));
+    expect((root.querySelector("audio") as HTMLElement).style.pointerEvents).toBe("none");
+  });
+
+  it("disables pointer events on the youtube wrapper", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    const wrapper = root.querySelector('[data-asset-type="youtube"]')!.firstElementChild as HTMLElement;
+    expect(wrapper.style.pointerEvents).toBe("none");
+  });
+});
+
 describe("stop()", () => {
   it("resets a video's currentTime to 0", () => {
     const renderer = new Renderer(root, "assets.example.com");
@@ -107,6 +128,47 @@ describe("stop()", () => {
     const renderer = new Renderer(root, "assets.example.com");
     renderer.upsert(makeAsset({ type: "image" }));
     expect(() => renderer.stop("a1")).not.toThrow();
+  });
+});
+
+describe("seek()", () => {
+  it("sets a video's currentTime to the given position", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "video" }));
+    const video = root.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true });
+
+    renderer.seek("a1", 42.5);
+
+    expect(video.currentTime).toBe(42.5);
+  });
+
+  it("sets an audio asset's currentTime too", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "audio" }));
+    const audio = root.querySelector("audio") as HTMLAudioElement;
+    Object.defineProperty(audio, "currentTime", { value: 0, writable: true });
+
+    renderer.seek("a1", 10);
+
+    expect(audio.currentTime).toBe(10);
+  });
+
+  it("does nothing for an unknown assetId", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    expect(() => renderer.seek("missing", 5)).not.toThrow();
+  });
+
+  it("does nothing for a non-media asset type (e.g. image)", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "image" }));
+    expect(() => renderer.seek("a1", 5)).not.toThrow();
+  });
+
+  it("does not throw for a youtube asset (player not necessarily ready yet)", () => {
+    const renderer = new Renderer(root, "assets.example.com");
+    renderer.upsert(makeAsset({ type: "youtube", youtubeVideoId: "dQw4w9WgXcQ" }));
+    expect(() => renderer.seek("a1", 5)).not.toThrow();
   });
 });
 

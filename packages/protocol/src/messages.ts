@@ -154,6 +154,18 @@ export interface AssetStopMessage {
   assetId: string;
 }
 
+// Same "ephemeral, never persisted" rationale as AssetStopMessage above --
+// scrubbing a video/audio/youtube asset's seek slider is a live position
+// jump, not a change to any stored Asset field. A client that connects
+// after a seek simply starts from wherever the media naturally is; there's
+// nothing later arrivals need to catch up on.
+export interface AssetSeekMessage {
+  action: "asset:seek";
+  roomId: string;
+  assetId: string;
+  positionSeconds: number;
+}
+
 // Global volume is a room-level master multiplier applied on top of each
 // asset's own volume, broadcast to every client (control-ui AND
 // browser-source) -- it's what viewers actually hear. Local volume (see
@@ -221,6 +233,7 @@ export type ClientMessage =
   | AssetUpdateMessage
   | AssetDeleteMessage
   | AssetStopMessage
+  | AssetSeekMessage
   | RoomSetGlobalVolumeMessage
   | RoomSetStreamPreviewSettingsMessage
   | VariableSetMessage
@@ -278,6 +291,7 @@ export type ServerMessage =
   | { type: "asset:updated"; assetId: string; patch: AssetPatch; visible: boolean; seq: number }
   | { type: "asset:deleted"; assetId: string }
   | { type: "asset:stopped"; assetId: string }
+  | { type: "asset:seeked"; assetId: string; positionSeconds: number }
   | { type: "room:globalVolumeChanged"; globalVolume: number; seq: number }
   | { type: "room:streamPreviewSettingsChanged"; settings: StreamPreviewSettings; seq: number }
   | { type: "variable:updated"; variable: Variable }
@@ -423,6 +437,14 @@ export function parseClientMessage(raw: string): ClientMessage {
     case "asset:stop": {
       if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
       return { action: "asset:stop", roomId: msg.roomId, assetId: msg.assetId };
+    }
+
+    case "asset:seek": {
+      if (typeof msg.assetId !== "string") throw new Error("Missing assetId");
+      if (typeof msg.positionSeconds !== "number" || msg.positionSeconds < 0) {
+        throw new Error("Missing/invalid positionSeconds");
+      }
+      return { action: "asset:seek", roomId: msg.roomId, assetId: msg.assetId, positionSeconds: msg.positionSeconds };
     }
 
     case "room:setGlobalVolume": {

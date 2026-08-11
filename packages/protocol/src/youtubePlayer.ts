@@ -29,6 +29,8 @@ interface YTPlayer {
   setVolume(volume: number): void;
   getVolume(): number;
   getPlayerState(): number;
+  getCurrentTime(): number;
+  getDuration(): number;
   destroy(): void;
 }
 
@@ -102,6 +104,17 @@ export interface YoutubePlayerController {
   // caller's own { paused: true } patch/broadcast, exactly like the native
   // Stop button already does for video/audio.
   seekToStart(): void;
+  // Jumps to an arbitrary position without touching play/pause -- the
+  // youtube counterpart to setting a native element's .currentTime
+  // directly, for the seek slider (see canvas.ts's media-controls widget).
+  // A no-op before the player is ready, same as seekToStart.
+  seekTo(seconds: number): void;
+  // Best-effort reads of the player's own live state, for the seek
+  // slider's position/duration display -- 0 before the player is ready,
+  // matching a native element's .currentTime defaulting to 0 before
+  // metadata loads (callers already treat "not ready" as "nothing to show").
+  getCurrentTime(): number;
+  getDuration(): number;
   destroy(): void;
 }
 
@@ -207,6 +220,15 @@ export function createYoutubePlayerController(
       if (!player) return;
       player.seekTo(0, true);
       player.pauseVideo();
+    },
+    seekTo(seconds) {
+      player?.seekTo(seconds, true);
+    },
+    getCurrentTime() {
+      return player?.getCurrentTime() ?? 0;
+    },
+    getDuration() {
+      return player?.getDuration() ?? 0;
     },
     destroy() {
       destroyed = true;

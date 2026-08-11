@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Asset } from "@scenette/protocol";
-import { CanvasView, CanvasCallbacks } from "../src/canvas";
+import { CanvasView, CanvasCallbacks, MIN_ASSET_SIZE } from "../src/canvas";
 
 function makeAsset(overrides: Partial<Asset> = {}): Asset {
   return {
@@ -43,6 +43,7 @@ function makeCallbacks(overrides: Partial<CanvasCallbacks> = {}): CanvasCallback
     onAssetPatch: vi.fn(),
     onAssetDelete: vi.fn(),
     onAssetStop: vi.fn(),
+    onAssetSeek: vi.fn(),
     onContextMenu: vi.fn(),
     onSelectionChange: vi.fn(),
     ...overrides,
@@ -946,6 +947,54 @@ describe("youtube asset", () => {
     expect(ytWrapper().style.pointerEvents).toBe("none");
   });
 
+  it("keeps the locked 16:9 aspect ratio when corner-dragging to resize, even on a mixed diagonal drag", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", x: 0, y: 0, width: 320, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    canvas.selectAsset("yt1");
+    const handle = container.querySelector('[data-role="resize-handle"][data-corner="se"]') as HTMLElement;
+
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    // dx dominates -- height must be derived from the locked ratio, not dy.
+    window.dispatchEvent(new MouseEvent("mousemove", { movementX: 160, movementY: 5 }));
+    window.dispatchEvent(new MouseEvent("mouseup"));
+
+    const asset = canvas.get("yt1")!;
+    expect(asset.width).toBeCloseTo(480, 1);
+    expect(asset.height).toBeCloseTo(270, 1);
+    expect(asset.width / asset.height).toBeCloseTo(16 / 9, 5);
+  });
+
+  it("never lets the locked ratio distort at the minimum asset size", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", x: 0, y: 0, width: 320, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
+    canvas.selectAsset("yt1");
+    const handle = container.querySelector('[data-role="resize-handle"][data-corner="se"]') as HTMLElement;
+
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    window.dispatchEvent(new MouseEvent("mousemove", { movementX: -310, movementY: -170 }));
+    window.dispatchEvent(new MouseEvent("mouseup"));
+
+    const asset = canvas.get("yt1")!;
+    expect(asset.width).toBeGreaterThanOrEqual(MIN_ASSET_SIZE);
+    expect(asset.height).toBeGreaterThanOrEqual(MIN_ASSET_SIZE);
+    expect(asset.width / asset.height).toBeCloseTo(16 / 9, 5);
+  });
+
+  it("does not lock the aspect ratio for a plain video asset", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video", x: 0, y: 0, width: 320, height: 180 }));
+    canvas.selectAsset("v1");
+    const handle = container.querySelector('[data-role="resize-handle"][data-corner="se"]') as HTMLElement;
+
+    handle.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    window.dispatchEvent(new MouseEvent("mousemove", { movementX: 160, movementY: 5 }));
+    window.dispatchEvent(new MouseEvent("mouseup"));
+
+    const asset = canvas.get("v1")!;
+    expect(asset.width).toBeCloseTo(480, 1);
+    expect(asset.height).toBeCloseTo(185, 1); // unlocked -- dy applied independently
+  });
+
   it("CSS-scales the wrapper non-uniformly to fit the asset's actual box, rather than resizing it directly", () => {
     const { canvas } = setup();
     canvas.upsert(makeAsset({ assetId: "yt1", type: "youtube", width: 640, height: 180, youtubeVideoId: "dQw4w9WgXcQ" }));
@@ -1005,6 +1054,8 @@ describe("media-controls widget", () => {
       muted: root.querySelector('[data-role="mc-muted"]') as HTMLInputElement,
       volume: root.querySelector('[data-role="mc-volume"]') as HTMLInputElement,
       volumeLabel: root.querySelector('[data-role="mc-volume-label"]') as HTMLElement,
+      seek: root.querySelector('[data-role="mc-seek"]') as HTMLInputElement,
+      seekLabel: root.querySelector('[data-role="mc-seek-label"]') as HTMLElement,
     };
   }
 
@@ -1116,6 +1167,125 @@ describe("media-controls widget", () => {
     // playback position too, not just this browser's -- see
     // CanvasCallbacks.onAssetStop's doc comment.
     expect(callbacks.onAssetStop).toHaveBeenCalledWith("v1");
+  });
+});
+
+describe("media-controls widget -- seek slider", () => {
+  let now = 0;
+
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.useFakeTimers();
+    // Starts well past the throttle window (not 0) -- lastSeekSentAt also
+    // defaults to 0, and a mocked `now` of exactly 0 would make the very
+    // first send look like it's still within the window of a send that
+    // "already happened" at time 0, which is just a test-mock artifact
+    // (real performance.now() is never 0 by the time a user can click
+    // anything), not a real throttle-logic bug.
+    now = 1000;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function widget(container: HTMLElement) {
+    const root = container.parentElement!.querySelector('[data-role="media-controls"]') as HTMLElement;
+    return {
+      seek: root.querySelector('[data-role="mc-seek"]') as HTMLInputElement,
+      seekLabel: root.querySelector('[data-role="mc-seek-label"]') as HTMLElement,
+    };
+  }
+
+  it("reflects the selected video's current position/duration as soon as it's selected", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { value: 100, writable: true, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 25, writable: true, configurable: true });
+
+    canvas.selectAsset("v1");
+
+    const w = widget(container);
+    expect(w.seek.value).toBe("25");
+    expect(w.seekLabel.textContent).toBe("0:25 / 1:40");
+  });
+
+  it("dragging the slider seeks the local video immediately and sends a throttled asset:seek", () => {
+    const { canvas, container, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { value: 100, writable: true, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true, configurable: true });
+    canvas.selectAsset("v1");
+    const w = widget(container);
+
+    w.seek.value = "50";
+    w.seek.dispatchEvent(new Event("input"));
+
+    expect(video.currentTime).toBe(50);
+    expect(callbacks.onAssetSeek).toHaveBeenCalledWith("v1", 50);
+  });
+
+  it("throttles repeated input events, but the final 'change' on release always sends", () => {
+    const { canvas, container, callbacks } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { value: 100, writable: true, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true, configurable: true });
+    canvas.selectAsset("v1");
+    const w = widget(container);
+
+    w.seek.value = "10";
+    w.seek.dispatchEvent(new Event("input"));
+    expect(callbacks.onAssetSeek).toHaveBeenCalledTimes(1);
+
+    // Still inside the throttle window -- local scrub applies, but no
+    // second network send yet.
+    now += 10;
+    w.seek.value = "12";
+    w.seek.dispatchEvent(new Event("input"));
+    expect(video.currentTime).toBe(12);
+    expect(callbacks.onAssetSeek).toHaveBeenCalledTimes(1);
+
+    // Release: "change" always force-sends the exact drop position,
+    // regardless of the throttle window.
+    w.seek.value = "15";
+    w.seek.dispatchEvent(new Event("change"));
+    expect(callbacks.onAssetSeek).toHaveBeenLastCalledWith("v1", 15);
+    expect(callbacks.onAssetSeek).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let the periodic position poll clobber the slider mid-drag", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    const video = document.querySelector("video") as HTMLVideoElement;
+    Object.defineProperty(video, "duration", { value: 100, writable: true, configurable: true });
+    Object.defineProperty(video, "currentTime", { value: 0, writable: true, configurable: true });
+    canvas.selectAsset("v1");
+    const w = widget(container);
+
+    w.seek.value = "40";
+    w.seek.dispatchEvent(new Event("input")); // starts the drag
+
+    // The video's real currentTime is now 40 (from the drag itself), but a
+    // background poll tick must not overwrite the slider the user is still
+    // actively holding, even though it would compute the same value here --
+    // the point is the guard, not this specific number.
+    vi.advanceTimersByTime(1000);
+
+    expect(w.seek.value).toBe("40");
+  });
+
+  it("falls back to 0 when duration hasn't loaded yet (no NaN)", () => {
+    const { canvas, container } = setup();
+    canvas.upsert(makeAsset({ assetId: "v1", type: "video" }));
+    canvas.selectAsset("v1"); // jsdom's fresh <video> has duration NaN by default
+
+    const w = widget(container);
+    expect(w.seek.value).toBe("0");
+    expect(w.seekLabel.textContent).toBe("0:00 / 0:00");
   });
 });
 

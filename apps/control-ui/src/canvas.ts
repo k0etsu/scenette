@@ -85,6 +85,19 @@ const MOVE_SEND_THROTTLE_MS = 40;
 // mainly matters for fast typists/paste bursts rather than every edit.
 const TEXT_SEND_THROTTLE_MS = 100;
 
+// Caps how often a seek-slider drag broadcasts over the network -- same
+// "instant locally, throttled over the wire" split as move/resize. A little
+// looser than MOVE_SEND_THROTTLE_MS since a scrub position doesn't need to
+// feel as tight as a drag, and the final position is always sent
+// unthrottled on release (see the slider's "change" handler) regardless of
+// this cap.
+const SEEK_SEND_THROTTLE_MS = 150;
+
+// How often the media-controls widget's seek slider re-reads the selected
+// asset's live playback position -- see mediaControlsSeekTimer's own doc
+// comment for why this has to be polled rather than event-driven.
+const SEEK_POSITION_POLL_INTERVAL_MS = 250;
+
 // Builds an AssetPatch carrying every currently-patchable field's live
 // value from `asset`, rather than just whichever field(s) a particular
 // local edit actually changed -- see patchAsset's own doc comment for why.
@@ -141,6 +154,11 @@ export interface CanvasCallbacks {
   // See AssetStopMessage's protocol doc comment for why this is a
   // separate, unpersisted broadcast rather than part of AssetPatch.
   onAssetStop: (assetId: string) => void;
+  // Fires from the media-controls widget's seek slider -- same "ephemeral,
+  // never persisted" shape as onAssetStop above (see AssetSeekMessage's
+  // protocol doc comment), so every other connected client/browser-source
+  // jumps to the same position too.
+  onAssetSeek: (assetId: string, positionSeconds: number) => void;
   // worldX/worldY: where a created asset should be placed. screenX/screenY:
   // viewport-relative coordinates for positioning the context menu itself.
   onContextMenu: (worldX: number, worldY: number, screenX: number, screenY: number) => void;
@@ -179,6 +197,19 @@ export class CanvasView {
   private readonly mediaControlsMutedCheckbox: HTMLInputElement;
   private readonly mediaControlsVolumeSlider: HTMLInputElement;
   private readonly mediaControlsVolumeLabel: HTMLElement;
+  private readonly mediaControlsSeekSlider: HTMLInputElement;
+  private readonly mediaControlsSeekLabel: HTMLElement;
+  // True for the duration of a seek-slider drag -- the periodic position
+  // refresh (see mediaControlsSeekTimer) must not fight the user's own
+  // in-progress drag, same "don't clobber active input" concern as text
+  // inline-editing/contentEditable elsewhere in this file.
+  private mediaControlsSeekDragging = false;
+  // Refreshes the seek slider's position/duration display while the
+  // selected asset plays -- unlike loop/paused/muted/volume (persisted
+  // Asset fields, updated only when they actually change), playback
+  // position is live DOM/player state with no change event to hook, so it
+  // has to be polled. Cleared in dispose().
+  private mediaControlsSeekTimer?: ReturnType<typeof setInterval>;
   private viewport: Viewport = { roomId: "", x: 0, y: 0, width: 1920, height: 1080 };
 
   private pan = { x: 0, y: 0 };
@@ -195,6 +226,7 @@ export class CanvasView {
   private selectedAssetId?: string;
   private dragging?: { assetId: string } | { panning: true } | { resizing: { assetId: string; corner: Corner } };
   private lastMoveSentAt = 0;
+  private lastSeekSentAt = 0;
   // Set for the duration of an active inline text edit (beginInlineTextEdit
   // -> stopEditing), so a periodic/manual full-state resync (see setAssets)
   // never reverts mid-edit content between keystrokes -- mirrors `dragging`
@@ -338,6 +370,10 @@ export class CanvasView {
         <button type="button" data-role="mc-stop" class="sidebar-flip-button">stop</button>
       </div>
       <div class="media-controls-row">
+        <span data-role="mc-seek-label"></span>
+        <input type="range" data-role="mc-seek" min="0" max="100" step="0.1" />
+      </div>
+      <div class="media-controls-row">
         <label class="prop-checkbox"><input type="checkbox" data-role="mc-muted" /> mute</label>
         <span data-role="mc-volume-label"></span>
         <input type="range" data-role="mc-volume" min="0" max="100" />
@@ -353,6 +389,8 @@ export class CanvasView {
     this.mediaControlsMutedCheckbox = mc("mc-muted");
     this.mediaControlsVolumeSlider = mc("mc-volume");
     this.mediaControlsVolumeLabel = mc("mc-volume-label");
+    this.mediaControlsSeekSlider = mc("mc-seek");
+    this.mediaControlsSeekLabel = mc("mc-seek-label");
 
     // Every handler reads the selected asset fresh from `this.entries` at
     // click/input time rather than closing over anything captured when the
@@ -384,6 +422,21 @@ export class CanvasView {
       const entry = this.selectedEntry();
       if (entry) this.patchAsset(entry.asset.assetId, { volume: Number(this.mediaControlsVolumeSlider.value) / 100 });
     });
+    // "input" fires continuously while dragging (throttled network send,
+    // instant local scrub); "change" fires once on release, forcing an
+    // unthrottled final send so the exact drop position always reaches
+    // everyone even if it landed inside the throttle window.
+    this.mediaControlsSeekSlider.addEventListener("input", () => {
+      const entry = this.selectedEntry();
+      if (!entry) return;
+      this.mediaControlsSeekDragging = true;
+      this.seekAsset(entry.asset.assetId, this.seekSliderToSeconds(entry));
+    });
+    this.mediaControlsSeekSlider.addEventListener("change", () => {
+      const entry = this.selectedEntry();
+      this.mediaControlsSeekDragging = false;
+      if (entry) this.seekAsset(entry.asset.assetId, this.seekSliderToSeconds(entry), true);
+    });
 
     // Suppressed here: this fires at the default pan:0/zoom:1 transform,
     // before the deferred first centerOnViewport() pass (see setViewport()
@@ -401,6 +454,9 @@ export class CanvasView {
     this.bindKeyboard();
 
     this.clockTimer = setInterval(() => this.tickClocks(), CLOCK_TICK_INTERVAL_MS);
+    this.mediaControlsSeekTimer = setInterval(() => {
+      if (!this.mediaControlsSeekDragging) this.updateSeekSlider();
+    }, SEEK_POSITION_POLL_INTERVAL_MS);
   }
 
   // Advances every clock asset's displayed time. The content element shrink-
@@ -1330,6 +1386,7 @@ export class CanvasView {
   // second `world` div underneath/alongside the old one.
   dispose(): void {
     if (this.clockTimer) clearInterval(this.clockTimer);
+    if (this.mediaControlsSeekTimer) clearInterval(this.mediaControlsSeekTimer);
     window.removeEventListener("mousemove", this.handleWindowMouseMove);
     window.removeEventListener("mouseup", this.handleWindowMouseUp);
     window.removeEventListener("keydown", this.handleWindowKeyDown);
@@ -1456,8 +1513,31 @@ export class CanvasView {
     const anchorX = corner === "ne" || corner === "se" ? asset.x : asset.x + asset.width;
     const anchorY = corner === "sw" || corner === "se" ? asset.y : asset.y + asset.height;
 
-    const rawWidth = corner === "ne" || corner === "se" ? asset.width + dx : asset.width - dx;
-    const rawHeight = corner === "sw" || corner === "se" ? asset.height + dy : asset.height - dy;
+    let rawWidth = corner === "ne" || corner === "se" ? asset.width + dx : asset.width - dx;
+    let rawHeight = corner === "sw" || corner === "se" ? asset.height + dy : asset.height - dy;
+
+    // youtube stays locked to its native 16:9 -- an arbitrarily-stretched
+    // embed would just show letterboxing/cropping inside the actual
+    // rendered iframe, unlike video/image which genuinely stretch their
+    // visual content to fill any box shape. Driven by whichever axis moved
+    // more (proportionally) so a diagonal drag still feels natural
+    // regardless of which direction the user leans on.
+    if (asset.type === "youtube") {
+      rawWidth = Math.max(1, rawWidth);
+      rawHeight = Math.max(1, rawHeight);
+      const aspectRatio = YOUTUBE_NATIVE_WIDTH / YOUTUBE_NATIVE_HEIGHT;
+      if (Math.abs(dx) >= Math.abs(dy) * aspectRatio) {
+        rawHeight = rawWidth / aspectRatio;
+      } else {
+        rawWidth = rawHeight * aspectRatio;
+      }
+      // Scale both dimensions together (not independently) once either dips
+      // below the minimum, so the floor never distorts the locked ratio.
+      const scaleNeeded = Math.max(MIN_ASSET_SIZE / rawWidth, MIN_ASSET_SIZE / rawHeight, 1);
+      rawWidth *= scaleNeeded;
+      rawHeight *= scaleNeeded;
+    }
+
     const width = Math.max(MIN_ASSET_SIZE, rawWidth);
     const height = Math.max(MIN_ASSET_SIZE, rawHeight);
 
@@ -1595,6 +1675,12 @@ export class CanvasView {
     const volumePercent = Math.round(asset.volume * 100);
     this.mediaControlsVolumeSlider.value = String(volumePercent);
     this.mediaControlsVolumeLabel.textContent = `volume: ${volumePercent}%`;
+    // Not while mid-drag -- the periodic timer (see mediaControlsSeekTimer)
+    // already skips itself for the same reason, but this call site (every
+    // upsert/patch/drag/selection change, not just the timer) needs the
+    // same guard so an incoming remote patch during a local scrub can't
+    // yank the slider out from under the user's own drag either.
+    if (!this.mediaControlsSeekDragging) this.updateSeekSlider(entry);
 
     // Centered above the asset's own (unrotated) top edge -- simpler than
     // the corner handles' rotation-aware math above, and reads fine for a
@@ -1610,6 +1696,68 @@ export class CanvasView {
     this.mediaControls.style.left = `${anchor.x}px`;
     this.mediaControls.style.top = `${anchor.y}px`;
     this.mediaControls.style.transform = "translate(-50%, calc(-100% - 8px))";
+  }
+
+  // Refreshes just the seek slider's position/duration -- deliberately
+  // separate from updateMediaControls (which this also delegates to being
+  // called from) since it also needs to run from the periodic poll timer,
+  // which has no Entry of its own to pass in.
+  private updateSeekSlider(entry?: Entry): void {
+    const target = entry ?? this.selectedEntry();
+    const hasPlayback = target?.asset.type === "video" || target?.asset.type === "audio" || target?.asset.type === "youtube";
+    if (!target || !hasPlayback) return;
+    const duration = this.getPlaybackDuration(target);
+    const position = this.getPlaybackPosition(target);
+    const percent = duration > 0 ? Math.min(100, Math.max(0, (position / duration) * 100)) : 0;
+    this.mediaControlsSeekSlider.value = String(percent);
+    this.mediaControlsSeekLabel.textContent = `${formatPlaybackTime(position)} / ${formatPlaybackTime(duration)}`;
+  }
+
+  // Reads the seek slider's current 0-100 value back into seconds, using
+  // whichever duration source applies to the entry's type.
+  private seekSliderToSeconds(entry: Entry): number {
+    const duration = this.getPlaybackDuration(entry);
+    return duration > 0 ? (Number(this.mediaControlsSeekSlider.value) / 100) * duration : 0;
+  }
+
+  private getPlaybackDuration(entry: Entry): number {
+    if (entry.media) return Number.isFinite(entry.media.duration) ? entry.media.duration : 0;
+    if (entry.ytController) return entry.ytController.getDuration();
+    return 0;
+  }
+
+  private getPlaybackPosition(entry: Entry): number {
+    if (entry.media) return entry.media.currentTime;
+    if (entry.ytController) return entry.ytController.getCurrentTime();
+    return 0;
+  }
+
+  // Applies a scrub immediately to the local element/player (so dragging
+  // always feels instant) and broadcasts it -- throttled while dragging
+  // (see SEEK_SEND_THROTTLE_MS), forced through unconditionally on release
+  // (the slider's "change" handler) so the exact drop position is never
+  // lost to the throttle window.
+  private seekAsset(assetId: string, positionSeconds: number, forceSend = false): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    if (entry.media) entry.media.currentTime = positionSeconds;
+    entry.ytController?.seekTo(positionSeconds);
+
+    const now = performance.now();
+    if (forceSend || now - this.lastSeekSentAt >= SEEK_SEND_THROTTLE_MS) {
+      this.lastSeekSentAt = now;
+      this.callbacks.onAssetSeek(assetId, positionSeconds);
+    }
+  }
+
+  // asset:seeked's own effect -- a pure ephemeral broadcast with no seq of
+  // its own, same as applyRemoteStop (see AssetSeekMessage's protocol doc
+  // comment for why).
+  applyRemoteSeek(assetId: string, positionSeconds: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    if (entry.media) entry.media.currentTime = positionSeconds;
+    entry.ytController?.seekTo(positionSeconds);
   }
 
   private applyWorldTransform(suppressCallback = false): void {
@@ -1642,6 +1790,16 @@ export class CanvasView {
   private mediaUrl(s3Key: string): string {
     return `https://${this.assetsDomain}/${s3Key}`;
   }
+}
+
+// m:ss -- matches a typical scrubber's label, not h:mm:ss (nothing playable
+// here is expected to run past an hour).
+function formatPlaybackTime(seconds: number): string {
+  const clamped = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const total = Math.floor(clamped);
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
 // See setVolumeMultipliers -- volume-only updates must never touch

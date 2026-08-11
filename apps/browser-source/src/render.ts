@@ -214,6 +214,18 @@ export class Renderer {
     }
   }
 
+  // asset:seeked's own effect -- same ephemeral shape as stop() above, see
+  // AssetSeekMessage's protocol doc comment.
+  seek(assetId: string, positionSeconds: number): void {
+    const entry = this.entries.get(assetId);
+    if (!entry) return;
+    if (entry.asset.type === "video" || entry.asset.type === "audio") {
+      (entry.el as HTMLMediaElement).currentTime = positionSeconds;
+    } else if (entry.asset.type === "youtube") {
+      entry.ytController?.seekTo(positionSeconds);
+    }
+  }
+
   private tick(): void {
     for (const entry of this.entries.values()) {
       const { rendered, asset } = entry;
@@ -334,6 +346,13 @@ export class Renderer {
         const video = document.createElement("video");
         video.src = asset.s3Key ? this.mediaUrl(asset.s3Key) : "";
         video.autoplay = !asset.paused;
+        // This is a pure output surface -- playback is driven entirely by
+        // asset state, never by direct interaction with the element itself.
+        // Without this, OBS's browser-source "Interact" mode (or a stray
+        // click if the source is ever viewed in a plain browser tab) could
+        // toggle play/pause or open native picture-in-picture controls,
+        // desyncing what's shown from what asset.paused actually says.
+        video.style.pointerEvents = "none";
         el = video;
         break;
       }
@@ -341,6 +360,7 @@ export class Renderer {
         const audio = document.createElement("audio");
         audio.src = asset.s3Key ? this.mediaUrl(asset.s3Key) : "";
         audio.autoplay = !asset.paused;
+        audio.style.pointerEvents = "none";
         el = audio;
         break;
       }
@@ -390,6 +410,11 @@ export class Renderer {
         ytWrapper.style.width = `${YOUTUBE_NATIVE_WIDTH}px`;
         ytWrapper.style.height = `${YOUTUBE_NATIVE_HEIGHT}px`;
         ytWrapper.style.transformOrigin = "0 0";
+        // Same rationale as video/audio's pointer-events above -- this is a
+        // pure output surface, nothing should ever interact with the
+        // embedded player directly (also matches control-ui's canvas.ts,
+        // which needs this for a different reason -- see its own comment).
+        ytWrapper.style.pointerEvents = "none";
         const mount = document.createElement("div");
         mount.style.width = "100%";
         mount.style.height = "100%";

@@ -272,6 +272,17 @@ export const handler: APIGatewayProxyWebsocketHandlerV2 = async (event) => {
         break;
       }
 
+      // Same pure-relay shape as asset:stop above -- see AssetSeekMessage's
+      // protocol doc comment for why a seek is never persisted either.
+      case "asset:seek": {
+        await broadcastToRoom(apiGw, message.roomId, {
+          type: "asset:seeked",
+          assetId: message.assetId,
+          positionSeconds: message.positionSeconds,
+        });
+        break;
+      }
+
       case "room:setGlobalVolume": {
         const result = await setGlobalVolume(message.roomId, message.globalVolume, message.seq);
         // "stale" = a newer update already won (see Room.globalVolumeSeq) --

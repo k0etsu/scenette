@@ -292,6 +292,44 @@ describe("message handler -- asset:stop", () => {
   });
 });
 
+describe("message handler -- asset:seek", () => {
+  it("broadcasts asset:seeked with no DB write at all -- playback position is never persisted", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });
+    ddbMock.on(GetCommand, { Key: { roomId: "r1" } }).resolves({ Item: roomRow() });
+    ddbMock.on(QueryCommand).resolves({ Items: [{ connectionId: "c2", roomId: "r1" }] });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    await handler(
+      event({ action: "asset:seek", roomId: "r1", assetId: "v1", positionSeconds: 42.5 }),
+      {} as any,
+      undefined as any
+    );
+
+    const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
+    const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
+    expect(payload).toEqual({ type: "asset:seeked", assetId: "v1", positionSeconds: 42.5 });
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(DeleteCommand)).toHaveLength(0);
+  });
+
+  it("rejects a seek from an anonymous (read-only) connection, same as asset:stop", async () => {
+    ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow() });
+    apiGwMock.on(PostToConnectionCommand).resolves({});
+
+    const res: any = await handler(
+      event({ action: "asset:seek", roomId: "r1", assetId: "v1", positionSeconds: 5 }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(res.statusCode).toBe(200);
+    const sent = apiGwMock.commandCalls(PostToConnectionCommand)[0]?.args[0].input;
+    const payload = JSON.parse(Buffer.from(sent!.Data as Uint8Array).toString());
+    expect(payload).toEqual({ type: "error", message: "This connection is read-only" });
+  });
+});
+
 describe("message handler -- asset:delete cleans up S3", () => {
   it("deletes the S3 object when no other asset in the room shares its s3Key", async () => {
     ddbMock.on(GetCommand, { Key: { connectionId: "c1" } }).resolves({ Item: connectionRow({ username: "alice" }) });

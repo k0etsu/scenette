@@ -396,6 +396,39 @@ describe("parseClientMessage", () => {
     });
   });
 
+  describe("asset:seek", () => {
+    it("parses a seek message", () => {
+      expect(send({ action: "asset:seek", roomId: "room1", assetId: "a1", positionSeconds: 12.5 })).toEqual({
+        action: "asset:seek",
+        roomId: "room1",
+        assetId: "a1",
+        positionSeconds: 12.5,
+      });
+    });
+
+    it("accepts a position of exactly 0", () => {
+      expect(send({ action: "asset:seek", roomId: "room1", assetId: "a1", positionSeconds: 0 })).toMatchObject({
+        positionSeconds: 0,
+      });
+    });
+
+    it("rejects a missing assetId", () => {
+      expect(() => send({ action: "asset:seek", roomId: "room1", positionSeconds: 5 })).toThrow("Missing assetId");
+    });
+
+    it("rejects a missing positionSeconds", () => {
+      expect(() => send({ action: "asset:seek", roomId: "room1", assetId: "a1" })).toThrow(
+        "Missing/invalid positionSeconds"
+      );
+    });
+
+    it("rejects a negative positionSeconds", () => {
+      expect(() =>
+        send({ action: "asset:seek", roomId: "room1", assetId: "a1", positionSeconds: -1 })
+      ).toThrow("Missing/invalid positionSeconds");
+    });
+  });
+
   describe("room:setGlobalVolume", () => {
     it("parses a valid message", () => {
       const msg = { action: "room:setGlobalVolume", roomId: "room1", globalVolume: 0.5, seq: 123 };

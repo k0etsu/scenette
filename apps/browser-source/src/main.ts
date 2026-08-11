@@ -132,6 +132,9 @@ async function main(): Promise<void> {
         case "asset:stopped":
           renderer.stop(message.assetId);
           break;
+        case "asset:seeked":
+          renderer.seek(message.assetId, message.positionSeconds);
+          break;
         case "room:globalVolumeChanged":
           renderer.setGlobalVolume(message.globalVolume, message.seq);
           break;

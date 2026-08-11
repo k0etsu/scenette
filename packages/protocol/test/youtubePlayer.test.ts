@@ -9,7 +9,11 @@ class FakePlayer {
   state = PlayerState.CUED;
   volume = 100;
   muted = false;
-  seekTo = vi.fn((_seconds: number, _allowSeekAhead?: boolean) => {});
+  currentTime = 0;
+  duration = 120;
+  seekTo = vi.fn((seconds: number, _allowSeekAhead?: boolean) => {
+    this.currentTime = seconds;
+  });
   playVideo = vi.fn(() => {
     this.state = PlayerState.PLAYING;
   });
@@ -28,6 +32,8 @@ class FakePlayer {
   });
   getVolume = vi.fn(() => this.volume);
   getPlayerState = vi.fn(() => this.state);
+  getCurrentTime = vi.fn(() => this.currentTime);
+  getDuration = vi.fn(() => this.duration);
   destroy = vi.fn(() => {});
 }
 
@@ -202,6 +208,39 @@ describe("createYoutubePlayerController", () => {
   it("seekToStart before the player is ready does nothing (no throw)", () => {
     const controller = createYoutubePlayerController(document.createElement("div"), "dQw4w9WgXcQ");
     expect(() => controller.seekToStart()).not.toThrow();
+  });
+
+  it("seekTo jumps to the given position without touching play/pause", async () => {
+    const { controller, player } = await createReadyController();
+    controller.sync(makeAsset({ paused: false }), 1);
+    player.pauseVideo.mockClear();
+    player.playVideo.mockClear();
+
+    controller.seekTo(42);
+
+    expect(player.seekTo).toHaveBeenCalledWith(42, true);
+    expect(player.pauseVideo).not.toHaveBeenCalled();
+    expect(player.playVideo).not.toHaveBeenCalled();
+  });
+
+  it("seekTo before the player is ready does nothing (no throw)", () => {
+    const controller = createYoutubePlayerController(document.createElement("div"), "dQw4w9WgXcQ");
+    expect(() => controller.seekTo(10)).not.toThrow();
+  });
+
+  it("getCurrentTime/getDuration read through to the player once ready", async () => {
+    const { controller, player } = await createReadyController();
+    player.currentTime = 30;
+    player.duration = 180;
+
+    expect(controller.getCurrentTime()).toBe(30);
+    expect(controller.getDuration()).toBe(180);
+  });
+
+  it("getCurrentTime/getDuration return 0 before the player is ready", () => {
+    const controller = createYoutubePlayerController(document.createElement("div"), "dQw4w9WgXcQ");
+    expect(controller.getCurrentTime()).toBe(0);
+    expect(controller.getDuration()).toBe(0);
   });
 
   it("destroy() calls the underlying player's destroy", async () => {
