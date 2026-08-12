@@ -67,9 +67,9 @@ const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.001;
 export const MIN_ASSET_SIZE = 20;
-// Leaves ~15% of the container's width free on each side, so the viewport
+// Leaves ~20% of the container's width free on each side, so the viewport
 // rect reads as centered rather than edge-to-edge.
-const VIEWPORT_WIDTH_FRACTION = 0.7;
+const VIEWPORT_WIDTH_FRACTION = 0.6;
 
 // Caps how often a dragged/resized asset's transform is actually sent over
 // the network — local rendering stays instant every mousemove regardless

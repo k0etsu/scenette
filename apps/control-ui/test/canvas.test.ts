@@ -1610,16 +1610,16 @@ describe("variable interpolation in text assets", () => {
 });
 
 describe("setViewport auto-centering", () => {
-  it("centers the viewport rect on first load, leaving ~15% margin on each side", async () => {
+  it("centers the viewport rect on first load, leaving ~20% margin on each side", async () => {
     const { canvas, container } = setup();
     stubClientSize(container, 2000, 1200);
 
     canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
     await flushFrame();
 
-    // Width-constrained: 2000 * 0.7 / 1400 = 1 (vs. height's 1200/1000 =
-    // 1.2), so zoom follows the width margin.
-    expect(worldTransform(container)).toBe("translate(300px, 100px) scale(1)");
+    // Width-constrained: 2000 * 0.6 / 1400 = 0.8571428571428571 (vs.
+    // height's 1200/1000 = 1.2), so zoom follows the width margin.
+    expect(worldTransform(container)).toBe("translate(400px, 171.42857142857144px) scale(0.8571428571428571)");
   });
 
   it("fits within the container's height when the viewport is tall relative to width", async () => {
@@ -1629,9 +1629,9 @@ describe("setViewport auto-centering", () => {
     canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
     await flushFrame();
 
-    // Height-constrained here: 500/1000 = 0.5 vs width's 3000*0.7/1400 =
-    // 1.5 -- zoom must follow the smaller (height) value so the rect never
-    // overflows the container vertically.
+    // Height-constrained here: 500/1000 = 0.5 vs width's 3000*0.6/1400 =
+    // 1.2857142857142856 -- zoom must follow the smaller (height) value so
+    // the rect never overflows the container vertically.
     expect(worldTransform(container)).toBe("translate(1150px, 0px) scale(0.5)");
   });
 
@@ -1739,8 +1739,13 @@ describe("onViewportTransformChanged / getViewportScreenRect", () => {
     canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
     await flushFrame();
 
-    // From the auto-centering test: zoom 1, pan (300, 100).
-    expect(canvas.getViewportScreenRect()).toEqual({ left: 300, top: 100, width: 1400, height: 1000 });
+    // From the auto-centering test: zoom 0.8571428571428571, pan (400, 171.42857142857144).
+    expect(canvas.getViewportScreenRect()).toEqual({
+      left: 400,
+      top: 171.42857142857144,
+      width: 1200,
+      height: 857.1428571428571,
+    });
   });
 
   it("fires again with the updated rect after auto-centering completes", async () => {
@@ -1752,6 +1757,11 @@ describe("onViewportTransformChanged / getViewportScreenRect", () => {
     canvas.setViewport({ roomId: "room1", x: 0, y: 0, width: 1400, height: 1000 });
     await flushFrame();
 
-    expect(onViewportTransformChanged).toHaveBeenCalledWith({ left: 300, top: 100, width: 1400, height: 1000 });
+    expect(onViewportTransformChanged).toHaveBeenCalledWith({
+      left: 400,
+      top: 171.42857142857144,
+      width: 1200,
+      height: 857.1428571428571,
+    });
   });
 });
