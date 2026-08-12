@@ -280,6 +280,13 @@ async function main(): Promise<void> {
     current.sidebar.dispose();
     current.connectedUsersPanel.dispose();
     current = undefined;
+    // streamPreviewPanel survives room switches (it's constructed once at
+    // app level -- see its own class doc), so leaving a room must explicitly
+    // unload whatever Twitch/YouTube embed it had loaded rather than relying
+    // on the next room's enterRoom() to eventually overwrite it -- see
+    // unload()'s own comment for why that gap matters (e.g. going to the
+    // dashboard, where there is no "next room" at all).
+    streamPreviewPanel.unload();
   }
 
   function showRoomView(roomId: string): void {

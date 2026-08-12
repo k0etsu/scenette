@@ -410,6 +410,41 @@ export class StreamPreviewPanel {
     this.render();
   }
 
+  // Called from teardownCurrentRoom() (main.ts) whenever this room's session
+  // ends -- leaving the room open (going to the dashboard, a room switch
+  // that never completes because the WS drops before the next room's
+  // snapshot arrives) must not leave the previous room's Twitch/YouTube
+  // embed silently still running in the background: an iframe is its own
+  // browsing context, so its network/media activity keeps going even once
+  // its container is hidden via an ancestor's display:none -- hiding the
+  // overlay alone was never enough to actually stop it. enterRoom() (called
+  // once the *next* room's snapshot arrives) already resets everything for
+  // the new room, but there can be an arbitrarily long gap between leaving
+  // this room and that -- e.g. sitting on the dashboard -- during which the
+  // old stream must already be gone, not just invisible.
+  unload(): void {
+    if (this.lastAssignedSrc !== undefined) {
+      this.iframe.src = "about:blank";
+      this.lastAssignedSrc = undefined;
+    }
+    // Also unticked, not just the src cleared -- otherwise a later render()
+    // triggered before the next room's enterRoom() (e.g. this browser's own
+    // opacity-slider "input" event, or a leftover applySettings echo) would
+    // see the checkbox still checked and immediately reassign iframe.src
+    // right back to the same URL, undoing the unload above.
+    this.embedCheckbox.checked = false;
+    this.iframe.style.display = "none";
+    this.placeholder.style.display = "flex";
+    // Hidden the same way as before the first setScreenRect() call -- this
+    // room's rect no longer applies, and the next room's enterRoom() lands
+    // before any snapshot-driven setScreenRect(), so leaving this visible
+    // would otherwise paint the placeholder/border pinned at this room's
+    // last position for a moment.
+    this.overlay.style.visibility = "hidden";
+    this.borderEl.style.visibility = "hidden";
+    this.lastScreenRect = undefined;
+  }
+
   // Controls whether this connection may actually change the channel --
   // only the room's owner can (see the class doc). Mods still see and use
   // whatever channel is currently configured; they just can't change it.

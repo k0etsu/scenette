@@ -496,6 +496,76 @@ describe("StreamPreviewPanel -- enterRoom (switching rooms)", () => {
   });
 });
 
+describe("StreamPreviewPanel -- unload (leaving a room)", () => {
+  // Regression: an iframe is its own browsing context, so a loaded embed
+  // keeps running (network + media) in the background even once its
+  // container is hidden via an ancestor's display:none -- e.g. main.ts
+  // hiding #app-view when returning to the dashboard. Only clearing src
+  // actually stops it; hiding the overlay alone does not.
+  it("clears an already-loaded iframe src back to about:blank", () => {
+    const panel = makePanel();
+    configureTwitchChannel(panel, "old-room-channel");
+    enableEmbed();
+    expect(iframeEl().src).toContain("channel=old-room-channel");
+
+    panel.unload();
+    expect(iframeEl().src).toBe("about:blank");
+  });
+
+  it("does not touch iframe.src at all if nothing was ever loaded", () => {
+    const panel = makePanel();
+    panel.unload();
+    expect(iframeEl().src).toBe("");
+  });
+
+  it("goes back to showing the placeholder, not the iframe", () => {
+    const panel = makePanel();
+    configureTwitchChannel(panel, "old-room-channel");
+    enableEmbed();
+
+    panel.unload();
+    expect(placeholderEl().style.display).toBe("flex");
+    expect(iframeEl().style.display).toBe("none");
+  });
+
+  it("hides the overlay and border, same as before the first setScreenRect call", () => {
+    const panel = makePanel();
+    panel.setScreenRect(rect);
+    expect(overlay.style.visibility).toBe("visible");
+    expect(borderEl.style.visibility).toBe("visible");
+
+    panel.unload();
+    expect(overlay.style.visibility).toBe("hidden");
+    expect(borderEl.style.visibility).toBe("hidden");
+  });
+
+  it("does not reload the just-cleared src on a later render trigger (e.g. the opacity slider) before the next room's enterRoom arrives", () => {
+    const panel = makePanel();
+    configureTwitchChannel(panel, "old-room-channel");
+    enableEmbed();
+    panel.unload();
+
+    const slider = root.querySelector('[data-role="opacity"]') as HTMLInputElement;
+    slider.value = "50";
+    slider.dispatchEvent(new Event("input"));
+
+    expect(iframeEl().src).toBe("about:blank");
+    expect(iframeEl().style.display).toBe("none");
+  });
+
+  it("a subsequent enterRoom for the next room still starts fresh (unticked, no stale src) after unload", () => {
+    const panel = makePanel();
+    configureTwitchChannel(panel, "old-room-channel");
+    enableEmbed();
+    panel.unload();
+
+    panel.enterRoom({ platform: "twitch", twitchChannel: "new-room-channel", youtubeChannelId: "" }, 1);
+    expect(checkbox("embed").checked).toBe(false);
+    enableEmbed();
+    expect(iframeEl().src).toContain("channel=new-room-channel");
+  });
+});
+
 describe("StreamPreviewPanel -- settings modal", () => {
   it("closes the settings modal on save without leaking a duplicate backdrop-close listener across opens", () => {
     const panel = makePanel();
