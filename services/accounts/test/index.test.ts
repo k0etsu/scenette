@@ -4,6 +4,7 @@ import type { APIGatewayProxyEventV2 } from "aws-lambda";
 vi.mock("../src/store", () => ({
   getAccount: vi.fn(),
   getEmailOwner: vi.fn(),
+  getAccountByDiscordId: vi.fn(),
   createAccount: vi.fn(),
   createSession: vi.fn(),
   getSessionUsername: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("../src/store", () => ({
   getVerification: vi.fn(),
   deleteVerification: vi.fn(),
   markEmailVerified: vi.fn(),
+  markDiscordVerified: vi.fn(),
   createInvite: vi.fn(),
   getInvite: vi.fn(),
   redeemInvite: vi.fn(),
@@ -38,10 +40,15 @@ vi.mock("../src/cascade", () => ({
 vi.mock("../src/email", () => ({
   sendVerificationEmail: vi.fn(),
 }));
+vi.mock("../src/discord", () => ({
+  buildAuthorizeUrl: vi.fn((state: string) => `https://discord.com/api/oauth2/authorize?state=${state}`),
+  exchangeCodeForUser: vi.fn(),
+}));
 
 import { handler } from "../src/index";
 import * as store from "../src/store";
 import * as cascade from "../src/cascade";
+import * as discord from "../src/discord";
 
 function event(routeKey: string, opts: Partial<APIGatewayProxyEventV2> = {}): APIGatewayProxyEventV2 {
   return {
@@ -1076,5 +1083,133 @@ describe("POST /auth/invites/{inviteToken}/redeem", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(store.putMembership).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /auth/discord/login", () => {
+  it("redirects to Discord's authorize URL and sets a state cookie", async () => {
+    const res: any = await handler(event("GET /auth/discord/login"), {} as any, undefined as any);
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.Location).toMatch(/^https:\/\/discord\.com\/api\/oauth2\/authorize\?state=/);
+    expect(res.cookies.some((c: string) => c.startsWith("scenette_session_discord_state="))).toBe(true);
+  });
+});
+
+describe("GET /auth/discord/callback", () => {
+  // Round-trips through the real GET /auth/discord/login above to get a
+  // state value paired with its actual cookie -- exercising the same CSRF
+  // check the callback performs, rather than asserting against internals.
+  async function loginStateCookie(): Promise<{ state: string; cookie: string }> {
+    const loginRes: any = await handler(event("GET /auth/discord/login"), {} as any, undefined as any);
+    const setCookie = loginRes.cookies.find((c: string) => c.startsWith("scenette_session_discord_state="));
+    const nameValue = setCookie.split(";")[0];
+    return { state: nameValue.split("=")[1], cookie: nameValue };
+  }
+
+  it("rejects a callback whose state doesn't match the cookie", async () => {
+    const res: any = await handler(
+      event("GET /auth/discord/callback", {
+        queryStringParameters: { code: "c1", state: "bogus" },
+        cookies: ["scenette_session_discord_state=different"],
+      }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+    expect(res.headers["Content-Type"]).toMatch(/text\/html/);
+    expect(discord.exchangeCodeForUser).not.toHaveBeenCalled();
+  });
+
+  it("rejects a callback with no state cookie at all", async () => {
+    const res: any = await handler(
+      event("GET /auth/discord/callback", { queryStringParameters: { code: "c1", state: "s1" } }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+    expect(discord.exchangeCodeForUser).not.toHaveBeenCalled();
+  });
+
+  it("logs in an existing Discord-linked account without creating a new one", async () => {
+    const { state, cookie } = await loginStateCookie();
+    vi.mocked(discord.exchangeCodeForUser).mockResolvedValue({ id: "d1", username: "alice" });
+    vi.mocked(store.getAccountByDiscordId).mockResolvedValue({
+      username: "alice",
+      discordId: "d1",
+      createdAt: "t",
+      personalRoomId: "room1",
+    });
+    vi.mocked(store.createSession).mockResolvedValue("sesstoken");
+
+    const res: any = await handler(
+      event("GET /auth/discord/callback", { queryStringParameters: { code: "c1", state }, cookies: [cookie] }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.Location).toBe("/");
+    expect(store.createAccount).not.toHaveBeenCalled();
+    expect(store.createSession).toHaveBeenCalledWith("alice");
+    expect(res.cookies.some((c: string) => c.startsWith("scenette_session="))).toBe(true);
+  });
+
+  it("creates a new account and grants its room immediately on first sign-in", async () => {
+    const { state, cookie } = await loginStateCookie();
+    vi.mocked(discord.exchangeCodeForUser).mockResolvedValue({ id: "d2", username: "New User!!" });
+    vi.mocked(store.getAccountByDiscordId).mockResolvedValue(undefined);
+    vi.mocked(store.createAccount).mockResolvedValue(true);
+    vi.mocked(store.markDiscordVerified).mockResolvedValue("new-room");
+    vi.mocked(store.createSession).mockResolvedValue("sesstoken");
+
+    const res: any = await handler(
+      event("GET /auth/discord/callback", { queryStringParameters: { code: "c1", state }, cookies: [cookie] }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(res.statusCode).toBe(302);
+    // Sanitized down to USERNAME_PATTERN's charset.
+    expect(store.createAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ username: "NewUser", discordId: "d2" })
+    );
+    expect(store.markDiscordVerified).toHaveBeenCalledWith("NewUser", expect.any(String));
+    expect(store.putMembership).toHaveBeenCalledWith({ accountId: "NewUser", roomId: "new-room", role: "owner" });
+    expect(store.createSession).toHaveBeenCalledWith("NewUser");
+  });
+
+  it("retries with a suffixed username on a collision, rather than failing sign-in", async () => {
+    const { state, cookie } = await loginStateCookie();
+    vi.mocked(discord.exchangeCodeForUser).mockResolvedValue({ id: "d3", username: "alice" });
+    vi.mocked(store.getAccountByDiscordId).mockResolvedValue(undefined);
+    vi.mocked(store.createAccount).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    vi.mocked(store.markDiscordVerified).mockResolvedValue("new-room");
+    vi.mocked(store.createSession).mockResolvedValue("sesstoken");
+
+    const res: any = await handler(
+      event("GET /auth/discord/callback", { queryStringParameters: { code: "c1", state }, cookies: [cookie] }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(res.statusCode).toBe(302);
+    expect(store.createAccount).toHaveBeenCalledTimes(2);
+    const secondAttempt = vi.mocked(store.createAccount).mock.calls[1][0];
+    expect(secondAttempt.username).toMatch(/^alice-[A-Za-z0-9-]+$/);
+  });
+
+  it("returns an HTML error when the Discord token exchange fails", async () => {
+    const { state, cookie } = await loginStateCookie();
+    vi.mocked(discord.exchangeCodeForUser).mockRejectedValue(new Error("discord is down"));
+
+    const res: any = await handler(
+      event("GET /auth/discord/callback", { queryStringParameters: { code: "c1", state }, cookies: [cookie] }),
+      {} as any,
+      undefined as any
+    );
+
+    expect(res.statusCode).toBe(502);
+    expect(res.headers["Content-Type"]).toMatch(/text\/html/);
+    expect(store.createSession).not.toHaveBeenCalled();
   });
 });

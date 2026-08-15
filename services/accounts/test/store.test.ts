@@ -5,6 +5,7 @@ import { S3Client, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client
 import {
   getAccount,
   getEmailOwner,
+  getAccountByDiscordId,
   createAccount,
   createSession,
   getSessionUsername,
@@ -37,6 +38,7 @@ import {
   getVerification,
   deleteVerification,
   markEmailVerified,
+  markDiscordVerified,
 } from "../src/store";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
@@ -103,6 +105,16 @@ describe("createAccount", () => {
     });
     expect(created).toBe(true);
   });
+
+  it("allows creating a Discord-linked account with no password", async () => {
+    ddbMock.on(PutCommand).resolves({});
+    const created = await createAccount({
+      username: "alice",
+      discordId: "d1",
+      createdAt: "t",
+    });
+    expect(created).toBe(true);
+  });
 });
 
 describe("getAccount", () => {
@@ -139,6 +151,20 @@ describe("getEmailOwner", () => {
   it("returns undefined when no account has the email", async () => {
     ddbMock.on(QueryCommand).resolves({ Items: [] });
     await expect(getEmailOwner("nobody@y.com")).resolves.toBeUndefined();
+  });
+});
+
+describe("getAccountByDiscordId", () => {
+  it("returns the linked account when found", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [{ username: "alice", discordId: "d1" }] });
+    await expect(getAccountByDiscordId("d1")).resolves.toEqual({ username: "alice", discordId: "d1" });
+    const call = ddbMock.commandCalls(QueryCommand)[0];
+    expect(call.args[0].input.IndexName).toBe("byDiscordId");
+  });
+
+  it("returns undefined when no account has this discordId", async () => {
+    ddbMock.on(QueryCommand).resolves({ Items: [] });
+    await expect(getAccountByDiscordId("nobody")).resolves.toBeUndefined();
   });
 });
 
@@ -280,6 +306,21 @@ describe("account mutation helpers (change password/email, delete account)", () 
     ddbMock.on(UpdateCommand).rejectsOnce(conditionalCheckFailed).resolves({});
     ddbMock.on(GetCommand).resolves({ Item: { username: "alice", personalRoomId: "existing-room" } });
     const roomId = await markEmailVerified("alice", "ignored-new-room");
+    expect(roomId).toBe("existing-room");
+  });
+
+  it("markDiscordVerified assigns a new room on first sign-in", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const roomId = await markDiscordVerified("alice", "new-room");
+    expect(roomId).toBe("new-room");
+    const call = ddbMock.commandCalls(UpdateCommand)[0];
+    expect(call.args[0].input.ConditionExpression).toBe("attribute_not_exists(personalRoomId)");
+  });
+
+  it("markDiscordVerified keeps the existing room (no second room) on a repeat sign-in", async () => {
+    ddbMock.on(UpdateCommand).rejectsOnce(conditionalCheckFailed).resolves({});
+    ddbMock.on(GetCommand).resolves({ Item: { username: "alice", personalRoomId: "existing-room" } });
+    const roomId = await markDiscordVerified("alice", "ignored-new-room");
     expect(roomId).toBe("existing-room");
   });
 });

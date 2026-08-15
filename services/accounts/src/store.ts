@@ -28,8 +28,15 @@ const VERIFICATION_TTL_SECONDS = 24 * 60 * 60; // 24 hours
 
 export interface Account {
   username: string;
-  passwordHash: string;
-  passwordSalt: string;
+  // Absent on a Discord-only account (see /auth/discord/callback) -- it
+  // never has a password, and signs in via Discord every time instead.
+  passwordHash?: string;
+  passwordSalt?: string;
+  // Set once, on Discord sign-in, for an account created via that path.
+  // Mirrors `email` in that it's optional and identifies the account on a
+  // second index -- but unlike email there's no separate verified state,
+  // since having the Discord account at all is the verification.
+  discordId?: string;
   // Optional contact address. A newly-set email is always unverified
   // (emailVerified reset to false, see updateAccountEmail) until the user
   // clicks the link mailed to it.
@@ -77,6 +84,23 @@ export async function getEmailOwner(email: string): Promise<string | undefined> 
     })
   );
   return (Items as Account[]).find((a) => a.emailVerified)?.username;
+}
+
+// The account with this Discord id linked, if any -- the basis for "at most
+// one scenette account per Discord account" (see /auth/discord/callback).
+// Unlike getEmailOwner there's no verified-flag filter: a discordId is only
+// ever written once the OAuth exchange has already succeeded, so its mere
+// presence is authoritative.
+export async function getAccountByDiscordId(discordId: string): Promise<Account | undefined> {
+  const { Items = [] } = await ddb.send(
+    new QueryCommand({
+      TableName: ACCOUNTS_TABLE,
+      IndexName: "byDiscordId",
+      KeyConditionExpression: "discordId = :d",
+      ExpressionAttributeValues: { ":d": discordId },
+    })
+  );
+  return (Items as Account[])[0];
 }
 
 export async function createAccount(account: Account): Promise<boolean> {
@@ -276,6 +300,33 @@ export async function markEmailVerified(username: string, newRoomId: string): Pr
           ExpressionAttributeValues: { ":true": true },
         })
       );
+      const account = await getAccount(username);
+      return account!.personalRoomId!;
+    }
+    throw err;
+  }
+}
+
+// Discord-path equivalent of markEmailVerified's room assignment, kept as a
+// separate function rather than shared with it -- there's no "verified" flag
+// to flip on this path (having the Discord account IS the verification), so
+// the two have different write shapes even though the room-assignment
+// half is identical. Idempotent: a second Discord login must never mint a
+// second room.
+export async function markDiscordVerified(username: string, newRoomId: string): Promise<string> {
+  try {
+    await ddb.send(
+      new UpdateCommand({
+        TableName: ACCOUNTS_TABLE,
+        Key: { username },
+        UpdateExpression: "SET personalRoomId = :room",
+        ConditionExpression: "attribute_not_exists(personalRoomId)",
+        ExpressionAttributeValues: { ":room": newRoomId },
+      })
+    );
+    return newRoomId;
+  } catch (err) {
+    if (err instanceof Error && err.name === "ConditionalCheckFailedException") {
       const account = await getAccount(username);
       return account!.personalRoomId!;
     }

@@ -52,6 +52,7 @@ const loginModeToggle = document.getElementById("login-mode-toggle");
 const loginToggleText = document.getElementById("login-toggle-text");
 const loginError = document.getElementById("login-error");
 const loginMessage = document.getElementById("login-message");
+const loginDiscordButton = document.getElementById("login-discord-button") as HTMLAnchorElement | null;
 const roomPickerViewEl = document.getElementById("room-picker-view");
 
 const canvasContainer = document.getElementById("canvas-container");
@@ -85,7 +86,7 @@ const youtubeUrlModalEl = document.getElementById("youtube-url-modal");
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !loginHint ||
   !loginSubmitButton || !loginModeToggle || !loginToggleText ||
-  !loginError || !loginMessage || !roomPickerViewEl ||
+  !loginError || !loginMessage || !loginDiscordButton || !roomPickerViewEl ||
   !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !uploadIndicatorEl || !manageAccessButton || !accessModalEl || !settingsModalEl ||
@@ -694,6 +695,12 @@ async function main(): Promise<void> {
 // submit handler just reads whatever `mode` currently is.
 function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
   return new Promise((resolve) => {
+    // A real navigation (not fetch) straight to the account-service route
+    // that kicks off the OAuth round trip -- see GET /auth/discord/login.
+    // Sign-in resolves via a full page reload after Discord redirects back
+    // through /auth/discord/callback, not via this promise.
+    loginDiscordButton!.href = `${httpApiUrl}/auth/discord/login`;
+
     let mode: "login" | "register" = "login";
 
     function applyMode(): void {

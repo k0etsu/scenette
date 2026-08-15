@@ -17,6 +17,11 @@
 // there's only one env and no Domain is set.
 const SESSION_COOKIE = process.env.SESSION_COOKIE_NAME ?? "scenette_session";
 const SESSION_COOKIE_MAX_AGE = 30 * 24 * 60 * 60; // 30 days, matches the session TTL
+// Derived from the (already per-env) session cookie name rather than its own
+// env var -- no CDK change needed, and it inherits the same dev/prod
+// jar-collision avoidance the session cookie already has.
+const DISCORD_STATE_COOKIE = `${SESSION_COOKIE}_discord_state`;
+const DISCORD_STATE_COOKIE_MAX_AGE = 5 * 60; // just long enough for the round trip through Discord's consent screen
 const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN; // e.g. ".hanzomon.co"; unset locally
 
 function cookieAttrs(): string {
@@ -33,23 +38,50 @@ export function clearSessionCookie(): string {
   return `${SESSION_COOKIE}=; ${cookieAttrs()}; Max-Age=0`;
 }
 
-// Reads the session token from either delivery mechanism:
+// The Discord OAuth "state" round-trips through Discord's own consent
+// screen, so it has to survive as a cookie (not server-side state) between
+// GET /auth/discord/login and GET /auth/discord/callback -- same mechanism
+// as the session cookie, just much shorter-lived and cleared immediately
+// after the callback reads it.
+export function setDiscordStateCookie(state: string): string {
+  return `${DISCORD_STATE_COOKIE}=${state}; ${cookieAttrs()}; Max-Age=${DISCORD_STATE_COOKIE_MAX_AGE}`;
+}
+
+export function clearDiscordStateCookie(): string {
+  return `${DISCORD_STATE_COOKIE}=; ${cookieAttrs()}; Max-Age=0`;
+}
+
+// Reads a named cookie from either delivery mechanism:
 //  - HTTP API (payload format 2.0) parses request cookies into a top-level
 //    `cookies` array and does NOT populate the Cookie header.
 //  - WebSocket $connect delivers them in the Cookie header instead.
 // Checking both keeps one helper correct for every caller.
-export function readSessionToken(source: {
-  cookies?: string[];
-  headers?: Record<string, string | undefined>;
-}): string | undefined {
+function readCookie(
+  source: { cookies?: string[]; headers?: Record<string, string | undefined> },
+  name: string
+): string | undefined {
   for (const c of source.cookies ?? []) {
     const eq = c.indexOf("=");
-    if (eq !== -1 && c.slice(0, eq).trim() === SESSION_COOKIE) return c.slice(eq + 1).trim();
+    if (eq !== -1 && c.slice(0, eq).trim() === name) return c.slice(eq + 1).trim();
   }
   const cookieHeader = source.headers?.cookie ?? source.headers?.Cookie;
   for (const part of (cookieHeader ?? "").split(";")) {
     const eq = part.indexOf("=");
-    if (eq !== -1 && part.slice(0, eq).trim() === SESSION_COOKIE) return part.slice(eq + 1).trim();
+    if (eq !== -1 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
   }
   return undefined;
+}
+
+export function readSessionToken(source: {
+  cookies?: string[];
+  headers?: Record<string, string | undefined>;
+}): string | undefined {
+  return readCookie(source, SESSION_COOKIE);
+}
+
+export function readDiscordStateCookie(source: {
+  cookies?: string[];
+  headers?: Record<string, string | undefined>;
+}): string | undefined {
+  return readCookie(source, DISCORD_STATE_COOKIE);
 }

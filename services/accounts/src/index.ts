@@ -3,10 +3,19 @@ import { randomUUID } from "crypto";
 import { hashPassword, verifyPassword } from "./passwords";
 import { deleteAccountCascade } from "./cascade";
 import { sendVerificationEmail } from "./email";
-import { setSessionCookie, clearSessionCookie, readSessionToken } from "./cookies";
+import { buildAuthorizeUrl, exchangeCodeForUser } from "./discord";
+import {
+  setSessionCookie,
+  clearSessionCookie,
+  readSessionToken,
+  setDiscordStateCookie,
+  clearDiscordStateCookie,
+  readDiscordStateCookie,
+} from "./cookies";
 import {
   getAccount,
   getEmailOwner,
+  getAccountByDiscordId,
   createAccount,
   createSession,
   getSessionUsername,
@@ -29,6 +38,7 @@ import {
   getVerification,
   deleteVerification,
   markEmailVerified,
+  markDiscordVerified,
   createInvite,
   getInvite,
   redeemInvite,
@@ -46,6 +56,15 @@ const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,30}$/;
 // dot") -- only applied if an email is actually provided, since it's an
 // optional contact field, not a required/verified one.
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Derives a scenette username from a Discord username on first sign-in --
+// Discord's character set is looser than USERNAME_PATTERN allows. Falls back
+// to a random handle if nothing usable survives sanitization (e.g. an
+// all-emoji Discord username).
+function usernameCandidateFromDiscord(discordUsername: string): string {
+  const cleaned = discordUsername.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 30);
+  return cleaned.length >= MIN_USERNAME_LENGTH ? cleaned : `user-${randomUUID().slice(0, 8)}`;
+}
 
 function json(statusCode: number, body: unknown, cookies?: string[]): APIGatewayProxyResultV2 {
   return {
@@ -201,6 +220,14 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       const account = await getAccount(username);
       if (!account) return json(401, { error: "Invalid username or password" });
 
+      // A Discord-linked account never has a password (see
+      // GET /auth/discord/callback) -- same "invalid credentials" response
+      // as a wrong password, not a distinguishable error, to avoid leaking
+      // which accounts are Discord-only.
+      if (!account.passwordHash || !account.passwordSalt) {
+        return json(401, { error: "Invalid username or password" });
+      }
+
       const valid = await verifyPassword(password, account.passwordSalt, account.passwordHash);
       if (!valid) return json(401, { error: "Invalid username or password" });
 
@@ -265,6 +292,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
       const account = await getAccount(username);
       if (!account) return json(401, { error: "Account no longer exists" });
+
+      // Discord-linked accounts have no password to change.
+      if (!account.passwordHash || !account.passwordSalt) {
+        return json(400, { error: "This account has no password to change -- it signs in via Discord" });
+      }
 
       const valid = await verifyPassword(currentPassword, account.passwordSalt, account.passwordHash);
       if (!valid) return json(401, { error: "Current password is incorrect" });
@@ -391,6 +423,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
 
       const account = await getAccount(username);
       if (!account) return json(401, { error: "Account no longer exists" });
+
+      // Discord-linked accounts have no password to check against -- self-
+      // deletion for that path isn't wired up yet (out of scope for the
+      // initial Discord sign-in addition).
+      if (!account.passwordHash || !account.passwordSalt) {
+        return json(400, { error: "This account can't be deleted this way yet -- contact the admin" });
+      }
 
       const valid = await verifyPassword(password, account.passwordSalt, account.passwordHash);
       if (!valid) return json(401, { error: "Incorrect password" });
@@ -611,6 +650,69 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         await putMembership({ accountId: username, roomId: invite.roomId, role: "mod" });
       }
       return json(200, { roomId: invite.roomId });
+    }
+
+    // Second, independent sign-in path alongside password + email
+    // verification (left fully intact -- see the routes above). Starts the
+    // OAuth round trip: stash a random `state` in a short-lived cookie (read
+    // back by the callback below to rule out CSRF), then send the browser to
+    // Discord's consent screen. Not `fetch`-able -- must be a real
+    // navigation, since Discord's authorize page isn't reachable via CORS.
+    case "GET /auth/discord/login": {
+      const state = randomUUID();
+      return {
+        statusCode: 302,
+        headers: { Location: buildAuthorizeUrl(state) },
+        cookies: [setDiscordStateCookie(state)],
+      };
+    }
+
+    // Discord redirects here after consent. A linked Discord account is this
+    // path's own verification gate -- unlike the mailed link, there's no
+    // separate step, so a brand-new account gets its personal room in the
+    // same request it's created in.
+    case "GET /auth/discord/callback": {
+      const code = event.queryStringParameters?.code;
+      const state = event.queryStringParameters?.state;
+      const expectedState = readDiscordStateCookie(event);
+      if (!code || !state || !expectedState || state !== expectedState) {
+        return html(400, "Sign-in failed", "This Discord sign-in link is invalid or expired. Please try signing in again.");
+      }
+
+      let discordUser;
+      try {
+        discordUser = await exchangeCodeForUser(code);
+      } catch (err) {
+        console.error("Discord OAuth exchange failed", err);
+        return html(502, "Sign-in failed", "Could not complete sign-in with Discord. Please try again.");
+      }
+
+      const existing = await getAccountByDiscordId(discordUser.id);
+      let username = existing?.username;
+      if (!username) {
+        // Username collision against an unrelated account (not a repeat
+        // Discord sign-in, already handled above) -- retry with a short
+        // random suffix a few times rather than failing sign-in outright.
+        let candidate = usernameCandidateFromDiscord(discordUser.username);
+        let created = await createAccount({ username: candidate, discordId: discordUser.id, createdAt: new Date().toISOString() });
+        for (let attempts = 0; !created && attempts < 5; attempts++) {
+          candidate = `${usernameCandidateFromDiscord(discordUser.username).slice(0, 22)}-${randomUUID().slice(0, 7)}`;
+          created = await createAccount({ username: candidate, discordId: discordUser.id, createdAt: new Date().toISOString() });
+        }
+        if (!created) {
+          return html(500, "Sign-in failed", "Could not create your scenette account. Please try again.");
+        }
+        username = candidate;
+        const roomId = await markDiscordVerified(username, randomUUID());
+        await putMembership({ accountId: username, roomId, role: "owner" });
+      }
+
+      const sessionToken = await createSession(username);
+      return {
+        statusCode: 302,
+        headers: { Location: APP_URL ?? "/" },
+        cookies: [setSessionCookie(sessionToken), clearDiscordStateCookie()],
+      };
     }
 
     default:

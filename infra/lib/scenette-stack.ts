@@ -15,6 +15,7 @@ import * as route53Targets from "aws-cdk-lib/aws-route53-targets";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as ses from "aws-cdk-lib/aws-ses";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as path from "path";
 
@@ -133,6 +134,14 @@ export class ScenetteStack extends cdk.Stack {
       indexName: "byEmail",
       partitionKey: { name: "email", type: dynamodb.AttributeType.STRING },
     });
+    // Discord OAuth accounts (see AccountsFn's /auth/discord/*) -- a second,
+    // independent sign-in path added alongside the email-verified one above
+    // without changing it. Sparse -- only Discord-linked accounts have this
+    // attribute.
+    accountsTable.addGlobalSecondaryIndex({
+      indexName: "byDiscordId",
+      partitionKey: { name: "discordId", type: dynamodb.AttributeType.STRING },
+    });
 
     const sessionsTable = new dynamodb.Table(this, "SessionsTable", {
       tableName: `scenette-${envName}-sessions`,
@@ -246,6 +255,26 @@ export class ScenetteStack extends cdk.Stack {
       });
     });
     const verificationFromAddress = `noreply@${mailDomain}`;
+
+    // ---- Discord OAuth (second, independent sign-in path; see AccountsFn's
+    // /auth/discord/* routes below) ----
+    // One Discord application shared by both envs (it has both envs'
+    // redirect URIs registered on it), so client id/secret aren't env-
+    // suffixed like the SES identity is. The client secret itself lives in
+    // an SSM SecureString parameter (not Secrets Manager -- no per-secret
+    // monthly charge, and this is a single low-traffic value), created
+    // out-of-band -- only its name and a pinned version are context here,
+    // same as the AWS account/region values CDK already reads from context.
+    // A SecureString reference can't be resolved dynamically at synth time
+    // (unlike a Secrets Manager ARN), hence the explicit version pin --
+    // bump discordClientParamVersion in cdk.json whenever the parameter
+    // value is rotated. All context keys are unset until that one-time setup
+    // happens; the Discord routes simply 502 until then, same as any other
+    // missing config.
+    const discordClientId = this.node.tryGetContext("discordClientId") as string | undefined;
+    const discordClientParamName = this.node.tryGetContext("discordClientParamName") as string | undefined;
+    const discordClientParamVersion = this.node.tryGetContext("discordClientParamVersion") as number | undefined;
+    const discordRedirectUri = `https://${apiDomain}/auth/discord/callback`;
 
     // ---- WebSocket API ----
 
@@ -475,6 +504,9 @@ export class ScenetteStack extends cdk.Stack {
         // flag) since deploys run unattended via CI on every push -- flip it
         // back to false there once SES prod access is approved.
         SKIP_EMAIL_VERIFICATION: String(this.node.tryGetContext("skipEmailVerification") === true),
+        DISCORD_CLIENT_ID: discordClientId ?? "",
+        DISCORD_REDIRECT_URI: discordRedirectUri,
+        DISCORD_CLIENT_PARAM_NAME: discordClientParamName ?? "",
       },
     });
     accountsTable.grantReadWriteData(accountsFn);
@@ -484,6 +516,20 @@ export class ScenetteStack extends cdk.Stack {
     roomsTable.grantReadWriteData(accountsFn);
     assetsTable.grantReadWriteData(accountsFn);
     emailVerificationsTable.grantReadWriteData(accountsFn);
+    // Read-only access to the Discord OAuth client parameter (see
+    // /auth/discord/callback's token exchange). grantRead() only adds
+    // ssm:GetParameter* -- no separate kms:Decrypt grant is needed, since
+    // the default aws/ssm managed key's own resource policy already allows
+    // any principal in this account to use it when the call is routed
+    // through SSM (which GetParameter's WithDecryption is). Only granted
+    // once the parameter actually exists -- discordClientParamName/Version
+    // are unset until the one-time out-of-band setup happens.
+    if (discordClientParamName && discordClientParamVersion) {
+      ssm.StringParameter.fromSecureStringParameterAttributes(this, "DiscordClientParam", {
+        parameterName: discordClientParamName,
+        version: discordClientParamVersion,
+      }).grantRead(accountsFn);
+    }
     // Send the verification email. SES authorizes SendEmail against every
     // identity involved -- including the recipient (a verified recipient is an
     // identity in sandbox mode) -- so scoping the resource to only the sender
@@ -546,6 +592,16 @@ export class ScenetteStack extends cdk.Stack {
     httpApi.addRoutes({
       path: "/auth/resend-verification",
       methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/discord/login",
+      methods: [apigwv2.HttpMethod.GET],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/discord/callback",
+      methods: [apigwv2.HttpMethod.GET],
       integration: accountsIntegration,
     });
     httpApi.addRoutes({

@@ -34,6 +34,9 @@ export default defineConfig({
       HTTP_API_URL: "https://api.test.example.com",
       ASSETS_BUCKET: "test-assets-bucket",
       ROOM_STORAGE_QUOTA_BYTES: "1000",
+      DISCORD_CLIENT_ID: "test-discord-client-id",
+      DISCORD_REDIRECT_URI: "https://api.test.example.com/auth/discord/callback",
+      DISCORD_CLIENT_PARAM_NAME: "/scenette/discord-client",
     },
   },
 });

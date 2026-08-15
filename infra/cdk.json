@@ -17,6 +17,9 @@
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": ["aws"],
-    "skipEmailVerification": true
+    "skipEmailVerification": true,
+    "discordClientId": "1538008456441626635",
+    "discordClientParamName": "/scenette/discord-client",
+    "discordClientParamVersion": 1
   }
 }
