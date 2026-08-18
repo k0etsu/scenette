@@ -68,11 +68,10 @@ async function requireSession(
 // into the app (and auto-redirect on success). Set by CDK.
 const APP_URL = process.env.APP_URL;
 
-// Temporary: SES prod access is still pending (initial request was
-// rejected), so verification emails can't reach unverified recipients out of
-// sandbox. While set, email verification is skipped and the room is granted
-// immediately instead of waiting on a mailed link. Remove once SES prod
-// access is approved.
+// Kill switch, off by default now that SES production access is approved --
+// while set, email verification is skipped and the room is granted
+// immediately instead of waiting on a mailed link. See infra/cdk.json's
+// "skipEmailVerification".
 const SKIP_EMAIL_VERIFICATION = process.env.SKIP_EMAIL_VERIFICATION === "true";
 
 async function verifyEmailImmediately(username: string): Promise<string> {
