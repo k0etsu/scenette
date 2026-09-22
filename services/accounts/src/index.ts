@@ -2,7 +2,7 @@ import type { APIGatewayProxyHandlerV2, APIGatewayProxyResultV2 } from "aws-lamb
 import { randomUUID } from "crypto";
 import { hashPassword, verifyPassword } from "./passwords";
 import { deleteAccountCascade } from "./cascade";
-import { sendVerificationEmail } from "./email";
+import { sendVerificationEmail, sendPasswordResetEmail } from "./email";
 import { setSessionCookie, clearSessionCookie, readSessionToken } from "./cookies";
 import {
   getAccount,
@@ -29,6 +29,9 @@ import {
   getVerification,
   deleteVerification,
   markEmailVerified,
+  createPasswordReset,
+  getPasswordReset,
+  deletePasswordReset,
   createInvite,
   getInvite,
   redeemInvite,
@@ -42,9 +45,10 @@ const MIN_PASSWORD_LENGTH = 8;
 // string >= 3 chars: keeps HTML/control characters out of a value that other
 // users see (members/presence lists) and bounds the length.
 const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,30}$/;
-// Deliberately loose (just "has an @ and something on both sides with a
-// dot") -- only applied if an email is actually provided, since it's an
-// optional contact field, not a required/verified one.
+// Deliberately loose -- just "has an @ and something on both sides with a
+// dot". Required at registration (password recovery depends on every
+// account having one), but change-email still allows clearing it back to
+// empty on an existing (e.g. pre-this-requirement) account.
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function json(statusCode: number, body: unknown, cookies?: string[]): APIGatewayProxyResultV2 {
@@ -143,12 +147,13 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (typeof password !== "string" || password.length < MIN_PASSWORD_LENGTH) {
         return json(400, { error: `password must be at least ${MIN_PASSWORD_LENGTH} characters` });
       }
-      // Optional -- only validated (loosely) if actually provided.
-      if (email !== undefined && (typeof email !== "string" || (email !== "" && !EMAIL_PATTERN.test(email)))) {
+      // Required -- an account needs a verified email to ever recover its
+      // password (see POST /auth/forgot-password).
+      if (typeof email !== "string" || !EMAIL_PATTERN.test(email)) {
         return json(400, { error: "email must be a valid address" });
       }
       // One email per room -- reject up front if it already owns one elsewhere.
-      if (email && (await getEmailOwner(email as string))) {
+      if (await getEmailOwner(email)) {
         return json(409, { error: "That email is already in use" });
       }
 
@@ -157,7 +162,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         username,
         passwordHash: hash,
         passwordSalt: salt,
-        email: email || undefined,
+        email,
         emailVerified: false,
         createdAt: new Date().toISOString(),
       });
@@ -166,26 +171,24 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       }
 
       // No personal room yet -- a room (and its owner membership) is created
-      // only when an email is verified (see GET /auth/verify). Registration
+      // only when the email is verified (see GET /auth/verify). Registration
       // logs straight in so an unverified user can still act as a mod on
-      // rooms they're invited to. If an email was supplied now, kick off
-      // verification immediately (or grant the room outright while
-      // SKIP_EMAIL_VERIFICATION is set -- see its definition above).
+      // rooms they're invited to. Kick off verification immediately (or grant
+      // the room outright while SKIP_EMAIL_VERIFICATION is set -- see its
+      // definition above).
       let emailVerified = false;
       let personalRoomId: string | undefined;
-      if (email) {
-        if (SKIP_EMAIL_VERIFICATION) {
-          personalRoomId = await verifyEmailImmediately(username);
-          emailVerified = true;
-        } else {
-          await startEmailVerification(username, email as string, apiBaseUrl(event));
-        }
+      if (SKIP_EMAIL_VERIFICATION) {
+        personalRoomId = await verifyEmailImmediately(username);
+        emailVerified = true;
+      } else {
+        await startEmailVerification(username, email, apiBaseUrl(event));
       }
 
       const sessionToken = await createSession(username);
       return json(
         201,
-        { username, email: email || undefined, emailVerified, personalRoomId },
+        { username, email, emailVerified, personalRoomId },
         [setSessionCookie(sessionToken)]
       );
     }
@@ -375,6 +378,71 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
         }
       }
       return json(200, { ok: true });
+    }
+
+    // Public (no session -- this is how you get back in when you've lost
+    // your password). Always responds 200 regardless of whether the username
+    // exists or has a verified email, to avoid leaking account state; the
+    // reset link (if any) is mailed to the account's own verified address,
+    // never returned in the response.
+    case "POST /auth/forgot-password": {
+      const username = body.username;
+      if (typeof username !== "string") return json(400, { error: "Missing username" });
+
+      const account = await getAccount(username);
+      if (account?.email && account.emailVerified) {
+        const reset = await createPasswordReset(username);
+        try {
+          await sendPasswordResetEmail(account.email, username, reset.token, apiBaseUrl(event));
+        } catch (err) {
+          // Same rationale as register's verification send -- a failed send
+          // must not fail (or leak account state via) the request.
+          console.error("Failed to send password reset email", err);
+        }
+      }
+      return json(200, { ok: true });
+    }
+
+    // Public: the token from the emailed link is the sole authorization.
+    // Consuming it logs the user straight in (like register/login), and
+    // revokes every existing session first -- the whole point of a password
+    // reset is regaining control from a state where the old password (and
+    // anything it authorized) may be compromised.
+    case "POST /auth/reset-password": {
+      const token = body.token;
+      const newPassword = body.newPassword;
+      if (typeof token !== "string") return json(400, { error: "Missing token" });
+      if (typeof newPassword !== "string" || newPassword.length < MIN_PASSWORD_LENGTH) {
+        return json(400, { error: `password must be at least ${MIN_PASSWORD_LENGTH} characters` });
+      }
+
+      const reset = await getPasswordReset(token);
+      if (!reset || Date.parse(reset.expiresAt) < Date.now()) {
+        return json(400, { error: "This reset link is invalid or has expired" });
+      }
+
+      const account = await getAccount(reset.username);
+      if (!account) {
+        await deletePasswordReset(token);
+        return json(400, { error: "That account no longer exists" });
+      }
+
+      const { hash, salt } = await hashPassword(newPassword);
+      await updateAccountPassword(reset.username, hash, salt);
+      await deleteAllSessionsForUser(reset.username);
+      await deletePasswordReset(token);
+
+      const sessionToken = await createSession(reset.username);
+      return json(
+        200,
+        {
+          username: reset.username,
+          personalRoomId: account.personalRoomId,
+          email: account.email,
+          emailVerified: account.emailVerified ?? false,
+        },
+        [setSessionCookie(sessionToken)]
+      );
     }
 
     // Irreversible: wipes every room this account owns (assets, S3 objects,

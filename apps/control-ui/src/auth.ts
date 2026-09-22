@@ -49,7 +49,7 @@ function toSessionInfo(data: any): SessionInfo {
 export async function register(
   httpApiUrl: string,
   username: string,
-  email: string | undefined,
+  email: string,
   password: string
 ): Promise<SessionInfo> {
   const res = await fetch(`${httpApiUrl}/auth/register`, {
@@ -89,6 +89,30 @@ export async function checkSession(httpApiUrl: string): Promise<SessionInfo | nu
 export async function resendVerification(httpApiUrl: string): Promise<void> {
   const res = await fetch(`${httpApiUrl}/auth/resend-verification`, { ...withCredentials, method: "POST" });
   await parseJsonOrThrow(res);
+}
+
+// Always resolves (never throws) -- the server responds 200 regardless of
+// whether the account/email exists, so there's nothing meaningful to catch.
+export async function forgotPassword(httpApiUrl: string, username: string): Promise<void> {
+  const res = await fetch(`${httpApiUrl}/auth/forgot-password`, {
+    ...withCredentials,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username }),
+  });
+  await parseJsonOrThrow(res);
+}
+
+// Consumes the token from the emailed reset link and logs the user straight
+// in with the new password, same shape as login()/register().
+export async function resetPassword(httpApiUrl: string, token: string, newPassword: string): Promise<SessionInfo> {
+  const res = await fetch(`${httpApiUrl}/auth/reset-password`, {
+    ...withCredentials,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, newPassword }),
+  });
+  return toSessionInfo(await parseJsonOrThrow(res));
 }
 
 export async function logout(httpApiUrl: string): Promise<void> {

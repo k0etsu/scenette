@@ -22,9 +22,13 @@ const ROOMS_TABLE = process.env.ROOMS_TABLE!;
 const ASSETS_TABLE = process.env.ASSETS_TABLE!;
 const ASSETS_BUCKET = process.env.ASSETS_BUCKET!;
 const EMAIL_VERIFICATIONS_TABLE = process.env.EMAIL_VERIFICATIONS_TABLE!;
+const PASSWORD_RESETS_TABLE = process.env.PASSWORD_RESETS_TABLE!;
 
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 const VERIFICATION_TTL_SECONDS = 24 * 60 * 60; // 24 hours
+// Shorter than email verification -- a password reset link grants control of
+// the account outright, so it's worth less time in an inbox/spam folder.
+const PASSWORD_RESET_TTL_SECONDS = 60 * 60; // 1 hour
 
 export interface Account {
   username: string;
@@ -50,6 +54,12 @@ export interface EmailVerification {
   token: string;
   username: string;
   email: string;
+  expiresAt: string;
+}
+
+export interface PasswordReset {
+  token: string;
+  username: string;
   expiresAt: string;
 }
 
@@ -242,6 +252,51 @@ export async function deleteAllVerificationsForUser(username: string): Promise<v
     );
     for (const item of Items) {
       await ddb.send(new DeleteCommand({ TableName: EMAIL_VERIFICATIONS_TABLE, Key: { token: item.token } }));
+    }
+    ExclusiveStartKey = LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+}
+
+export async function createPasswordReset(username: string): Promise<PasswordReset> {
+  const now = Date.now();
+  const reset: PasswordReset = {
+    token: randomUUID(),
+    username,
+    expiresAt: new Date(now + PASSWORD_RESET_TTL_SECONDS * 1000).toISOString(),
+  };
+  await ddb.send(
+    new PutCommand({
+      TableName: PASSWORD_RESETS_TABLE,
+      Item: { ...reset, ttl: Math.floor(now / 1000) + PASSWORD_RESET_TTL_SECONDS },
+    })
+  );
+  return reset;
+}
+
+export async function getPasswordReset(token: string): Promise<PasswordReset | undefined> {
+  const { Item } = await ddb.send(new GetCommand({ TableName: PASSWORD_RESETS_TABLE, Key: { token } }));
+  return Item as PasswordReset | undefined;
+}
+
+export async function deletePasswordReset(token: string): Promise<void> {
+  await ddb.send(new DeleteCommand({ TableName: PASSWORD_RESETS_TABLE, Key: { token } }));
+}
+
+// No by-username index, same rationale as deleteAllVerificationsForUser --
+// only the account-deletion cascade needs this.
+export async function deleteAllPasswordResetsForUser(username: string): Promise<void> {
+  let ExclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const { Items = [], LastEvaluatedKey } = await ddb.send(
+      new ScanCommand({
+        TableName: PASSWORD_RESETS_TABLE,
+        FilterExpression: "username = :u",
+        ExpressionAttributeValues: { ":u": username },
+        ExclusiveStartKey,
+      })
+    );
+    for (const item of Items) {
+      await ddb.send(new DeleteCommand({ TableName: PASSWORD_RESETS_TABLE, Key: { token: item.token } }));
     }
     ExclusiveStartKey = LastEvaluatedKey;
   } while (ExclusiveStartKey);

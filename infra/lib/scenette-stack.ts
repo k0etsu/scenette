@@ -153,6 +153,17 @@ export class ScenetteStack extends cdk.Stack {
       removalPolicy,
     });
 
+    // Pending password-reset tokens (see AccountsFn's /auth/forgot-password
+    // and /auth/reset-password). Same shape as email verifications, just a
+    // shorter TTL -- see PASSWORD_RESET_TTL_SECONDS in store.ts.
+    const passwordResetsTable = new dynamodb.Table(this, "PasswordResetsTable", {
+      tableName: `scenette-${envName}-password-resets`,
+      partitionKey: { name: "token", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy,
+    });
+
     // One item per placed asset: roomId+assetId as the key covers both the
     // "all assets in a room" access pattern (used by message.ts to build a
     // snapshot) and the "get one asset" pattern (move/delete) — no GSI needed.
@@ -462,6 +473,7 @@ export class ScenetteStack extends cdk.Stack {
         ASSETS_TABLE: assetsTable.tableName,
         ASSETS_BUCKET: assetsBucket.bucketName,
         EMAIL_VERIFICATIONS_TABLE: emailVerificationsTable.tableName,
+        PASSWORD_RESETS_TABLE: passwordResetsTable.tableName,
         VERIFICATION_FROM_ADDRESS: verificationFromAddress,
         // Scopes the session cookie to the whole zone so control-ui and both
         // APIs (all same-site subdomains) share it.
@@ -484,6 +496,7 @@ export class ScenetteStack extends cdk.Stack {
     roomsTable.grantReadWriteData(accountsFn);
     assetsTable.grantReadWriteData(accountsFn);
     emailVerificationsTable.grantReadWriteData(accountsFn);
+    passwordResetsTable.grantReadWriteData(accountsFn);
     // Send the verification email. SES authorizes SendEmail against every
     // identity involved -- including the recipient (a verified recipient is an
     // identity in sandbox mode) -- so scoping the resource to only the sender
@@ -545,6 +558,16 @@ export class ScenetteStack extends cdk.Stack {
     });
     httpApi.addRoutes({
       path: "/auth/resend-verification",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/forgot-password",
+      methods: [apigwv2.HttpMethod.POST],
+      integration: accountsIntegration,
+    });
+    httpApi.addRoutes({
+      path: "/auth/reset-password",
       methods: [apigwv2.HttpMethod.POST],
       integration: accountsIntegration,
     });

@@ -32,6 +32,8 @@ import {
   logout,
   redeemInvite,
   resendVerification,
+  forgotPassword,
+  resetPassword,
   listRooms,
   fetchAnnouncement,
   getRoomOwner,
@@ -50,6 +52,8 @@ const loginHint = document.getElementById("login-hint");
 const loginSubmitButton = document.getElementById("login-submit-button");
 const loginModeToggle = document.getElementById("login-mode-toggle");
 const loginToggleText = document.getElementById("login-toggle-text");
+const loginToggleRow = document.getElementById("login-toggle-row");
+const loginForgotLink = document.getElementById("login-forgot-link");
 const loginError = document.getElementById("login-error");
 const loginMessage = document.getElementById("login-message");
 const roomPickerViewEl = document.getElementById("room-picker-view");
@@ -84,7 +88,7 @@ const youtubeUrlModalEl = document.getElementById("youtube-url-modal");
 
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !loginHint ||
-  !loginSubmitButton || !loginModeToggle || !loginToggleText ||
+  !loginSubmitButton || !loginModeToggle || !loginToggleText || !loginToggleRow || !loginForgotLink ||
   !loginError || !loginMessage || !roomPickerViewEl ||
   !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
@@ -212,9 +216,23 @@ function extractMediaUrl(clipboardData: DataTransfer | null | undefined): string
 async function main(): Promise<void> {
   const { wsUrl, httpApiUrl, assetsDomain, browserSourceUrl } = await loadConfig();
 
-  let session = await checkSession(httpApiUrl);
-  if (!session) {
-    session = await promptLogin(httpApiUrl);
+  // A visit via an emailed password-reset link (?resetToken=TOKEN) skips the
+  // normal login/session check entirely -- the token itself is the
+  // authorization, and completing the form logs the user straight in with
+  // their new password (see promptPasswordReset).
+  const resetParams = new URLSearchParams(window.location.search);
+  const resetToken = resetParams.get("resetToken");
+  let session: SessionInfo;
+  if (resetToken) {
+    session = await promptPasswordReset(httpApiUrl, resetToken);
+    resetParams.delete("resetToken");
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${resetParams.toString() ? "?" + resetParams.toString() : ""}`
+    );
+  } else {
+    session = (await checkSession(httpApiUrl)) ?? (await promptLogin(httpApiUrl));
   }
 
   // A visit via a shared invite link (?invite=TOKEN) -- redeem it now that
@@ -685,24 +703,38 @@ async function main(): Promise<void> {
   }
 }
 
-// Single form, toggled between "log in" and "create an account" rather than
-// two always-visible buttons -- with both visible at once, pressing Enter
-// in the password field was ambiguous (which one does it trigger?), and the
-// register-only email field sitting between username and password broke
-// the username -> password tab order for the far more common login case.
-// Only the toggle link's click handler ever switches `mode`; the form's own
-// submit handler just reads whatever `mode` currently is.
+// Single form, toggled between "log in", "create an account", and "forgot
+// password" rather than always-visible alternatives -- with both visible at
+// once, pressing Enter in the password field was ambiguous (which one does
+// it trigger?), and the register-only email field sitting between username
+// and password broke the username -> password tab order for the far more
+// common login case. Only the toggle links' click handlers ever switch
+// `mode`; the form's own submit handler just reads whatever `mode` currently
+// is.
 function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
   return new Promise((resolve) => {
-    let mode: "login" | "register" = "login";
+    let mode: "login" | "register" | "forgot" = "login";
 
     function applyMode(): void {
       const isRegister = mode === "register";
+      const isForgot = mode === "forgot";
+      passwordInput!.style.display = isForgot ? "none" : "block";
       emailInput!.style.display = isRegister ? "block" : "none";
       loginHint!.style.display = isRegister ? "block" : "none";
-      loginSubmitButton!.textContent = isRegister ? "Create account" : "Log in";
+      loginSubmitButton!.textContent = isRegister ? "Create account" : isForgot ? "Send reset link" : "Log in";
       loginToggleText!.textContent = isRegister ? "Already have an account?" : "Don't have an account?";
       loginModeToggle!.textContent = isRegister ? "Log in" : "Create one";
+      // The create-account toggle is irrelevant mid-recovery; the forgot
+      // link itself is irrelevant while already registering.
+      // "block"/"inline-block", not "flex" -- the row's own centering comes
+      // from .login-toggle-row's text-align: center, which only centers
+      // inline-level content. flex would switch it to justify-content-based
+      // layout (default flex-start, i.e. left-aligned), and a block-level
+      // button spans the full row width with its own left-aligned text --
+      // either one silently defeats the centering.
+      loginToggleRow!.style.display = isForgot ? "none" : "block";
+      loginForgotLink!.style.display = isRegister ? "none" : "inline-block";
+      loginForgotLink!.textContent = isForgot ? "Back to log in" : "Forgot password?";
       loginError!.textContent = "";
       loginMessage!.textContent = "";
     }
@@ -714,16 +746,58 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
       applyMode();
     });
 
+    loginForgotLink!.addEventListener("click", () => {
+      mode = mode === "forgot" ? "login" : "forgot";
+      applyMode();
+    });
+
     loginForm!.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
         loginError!.textContent = "";
         loginMessage!.textContent = "";
+        if (mode === "forgot") {
+          await forgotPassword(httpApiUrl, usernameInput!.value);
+          loginMessage!.textContent = "If that account has a verified email, a reset link was sent to it.";
+          return;
+        }
         const session =
           mode === "login"
             ? await login(httpApiUrl, usernameInput!.value, passwordInput!.value)
             : // Registering logs straight in now -- no email verification step.
-              await register(httpApiUrl, usernameInput!.value, emailInput!.value || undefined, passwordInput!.value);
+              await register(httpApiUrl, usernameInput!.value, emailInput!.value, passwordInput!.value);
+        resolve(session);
+      } catch (err) {
+        loginError!.textContent = err instanceof Error ? err.message : String(err);
+      }
+    });
+  });
+}
+
+// Reached only via an emailed password-reset link (?resetToken=...) --
+// reuses the same login-form elements as promptLogin, but repurposed into a
+// single-field "set a new password" form with no mode toggling of its own.
+// Resolves with a fresh session (the server logs the user in on success),
+// same as promptLogin.
+function promptPasswordReset(httpApiUrl: string, token: string): Promise<SessionInfo> {
+  return new Promise((resolve) => {
+    usernameInput!.style.display = "none";
+    emailInput!.style.display = "none";
+    loginHint!.style.display = "none";
+    loginToggleRow!.style.display = "none";
+    loginForgotLink!.style.display = "none";
+    passwordInput!.style.display = "block";
+    passwordInput!.placeholder = "New password";
+    loginSubmitButton!.textContent = "Set new password";
+    loginError!.textContent = "";
+    loginMessage!.textContent = "";
+
+    loginForm!.addEventListener("submit", async function handleReset(event) {
+      event.preventDefault();
+      try {
+        loginError!.textContent = "";
+        const session = await resetPassword(httpApiUrl, token, passwordInput!.value);
+        loginForm!.removeEventListener("submit", handleReset);
         resolve(session);
       } catch (err) {
         loginError!.textContent = err instanceof Error ? err.message : String(err);

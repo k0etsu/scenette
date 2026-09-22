@@ -10,6 +10,7 @@ import {
   deleteS3Object,
   deleteAllSessionsForUser,
   deleteAllVerificationsForUser,
+  deleteAllPasswordResetsForUser,
   deleteAccountRow,
 } from "./store";
 
@@ -34,6 +35,7 @@ export async function deleteAccountCascade(username: string): Promise<void> {
 
   await deleteAllSessionsForUser(username);
   await deleteAllVerificationsForUser(username);
+  await deleteAllPasswordResetsForUser(username);
   await deleteAccountRow(username);
 }
 

@@ -1002,13 +1002,16 @@
       <form id="login-form">
         <input id="login-username" type="text" placeholder="Username" autocomplete="username" minlength="3" />
         <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" minlength="8" />
-        <input id="login-email" type="email" placeholder="Email (optional)" autocomplete="email" style="display: none" />
-        <div id="login-hint" style="display: none">Registering requires a username of 3+ characters and a password of 8+ characters. Email is optional.</div>
+        <input id="login-email" type="email" placeholder="Email" autocomplete="email" style="display: none" />
+        <div id="login-hint" style="display: none">Registering requires a username of 3+ characters, an email, and a password of 8+ characters.</div>
+        <button id="login-submit-button" type="submit" class="toolbar-button">Log in</button>
         <div id="login-error"></div>
         <div id="login-message"></div>
-        <button id="login-submit-button" type="submit" class="toolbar-button">Log in</button>
-        <div class="login-divider"></div>
         <div class="login-toggle-row">
+          <button type="button" id="login-forgot-link" class="login-link-button">Forgot password?</button>
+        </div>
+        <div class="login-divider"></div>
+        <div id="login-toggle-row" class="login-toggle-row">
           <span id="login-toggle-text">Don't have an account?</span>
           <button type="button" id="login-mode-toggle" class="login-link-button">Create one</button>
         </div>

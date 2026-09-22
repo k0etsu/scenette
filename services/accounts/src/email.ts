@@ -32,3 +32,33 @@ export async function sendVerificationEmail(
     })
   );
 }
+
+// resetUrlBase is the control-ui origin (APP_URL) -- unlike verification's
+// link, this one must be opened in the SPA (it needs a form to collect the
+// new password), not hit directly as an API route.
+export async function sendPasswordResetEmail(
+  email: string,
+  username: string,
+  token: string,
+  resetUrlBase: string
+): Promise<void> {
+  const resetUrl = `${resetUrlBase}/?resetToken=${encodeURIComponent(token)}`;
+  await ses.send(
+    new SendEmailCommand({
+      Source: FROM_ADDRESS,
+      Destination: { ToAddresses: [email] },
+      Message: {
+        Subject: { Data: "Reset your scenette password" },
+        Body: {
+          Text: {
+            Data:
+              `Hi ${username},\n\n` +
+              `Reset your scenette password:\n` +
+              `${resetUrl}\n\n` +
+              `This link expires in 1 hour. If you didn't request it, you can ignore this email -- your password won't change.\n`,
+          },
+        },
+      },
+    })
+  );
+}

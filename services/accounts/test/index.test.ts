@@ -26,6 +26,9 @@ vi.mock("../src/store", () => ({
   getVerification: vi.fn(),
   deleteVerification: vi.fn(),
   markEmailVerified: vi.fn(),
+  createPasswordReset: vi.fn(),
+  getPasswordReset: vi.fn(),
+  deletePasswordReset: vi.fn(),
   createInvite: vi.fn(),
   getInvite: vi.fn(),
   redeemInvite: vi.fn(),
@@ -37,6 +40,7 @@ vi.mock("../src/cascade", () => ({
 }));
 vi.mock("../src/email", () => ({
   sendVerificationEmail: vi.fn(),
+  sendPasswordResetEmail: vi.fn(),
 }));
 
 import { handler } from "../src/index";
@@ -107,7 +111,7 @@ describe("POST /auth/register", () => {
     expect(jsonBody(res).error).toMatch(/password/);
   });
 
-  it("rejects an invalid email when one is provided", async () => {
+  it("rejects an invalid email", async () => {
     const res: any = await handler(
       event("POST /auth/register", { body: JSON.stringify({ username: "alice", email: "not-an-email", password: "password123" }) }),
       {} as any,
@@ -117,30 +121,18 @@ describe("POST /auth/register", () => {
     expect(jsonBody(res).error).toMatch(/email/);
   });
 
-  it("allows registering with no email -- creates no room and starts no verification", async () => {
-    vi.mocked(store.createAccount).mockResolvedValue(true);
-    vi.mocked(store.createSession).mockResolvedValue("session-token");
-    const email = await import("../src/email");
-
+  it("rejects registering with no email -- password recovery depends on every account having one", async () => {
     const res: any = await handler(
       event("POST /auth/register", { body: JSON.stringify({ username: "alice", password: "password123" }) }),
       {} as any,
       undefined as any
     );
-    expect(res.statusCode).toBe(201);
-    expect(store.createAccount).toHaveBeenCalledWith(
-      expect.objectContaining({ username: "alice", email: undefined, emailVerified: false })
-    );
-    // No room until an email is verified.
-    expect(store.putMembership).not.toHaveBeenCalled();
-    expect(store.createVerification).not.toHaveBeenCalled();
-    expect(email.sendVerificationEmail).not.toHaveBeenCalled();
-    const body = jsonBody(res);
-    expect(body.personalRoomId).toBeUndefined();
-    expect(body.emailVerified).toBe(false);
+    expect(res.statusCode).toBe(400);
+    expect(jsonBody(res).error).toMatch(/email/);
+    expect(store.createAccount).not.toHaveBeenCalled();
   });
 
-  it("creates the account, logs in, and starts verification when an email is supplied -- but still no room yet", async () => {
+  it("creates the account, logs in, and starts verification -- but still no room yet", async () => {
     vi.mocked(store.createAccount).mockResolvedValue(true);
     vi.mocked(store.createSession).mockResolvedValue("session-token");
     vi.mocked(store.createVerification).mockResolvedValue({
@@ -983,6 +975,139 @@ describe("POST /auth/resend-verification", () => {
     );
     expect(res.statusCode).toBe(200);
     expect(email.sendVerificationEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /auth/forgot-password", () => {
+  it("requires a username but no session", async () => {
+    const res: any = await handler(
+      event("POST /auth/forgot-password", { body: JSON.stringify({}) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("sends a reset email when the account has a verified email", async () => {
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "a@b.com",
+      emailVerified: true,
+      personalRoomId: "room1",
+      createdAt: "t",
+    });
+    vi.mocked(store.createPasswordReset).mockResolvedValue({
+      token: "rtok",
+      username: "alice",
+      expiresAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    const email = await import("../src/email");
+    const res: any = await handler(
+      event("POST /auth/forgot-password", { body: JSON.stringify({ username: "alice" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(email.sendPasswordResetEmail).toHaveBeenCalledWith("a@b.com", "alice", "rtok", "https://api.test.example.com");
+  });
+
+  it("responds 200 with no email sent for an unknown username (no enumeration)", async () => {
+    vi.mocked(store.getAccount).mockResolvedValue(undefined);
+    const email = await import("../src/email");
+    const res: any = await handler(
+      event("POST /auth/forgot-password", { body: JSON.stringify({ username: "nobody" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(store.createPasswordReset).not.toHaveBeenCalled();
+    expect(email.sendPasswordResetEmail).not.toHaveBeenCalled();
+  });
+
+  it("responds 200 with no email sent for an account with an unverified email", async () => {
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "a@b.com",
+      emailVerified: false,
+      createdAt: "t",
+    });
+    const res: any = await handler(
+      event("POST /auth/forgot-password", { body: JSON.stringify({ username: "alice" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(store.createPasswordReset).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /auth/reset-password", () => {
+  it("rejects a too-short new password", async () => {
+    const res: any = await handler(
+      event("POST /auth/reset-password", { body: JSON.stringify({ token: "rtok", newPassword: "short" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("rejects an unknown or expired token", async () => {
+    vi.mocked(store.getPasswordReset).mockResolvedValue(undefined);
+    const res: any = await handler(
+      event("POST /auth/reset-password", { body: JSON.stringify({ token: "bogus", newPassword: "newpassword123" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+    expect(store.updateAccountPassword).not.toHaveBeenCalled();
+  });
+
+  it("rejects an expired token", async () => {
+    vi.mocked(store.getPasswordReset).mockResolvedValue({
+      token: "rtok",
+      username: "alice",
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
+    const res: any = await handler(
+      event("POST /auth/reset-password", { body: JSON.stringify({ token: "rtok", newPassword: "newpassword123" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(400);
+    expect(store.updateAccountPassword).not.toHaveBeenCalled();
+  });
+
+  it("updates the password, revokes all sessions, consumes the token, and logs the user in", async () => {
+    vi.mocked(store.getPasswordReset).mockResolvedValue({
+      token: "rtok",
+      username: "alice",
+      expiresAt: new Date(Date.now() + 1000).toISOString(),
+    });
+    vi.mocked(store.getAccount).mockResolvedValue({
+      username: "alice",
+      passwordHash: "h",
+      passwordSalt: "s",
+      email: "a@b.com",
+      emailVerified: true,
+      personalRoomId: "room1",
+      createdAt: "t",
+    });
+    vi.mocked(store.createSession).mockResolvedValue("fresh-token");
+    const res: any = await handler(
+      event("POST /auth/reset-password", { body: JSON.stringify({ token: "rtok", newPassword: "newpassword123" }) }),
+      {} as any,
+      undefined as any
+    );
+    expect(res.statusCode).toBe(200);
+    expect(store.updateAccountPassword).toHaveBeenCalledWith("alice", expect.any(String), expect.any(String));
+    expect(store.deleteAllSessionsForUser).toHaveBeenCalledWith("alice");
+    expect(store.deletePasswordReset).toHaveBeenCalledWith("rtok");
+    expect(jsonBody(res).username).toBe("alice");
+    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=fresh-token")]);
   });
 });
 
