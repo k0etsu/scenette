@@ -393,7 +393,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       if (account?.email && account.emailVerified) {
         const reset = await createPasswordReset(username);
         try {
-          await sendPasswordResetEmail(account.email, username, reset.token, apiBaseUrl(event));
+          // Unlike the verify link (an API route opened directly), this link
+          // must open in the SPA -- it needs a form to collect the new
+          // password -- so it points at APP_URL (control-ui), not the API's
+          // own domain.
+          await sendPasswordResetEmail(account.email, username, reset.token, APP_URL!);
         } catch (err) {
           // Same rationale as register's verification send -- a failed send
           // must not fail (or leak account state via) the request.

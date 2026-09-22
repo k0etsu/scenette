@@ -1010,7 +1010,7 @@ describe("POST /auth/forgot-password", () => {
       undefined as any
     );
     expect(res.statusCode).toBe(200);
-    expect(email.sendPasswordResetEmail).toHaveBeenCalledWith("a@b.com", "alice", "rtok", "https://api.test.example.com");
+    expect(email.sendPasswordResetEmail).toHaveBeenCalledWith("a@b.com", "alice", "rtok", "https://app.test.example.com");
   });
 
   it("responds 200 with no email sent for an unknown username (no enumeration)", async () => {

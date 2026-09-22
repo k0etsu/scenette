@@ -30,10 +30,16 @@ export default defineConfig({
       SESSIONS_TABLE: "test-sessions",
       MEMBERSHIPS_TABLE: "test-memberships",
       EMAIL_VERIFICATIONS_TABLE: "test-email-verifications",
+      PASSWORD_RESETS_TABLE: "test-password-resets",
+      INVITES_TABLE: "test-invites",
       VERIFICATION_FROM_ADDRESS: "noreply@test.example.com",
       HTTP_API_URL: "https://api.test.example.com",
       ASSETS_BUCKET: "test-assets-bucket",
       ROOM_STORAGE_QUOTA_BYTES: "1000",
+      // The password-reset link opens in the SPA (it needs a form to collect
+      // the new password), so it points here rather than at the API's own
+      // domain -- see index.ts's POST /auth/forgot-password.
+      APP_URL: "https://app.test.example.com",
     },
   },
 });
