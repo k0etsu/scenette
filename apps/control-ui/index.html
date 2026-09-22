@@ -844,19 +844,66 @@
       .login-link-button:hover {
         text-decoration: underline;
       }
-      #login-error {
-        color: #ff6b6b;
-        font-size: 13px;
-        min-height: 16px;
-      }
-      #login-message {
-        color: #4da3ff;
-        font-size: 13px;
-        min-height: 16px;
-      }
       #login-hint {
         color: #888;
         font-size: 12px;
+      }
+      #toast-container {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        align-items: center;
+        z-index: 1000;
+        pointer-events: none;
+      }
+      .toast {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        max-width: min(90vw, 420px);
+        padding: 10px 14px;
+        border-radius: 6px;
+        background: #26272e;
+        border: 1px solid #444;
+        border-left: 3px solid #4da3ff;
+        color: #eee;
+        font-size: 13px;
+        line-height: 1.4;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+        pointer-events: auto;
+        animation: toast-in 0.15s ease-out;
+      }
+      .toast-error {
+        border-left-color: #ff6b6b;
+      }
+      .toast-text {
+        flex: 1;
+      }
+      .toast-close {
+        background: none;
+        border: none;
+        color: #999;
+        cursor: pointer;
+        padding: 0;
+        font-size: 13px;
+        line-height: 1;
+      }
+      .toast-close:hover {
+        color: #eee;
+      }
+      @keyframes toast-in {
+        from {
+          opacity: 0;
+          transform: translateY(-6px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
       }
       #room-picker-view {
         display: none;
@@ -1005,8 +1052,6 @@
         <input id="login-email" type="email" placeholder="Email" autocomplete="email" style="display: none" />
         <div id="login-hint" style="display: none">Registering requires a username of 3+ characters, an email, and a password of 8+ characters.</div>
         <button id="login-submit-button" type="submit" class="toolbar-button">Log in</button>
-        <div id="login-error"></div>
-        <div id="login-message"></div>
         <div class="login-toggle-row">
           <button type="button" id="login-forgot-link" class="login-link-button">Forgot password?</button>
         </div>

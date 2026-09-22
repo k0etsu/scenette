@@ -24,6 +24,7 @@ import { YoutubeUrlModal } from "./youtubeUrlModal";
 import { RoomPicker } from "./roomPicker";
 import { StreamPreviewPanel } from "./streamPreview";
 import { measureTextBoxSize } from "./textMeasure";
+import { showToast } from "./toast";
 import {
   register,
   login,
@@ -54,8 +55,6 @@ const loginModeToggle = document.getElementById("login-mode-toggle");
 const loginToggleText = document.getElementById("login-toggle-text");
 const loginToggleRow = document.getElementById("login-toggle-row");
 const loginForgotLink = document.getElementById("login-forgot-link");
-const loginError = document.getElementById("login-error");
-const loginMessage = document.getElementById("login-message");
 const roomPickerViewEl = document.getElementById("room-picker-view");
 
 const canvasContainer = document.getElementById("canvas-container");
@@ -89,7 +88,7 @@ const youtubeUrlModalEl = document.getElementById("youtube-url-modal");
 if (
   !loginView || !appView || !loginForm || !usernameInput || !emailInput || !passwordInput || !loginHint ||
   !loginSubmitButton || !loginModeToggle || !loginToggleText || !loginToggleRow || !loginForgotLink ||
-  !loginError || !loginMessage || !roomPickerViewEl ||
+  !roomPickerViewEl ||
   !canvasContainer || !canvasInner || !objectsPanel || !propertiesPanel || !streamPreviewPanelEl ||
   !streamPreviewOverlayEl || !streamPreviewBorderEl || !streamSettingsModalEl || !soundPanelEl || !connectedUsersPanelEl ||
   !variablesPanelEl || !uploadInput || !uploadIndicatorEl || !manageAccessButton || !accessModalEl || !settingsModalEl ||
@@ -735,8 +734,6 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
       loginToggleRow!.style.display = isForgot ? "none" : "block";
       loginForgotLink!.style.display = isRegister ? "none" : "inline-block";
       loginForgotLink!.textContent = isForgot ? "Back to log in" : "Forgot password?";
-      loginError!.textContent = "";
-      loginMessage!.textContent = "";
     }
 
     applyMode(); // sync with mode's initial value, independent of the HTML's own static defaults
@@ -754,11 +751,9 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
     loginForm!.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        loginError!.textContent = "";
-        loginMessage!.textContent = "";
         if (mode === "forgot") {
           await forgotPassword(httpApiUrl, usernameInput!.value);
-          loginMessage!.textContent = "If that account has a verified email, a reset link was sent to it.";
+          showToast("If that account has a verified email, a reset link was sent to it.");
           return;
         }
         const session =
@@ -768,7 +763,7 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
               await register(httpApiUrl, usernameInput!.value, emailInput!.value, passwordInput!.value);
         resolve(session);
       } catch (err) {
-        loginError!.textContent = err instanceof Error ? err.message : String(err);
+        showToast(err instanceof Error ? err.message : String(err), "error");
       }
     });
   });
@@ -789,18 +784,15 @@ function promptPasswordReset(httpApiUrl: string, token: string): Promise<Session
     passwordInput!.style.display = "block";
     passwordInput!.placeholder = "New password";
     loginSubmitButton!.textContent = "Set new password";
-    loginError!.textContent = "";
-    loginMessage!.textContent = "";
 
     loginForm!.addEventListener("submit", async function handleReset(event) {
       event.preventDefault();
       try {
-        loginError!.textContent = "";
         const session = await resetPassword(httpApiUrl, token, passwordInput!.value);
         loginForm!.removeEventListener("submit", handleReset);
         resolve(session);
       } catch (err) {
-        loginError!.textContent = err instanceof Error ? err.message : String(err);
+        showToast(err instanceof Error ? err.message : String(err), "error");
       }
     });
   });
