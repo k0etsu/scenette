@@ -772,8 +772,10 @@ function promptLogin(httpApiUrl: string): Promise<SessionInfo> {
 // Reached only via an emailed password-reset link (?resetToken=...) --
 // reuses the same login-form elements as promptLogin, but repurposed into a
 // single-field "set a new password" form with no mode toggling of its own.
-// Resolves with a fresh session (the server logs the user in on success),
-// same as promptLogin.
+// The server deliberately doesn't log the user in on a successful reset (see
+// POST /auth/reset-password), so this hands off to a fresh promptLogin
+// instead of resolving with a session directly -- the user proves they know
+// the new password by logging in with it, same as anyone else.
 function promptPasswordReset(httpApiUrl: string, token: string): Promise<SessionInfo> {
   return new Promise((resolve) => {
     usernameInput!.style.display = "none";
@@ -788,9 +790,16 @@ function promptPasswordReset(httpApiUrl: string, token: string): Promise<Session
     loginForm!.addEventListener("submit", async function handleReset(event) {
       event.preventDefault();
       try {
-        const session = await resetPassword(httpApiUrl, token, passwordInput!.value);
+        await resetPassword(httpApiUrl, token, passwordInput!.value);
         loginForm!.removeEventListener("submit", handleReset);
-        resolve(session);
+        // promptLogin's own applyMode() never touches usernameInput's
+        // display (it's always visible in every one of its modes), so it
+        // has to be restored here -- this function is the only place that
+        // ever hides it.
+        usernameInput!.style.display = "block";
+        passwordInput!.placeholder = "Password";
+        showToast("Password updated -- log in with your new password.");
+        resolve(promptLogin(httpApiUrl));
       } catch (err) {
         showToast(err instanceof Error ? err.message : String(err), "error");
       }

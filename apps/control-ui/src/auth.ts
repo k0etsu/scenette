@@ -103,16 +103,17 @@ export async function forgotPassword(httpApiUrl: string, username: string): Prom
   await parseJsonOrThrow(res);
 }
 
-// Consumes the token from the emailed reset link and logs the user straight
-// in with the new password, same shape as login()/register().
-export async function resetPassword(httpApiUrl: string, token: string, newPassword: string): Promise<SessionInfo> {
+// Consumes the token from the emailed reset link and sets the new password.
+// Deliberately does NOT log the user in -- they log in fresh with it
+// afterward, same as anyone else.
+export async function resetPassword(httpApiUrl: string, token: string, newPassword: string): Promise<void> {
   const res = await fetch(`${httpApiUrl}/auth/reset-password`, {
     ...withCredentials,
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ token, newPassword }),
   });
-  return toSessionInfo(await parseJsonOrThrow(res));
+  await parseJsonOrThrow(res);
 }
 
 export async function logout(httpApiUrl: string): Promise<void> {

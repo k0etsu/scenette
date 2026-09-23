@@ -408,10 +408,11 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
     }
 
     // Public: the token from the emailed link is the sole authorization.
-    // Consuming it logs the user straight in (like register/login), and
-    // revokes every existing session first -- the whole point of a password
-    // reset is regaining control from a state where the old password (and
-    // anything it authorized) may be compromised.
+    // Revokes every existing session -- the whole point of a password reset
+    // is regaining control from a state where the old password (and anything
+    // it authorized) may be compromised -- but deliberately does NOT log the
+    // user in: they prove they know the new password by logging in fresh
+    // with it, same as anyone else.
     case "POST /auth/reset-password": {
       const token = body.token;
       const newPassword = body.newPassword;
@@ -436,17 +437,7 @@ export const handler: APIGatewayProxyHandlerV2 = async (event) => {
       await deleteAllSessionsForUser(reset.username);
       await deletePasswordReset(token);
 
-      const sessionToken = await createSession(reset.username);
-      return json(
-        200,
-        {
-          username: reset.username,
-          personalRoomId: account.personalRoomId,
-          email: account.email,
-          emailVerified: account.emailVerified ?? false,
-        },
-        [setSessionCookie(sessionToken)]
-      );
+      return json(200, { ok: true });
     }
 
     // Irreversible: wipes every room this account owns (assets, S3 objects,

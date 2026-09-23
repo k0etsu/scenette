@@ -1081,7 +1081,7 @@ describe("POST /auth/reset-password", () => {
     expect(store.updateAccountPassword).not.toHaveBeenCalled();
   });
 
-  it("updates the password, revokes all sessions, consumes the token, and logs the user in", async () => {
+  it("updates the password, revokes all sessions, and consumes the token -- but does NOT log the user in", async () => {
     vi.mocked(store.getPasswordReset).mockResolvedValue({
       token: "rtok",
       username: "alice",
@@ -1096,7 +1096,6 @@ describe("POST /auth/reset-password", () => {
       personalRoomId: "room1",
       createdAt: "t",
     });
-    vi.mocked(store.createSession).mockResolvedValue("fresh-token");
     const res: any = await handler(
       event("POST /auth/reset-password", { body: JSON.stringify({ token: "rtok", newPassword: "newpassword123" }) }),
       {} as any,
@@ -1106,8 +1105,9 @@ describe("POST /auth/reset-password", () => {
     expect(store.updateAccountPassword).toHaveBeenCalledWith("alice", expect.any(String), expect.any(String));
     expect(store.deleteAllSessionsForUser).toHaveBeenCalledWith("alice");
     expect(store.deletePasswordReset).toHaveBeenCalledWith("rtok");
-    expect(jsonBody(res).username).toBe("alice");
-    expect(res.cookies).toEqual([expect.stringContaining("scenette_session=fresh-token")]);
+    // No session is minted and no cookie is set -- the user must log in fresh.
+    expect(store.createSession).not.toHaveBeenCalled();
+    expect(res.cookies).toBeUndefined();
   });
 });
 
